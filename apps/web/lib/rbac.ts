@@ -50,6 +50,7 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   edit_customer:             ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   set_credit_limit:          ['OWNER_ADMIN'],
   record_customer_payment:   ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
+  view_customer_outstanding: ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
   merge_customers:           ['OWNER_ADMIN'],
   export_customer_pii:       ['OWNER_ADMIN'],
 

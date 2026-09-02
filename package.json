@@ -14,13 +14,14 @@
     "typecheck": "npm run typecheck --workspace=apps/api && npm run typecheck --workspace=apps/web",
     "smoke": "node apps/api/scripts/smoke-test.mjs",
     "lint": "npm run lint --workspace=apps/api && npm run lint --workspace=apps/web",
-    "test": "node tests/tax-properties.mjs && node apps/api/scripts/smoke-test.mjs && node tests/regression.mjs && node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
+    "test": "node tests/tax-properties.mjs && node apps/api/scripts/smoke-test.mjs && node tests/regression.mjs && node tests/workflows.mjs && node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
     "test:unit": "node tests/tax-properties.mjs",
     "test:api": "node apps/api/scripts/smoke-test.mjs",
     "test:regression": "node tests/regression.mjs",
     "test:pdf": "node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
     "test:ui": "node tests/uitest.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run build && npm test"
+    "verify": "npm run typecheck && npm run lint && npm run build && npm test",
+    "test:workflows": "node tests/workflows.mjs"
   },
   "devDependencies": {
     "kysely-codegen": "^0.20.0"

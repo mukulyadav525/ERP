@@ -64,6 +64,11 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   edit_customer:             ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   set_credit_limit:          ['OWNER_ADMIN'],              // 6.1: limit set by Admin
   record_customer_payment:   ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
+  // Receivables are the accountant's job, and the vendor payables list is already
+  // theirs. Leaving the customer side behind `view_customers` meant an accountant
+  // could RECORD a payment against a customer but could not list who owed
+  // anything — the one screen collections actually starts from.
+  view_customer_outstanding: ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
   merge_customers:           ['OWNER_ADMIN'],
   export_customer_pii:       ['OWNER_ADMIN'],              // 15: PII export is Admin-only
 

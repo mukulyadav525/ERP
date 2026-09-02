@@ -197,7 +197,7 @@ export default async function customersRoutes(app: FastifyInstance) {
   }));
 
   /** 6.2 — outstanding list with ageing, which is what the reminders run off. */
-  app.get('/outstanding/list', guarded('view_customers', async ({ db: trx, req }) => {
+  app.get('/outstanding/list', guarded('view_customer_outstanding', async ({ db: trx, req }) => {
     const q = (req.query ?? {}) as Record<string, string | undefined>;
     return (await sql<any>`
       WITH latest AS (
