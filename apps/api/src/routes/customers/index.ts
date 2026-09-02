@@ -7,9 +7,8 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, str, optionalStr, num, bool, oneOf, limit as clampLimit, writeBranch,
-} from '../../lib/http.js';
-import { badRequest, conflict, notFound } from '../../lib/errors.js';
+  guarded, uuid, str, optionalStr, num, bool, oneOf, limit as clampLimit, writeBranch } from '../../lib/http.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import { round2 } from '../../lib/tax.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
@@ -89,8 +88,7 @@ export default async function customersRoutes(app: FastifyInstance) {
       loyalty: loyalty.rows,
       lifetime_value: round2(invoices.rows
         .filter((i: any) => i.status === 'FINAL')
-        .reduce((s: number, i: any) => s + Number(i.grand_total), 0)),
-    };
+        .reduce((s: number, i: any) => s + Number(i.grand_total), 0)) };
   }));
 
   app.post('/', guarded('edit_customer', async ({ session, db: trx, req }) => {
@@ -120,7 +118,7 @@ export default async function customersRoutes(app: FastifyInstance) {
     `.execute(trx)).rows[0];
   }));
 
-  app.put('/:id', guarded('edit_customer', async ({ session, db: trx, req }) => {
+  app.put('/:id', guarded('edit_customer', async ({ db: trx, req }) => {
     const id = uuid((req.params as any).id, 'customer_id');
     const body = (req.body ?? {}) as Record<string, unknown>;
     const before = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${id}`.execute(trx)).rows[0];
@@ -186,16 +184,14 @@ export default async function customersRoutes(app: FastifyInstance) {
     // a credit sale is being rung up at another cannot overwrite it.
     const posted = await postCredit(trx, {
       customerId: id, branchId, entryType: 'PAYMENT_RECEIVED',
-      amount: -amount, refTable: 'manual',
-    });
+      amount: -amount, refTable: 'manual' });
     const balanceAfter = posted.balance_after;
     const entry = { entry_id: posted.entry_id, amount: -amount, balance_after: balanceAfter };
 
     if (customer.phone) {
       await queueMessage(trx, {
         to_phone: customer.phone, customer_id: id, message_type: 'DUE_REMINDER',
-        body: `Payment of ₹${amount.toFixed(2)} received. Your outstanding balance is now ₹${balanceAfter.toFixed(2)}. Thank you.`,
-      });
+        body: `Payment of ₹${amount.toFixed(2)} received. Your outstanding balance is now ₹${balanceAfter.toFixed(2)}. Thank you.` });
     }
     return { ...entry, balance_owed: balanceAfter };
   }));
@@ -249,8 +245,7 @@ export default async function customersRoutes(app: FastifyInstance) {
     for (const c of rows) {
       await queueMessage(trx, {
         to_phone: c.phone, customer_id: c.customer_id, message_type: 'DUE_REMINDER',
-        body: `Namaste ${c.name}, a balance of ₹${Number(c.balance_after).toFixed(2)} is outstanding on your account. Please settle it at your convenience. Thank you.`,
-      });
+        body: `Namaste ${c.name}, a balance of ₹${Number(c.balance_after).toFixed(2)} is outstanding on your account. Please settle it at your convenience. Thank you.` });
     }
     return { ok: true, queued: rows.length };
   }));

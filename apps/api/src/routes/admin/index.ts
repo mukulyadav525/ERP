@@ -6,12 +6,11 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, optionalUuid, str, optionalStr, oneOf, limit as clampLimit,
-} from '../../lib/http.js';
+  guarded, uuid, optionalUuid, str, optionalStr, oneOf, limit as clampLimit } from '../../lib/http.js';
 import { badRequest, notFound } from '../../lib/errors.js';
-import { SETTING_DEFAULTS, loadSettings, type SettingKey } from '../../lib/settings.js';
+import { SETTING_DEFAULTS, loadSettings } from '../../lib/settings.js';
 import { audit } from '../../lib/audit.js';
-import { BUSINESS_PROFILE_SETTING, DEFAULT_BUSINESS_PROFILE, normaliseProfile } from '../../lib/pdf/index.js';
+import { BUSINESS_PROFILE_SETTING, normaliseProfile } from '../../lib/pdf/index.js';
 
 /**
  * The catalogue the Admin Settings screen renders from. Keeping the labels, types
@@ -111,8 +110,7 @@ const SETTING_META: Record<string, {
   backup_frequency_hours:     { label: 'Backup frequency (hours)', group: 'Compliance', type: 'number', per_branch: false, min: 1, max: 168,
     help: 'How often an automatic cloud backup is taken.' },
   einvoice_enabled:           { label: 'E-invoicing (IRN)', group: 'Compliance', type: 'boolean', per_branch: false,
-    help: 'Turn on once turnover crosses the e-invoicing threshold. Invoices then carry an IRN.' },
-};
+    help: 'Turn on once turnover crosses the e-invoicing threshold. Invoices then carry an IRN.' } };
 
 export default async function adminRoutes(app: FastifyInstance) {
   /** The whole settings screen in one call: definition, default, and the effective
@@ -144,8 +142,7 @@ export default async function adminRoutes(app: FastifyInstance) {
                         : (SETTING_DEFAULTS as any)[key],
         is_overridden_at_branch: Boolean(branchRow),
         updated_at: (branchRow ?? chainRow)?.updated_at ?? null,
-        updated_by_name: (branchRow ?? chainRow)?.updated_by_name ?? null,
-      };
+        updated_by_name: (branchRow ?? chainRow)?.updated_by_name ?? null };
     });
   }));
 
@@ -340,8 +337,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       // 15 asks for a *documented* disaster-recovery test, not just backups that
       // exist — an untested backup is a guess, so this is surfaced, not buried.
       restore_test_overdue: !lastTested
-        || (Date.now() - new Date(lastTested.restore_tested_at).getTime()) > 90 * 86_400_000,
-    };
+        || (Date.now() - new Date(lastTested.restore_tested_at).getTime()) > 90 * 86_400_000 };
   }));
 
   app.post('/backups', guarded('cloud_backup_restore', async ({ session, db: trx, req }) => {

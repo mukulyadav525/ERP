@@ -249,7 +249,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
     if (mrp < sellingPrice) throw badRequest('MRP cannot be lower than the selling price.');
 
     const settings = await loadSettings(trx, session.branch_id);
-    let branchId: string | null = optionalUuid(body.branch_id, 'branch_id');
+    const branchId: string | null = optionalUuid(body.branch_id, 'branch_id');
     if (branchId && !settings.allow_branch_price_override) {
       throw badRequest('Branch-level price overrides are switched off. Turn on "Allow branch price override" in Admin Settings first.');
     }

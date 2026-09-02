@@ -21,15 +21,13 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, str, optionalStr, num, bool, oneOf,
-  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf,
-} from '../../lib/http.js';
+  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';
 import {
   priceBasket, rawLinesFromStored, assertPaymentsSettle,
-  type PreparedLine, type PricedBasket, type ParsedPayment,
-} from '../../lib/billing-engine.js';
+  type PricedBasket, type ParsedPayment } from '../../lib/billing-engine.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
@@ -40,7 +38,6 @@ import { creditBalance, postCredit } from '../../lib/ledger.js';
 
 const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS'] as const;
 const INVOICE_TYPES = ['GST', 'NON_GST'] as const;
-const PRICE_TYPES = ['TAX_INCLUSIVE', 'TAX_EXCLUSIVE'] as const;
 
 /**
  * Consumes a single-use override grant issued by /auth/verify-override-pin.
@@ -132,8 +129,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       ...invoice,
       lines: maskCost(lines.rows, showCost, { keepRate: true }),
       payments: payments.rows,
-      returns: returns.rows,
-    };
+      returns: returns.rows };
   }));
 
   // ── Invoice PDF (3.6 printed + WhatsApp PDF, Sections 58-64) ──────────────
@@ -187,10 +183,11 @@ export default async function billingRoutes(app: FastifyInstance) {
     const label = invoice.status === 'DRAFT'
       ? `Draft-${String(id).slice(0, 8)}`
       : (invoice.invoice_number ?? id);
-    reply.header('Content-Type', 'application/pdf');
-    reply.header('Content-Disposition',
-      `inline; filename="${(invoice.invoice_type === 'GST' ? 'Invoice-' : 'Bill-')}${String(label).replace(/[^\w.-]/g, '_')}.pdf"`);
-    return reply.send(pdf);
+    return reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition',
+        `inline; filename="${(invoice.invoice_type === 'GST' ? 'Invoice-' : 'Bill-')}${String(label).replace(/[^\w.-]/g, '_')}.pdf"`)
+      .send(pdf);
   }));
 
   // ── Commit a sale ─────────────────────────────────────────────────────────
@@ -253,11 +250,9 @@ export default async function billingRoutes(app: FastifyInstance) {
       branchId, invoiceType, rawLines, settings,
       branchStateCode: branch.state_code,
       placeOfSupplyStateCode: placeOfSupply,
-      applyCashRounding: bool(body.apply_cash_rounding, 'apply_cash_rounding', false),
-    });
+      applyCashRounding: bool(body.apply_cash_rounding, 'apply_cash_rounding', false) });
     const prepared = priced.lines;
     const totals = priced.totals;
-    const interstate = priced.interstate;
 
     // ── 3.4 discount ceiling ────────────────────────────────────────────────
     // Measured against the CATALOG value of the basket, not against what was
@@ -296,8 +291,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       if (available < line.computed.base_unit_qty) {
         conflicts.push({
           product_id: line.product_id, product_name: line.product_name,
-          requested: line.computed.base_unit_qty, available,
-        });
+          requested: line.computed.base_unit_qty, available });
       }
     }
 
@@ -337,8 +331,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     const payments = arrayOf(body.payments ?? [], 'payments', (p) => ({
       method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
       amount: num(p.amount, 'payments[].amount', { min: 0 }),
-      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }),
-    }), { min: 1, max: 6 });
+      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: 1, max: 6 });
 
     assertPaymentsSettle(payments, totals.payable);
 
@@ -601,8 +594,7 @@ export default async function billingRoutes(app: FastifyInstance) {
         const posted = await postCredit(trx, {
           customerId: customer.customer_id, branchId, entryType: 'SALE_ON_CREDIT',
           amount: p.amount, refTable: 'invoices', refId: invoice.invoice_id,
-          enforceLimit: !creditOverrideBy,
-        });
+          enforceLimit: !creditOverrideBy });
         if (posted.over_limit) {
           throw conflict(`${customer.name} would go to ₹${posted.balance_after.toFixed(2)} against a limit of ₹${posted.credit_limit.toFixed(2)}. A manager PIN is needed to allow it.`);
         }
@@ -640,8 +632,7 @@ export default async function billingRoutes(app: FastifyInstance) {
           customer_id: customer.customer_id,
           invoice_id: invoice.invoice_id,
           message_type: 'INVOICE_PDF',
-          body: `${branch.name}: invoice ${invoiceNumber} for ₹${totals.payable.toFixed(2)}. Thank you for your purchase.`,
-        });
+          body: `${branch.name}: invoice ${invoiceNumber} for ₹${totals.payable.toFixed(2)}. Thank you for your purchase.` });
       }
     }
 
@@ -652,8 +643,7 @@ export default async function billingRoutes(app: FastifyInstance) {
 
     await audit(trx, session, 'INVOICE_FINALIZED', 'invoices', invoice.invoice_id, {
       after: { invoice_number: invoiceNumber, grand_total: totals.grand_total,
-               payable: totals.payable, from_draft: Boolean(opts.draftId) },
-    });
+               payable: totals.payable, from_draft: Boolean(opts.draftId) } });
 
     return {
       ...invoice,
@@ -662,8 +652,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       stock_conflicts: conflicts,
       warning: conflicts.length
         ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.'
-        : null,
-    };
+        : null };
   }
 
   /**
@@ -691,7 +680,7 @@ export default async function billingRoutes(app: FastifyInstance) {
   // ══════════════════════════════════════════════════════════════════════════
 
   /** Loads a draft with its lines and payments, re-priced from scratch. */
-  async function loadDraft(trx: Tx, id: string, session: Session) {
+  async function loadDraft(trx: Tx, id: string) {
     const draft = (await sql<any>`
       SELECT i.*, b.name AS branch_name, b.state_code AS branch_state_code, b.gstin AS branch_gstin,
              c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
@@ -735,8 +724,7 @@ export default async function billingRoutes(app: FastifyInstance) {
           settings,
           branchStateCode: draft.branch_state_code,
           placeOfSupplyStateCode: draft.place_of_supply_state_code,
-          applyCashRounding: Number(draft.round_off) !== 0,
-        })
+          applyCashRounding: Number(draft.round_off) !== 0 })
       : null;
 
     return { draft, storedLines, payments, settings, priced };
@@ -795,8 +783,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     return arrayOf(body.payments ?? [], 'payments', (p) => ({
       method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
       amount: num(p.amount, 'payments[].amount', { min: 0, max: 1e9 }),
-      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }),
-    }), { min: required ? 1 : 0, max: 6 });
+      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: required ? 1 : 0, max: 6 });
   }
 
   /**
@@ -820,8 +807,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       discount_limit_pct: manager ? 100 : Number(settings.staff_discount_limit_pct),
       needs_approval_beyond_limit: !manager,
       finalize: true,
-      discard_any_draft: manager,
-    };
+      discard_any_draft: manager };
   }
 
   const draftView = (loaded: Awaited<ReturnType<typeof loadDraft>>, session: Session) => ({
@@ -830,8 +816,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     // screen must display and the figure finalisation will charge.
     totals: loaded.priced?.totals ?? {
       subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0,
-      tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
-    },
+      tax_total: 0, grand_total: 0, round_off: 0, payable: 0 },
     lines: (loaded.priced?.lines ?? []).map((l, i) => ({
       ...l.computed,
       product_id: l.product_id,
@@ -852,8 +837,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       implied_discount: l.implied_discount,
       gst_rate_pct: l.gst_rate_pct,
       batch_id: l.batch_id,
-      line_total: l.computed.line_total,
-    })),
+      line_total: l.computed.line_total })),
     payments: loaded.payments,
     catalog_value: loaded.priced?.catalog_value ?? 0,
     given_away: loaded.priced?.given_away ?? 0,
@@ -865,13 +849,11 @@ export default async function billingRoutes(app: FastifyInstance) {
     stock_warnings: (loaded.priced?.lines ?? []).map((l, i) => ({
       product_name: l.product_name,
       requested: l.computed.base_unit_qty,
-      available: Number(loaded.storedLines[i]?.available_qty ?? 0),
-    })).filter((w) => w.available < w.requested),
+      available: Number(loaded.storedLines[i]?.available_qty ?? 0) })).filter((w) => w.available < w.requested),
     payment_shortfall: round2(
       (loaded.priced?.totals.payable ?? 0) -
       loaded.payments.reduce((s: number, p: any) => s + Number(p.amount), 0),
-    ),
-  });
+    ) });
 
   // ── List drafts ───────────────────────────────────────────────────────────
   app.get('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) => {
@@ -924,8 +906,7 @@ export default async function billingRoutes(app: FastifyInstance) {
           branchId, invoiceType, rawLines, settings,
           branchStateCode: branch.state_code,
           placeOfSupplyStateCode: placeOfSupply,
-          applyCashRounding,
-        })
+          applyCashRounding })
       : null;
 
     // No invoice_number: the CHECK constraint on `invoices` permits NULL only
@@ -951,13 +932,13 @@ export default async function billingRoutes(app: FastifyInstance) {
     await audit(trx, session, 'INVOICE_DRAFT_CREATED', 'invoices', draft.invoice_id,
       { after: { lines: rawLines.length, invoice_type: invoiceType } });
 
-    return draftView(await loadDraft(trx, draft.invoice_id, session), session);
+    return draftView(await loadDraft(trx, draft.invoice_id), session);
   }));
 
   // ── Read a draft (always server-recomputed) ───────────────────────────────
   app.get('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
-    return draftView(await loadDraft(trx, id, session), session);
+    return draftView(await loadDraft(trx, id), session);
   }));
 
   // ── Edit a draft ──────────────────────────────────────────────────────────
@@ -975,7 +956,7 @@ export default async function billingRoutes(app: FastifyInstance) {
   app.put('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
     const body = (req.body ?? {}) as Record<string, any>;
-    const loaded = await loadDraft(trx, id, session);
+    const loaded = await loadDraft(trx, id);
     const { draft, settings } = loaded;
 
     const invoiceType = body.invoice_type === undefined
@@ -1006,8 +987,7 @@ export default async function billingRoutes(app: FastifyInstance) {
           branchStateCode: draft.branch_state_code,
           placeOfSupplyStateCode: placeOfSupply,
           applyCashRounding,
-          repriceFromCatalog: bool(body.reprice_from_catalog, 'reprice_from_catalog', false),
-        })
+          repriceFromCatalog: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) })
       : { lines: [], totals: { subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0,
             igst_total: 0, tax_total: 0, grand_total: 0, round_off: 0, payable: 0 },
           catalog_value: 0, given_away: 0, discount_pct: 0, interstate: false,
@@ -1030,16 +1010,15 @@ export default async function billingRoutes(app: FastifyInstance) {
     await audit(trx, session, 'INVOICE_DRAFT_UPDATED', 'invoices', id, {
       before: { grand_total: draft.grand_total, invoice_type: draft.invoice_type },
       after: { grand_total: priced.totals.grand_total, invoice_type: invoiceType,
-               repriced: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) },
-    });
+               repriced: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) } });
 
-    return draftView(await loadDraft(trx, id, session), session);
+    return draftView(await loadDraft(trx, id), session);
   }));
 
   // ── Discard a draft ───────────────────────────────────────────────────────
   app.delete('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
-    const loaded = await loadDraft(trx, id, session);
+    const loaded = await loadDraft(trx, id);
     // Somebody else's half-built bill is not yours to throw away; a manager can
     // clear an abandoned one.
     const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
@@ -1073,10 +1052,10 @@ export default async function billingRoutes(app: FastifyInstance) {
    * approval grants, and the salesperson tag.
    */
   app.post('/drafts/:id/finalize', guarded('create_invoice', async (ctx) => {
-    const { session, db: trx, req } = ctx;
+    const { db: trx, req } = ctx;
     const id = uuid((req.params as any).id, 'invoice_id');
     const body = (req.body ?? {}) as Record<string, any>;
-    const loaded = await loadDraft(trx, id, session);
+    const loaded = await loadDraft(trx, id);
     if (!loaded.storedLines.length) throw badRequest('This draft has no items on it yet.');
 
     // Payments come from the request if given, otherwise from what was saved onto
@@ -1100,8 +1079,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       sold_by_employee_id: body.sold_by_employee_id,
       discount_approval_id: body.discount_approval_id,
       negative_stock_approval_id: body.negative_stock_approval_id,
-      credit_approval_id: body.credit_approval_id,
-    }, { draftId: id });
+      credit_approval_id: body.credit_approval_id }, { draftId: id });
   }));
 
   /**
@@ -1129,8 +1107,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     return {
       accepted: known,
       still_pending: ids.filter((id) => !accepted.has(id)),
-      instructions: 'Re-post anything under still_pending to POST /api/billing/invoices with the same client_txn_id. Duplicates are ignored.',
-    };
+      instructions: 'Re-post anything under still_pending to POST /api/billing/invoices with the same client_txn_id. Duplicates are ignored.' };
   }));
 
   // ── Void (3.6: a void keeps its number, it is never reused) ────────────────
@@ -1186,8 +1163,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       await postCredit(trx, {
         customerId: invoice.customer_id, branchId: invoice.branch_id,
         entryType: 'REFUND_ADJUSTMENT', amount: -creditPaid,
-        refTable: 'invoices', refId: id,
-      });
+        refTable: 'invoices', refId: id });
     }
 
     // 2. Loyalty: take back what was earned, give back what was spent.
@@ -1233,15 +1209,13 @@ export default async function billingRoutes(app: FastifyInstance) {
     await audit(trx, session, 'INVOICE_VOIDED', 'invoices', id, {
       before: { status: invoice.status, grand_total: invoice.grand_total },
       after: { status: 'VOID', reason, credit_reversed: creditPaid, cash_reversed: cashPaid,
-               till_session_id: invoice.till_session_id },
-    });
+               till_session_id: invoice.till_session_id } });
 
     return {
       ok: true,
       credit_reversed: creditPaid,
       cash_reversed: cashPaid,
-      message: 'Invoice voided. Stock, credit, loyalty points and the till entry have all been reversed.',
-    };
+      message: 'Invoice voided. Stock, credit, loyalty points and the till entry have all been reversed.' };
   }));
 
   // ── Till sessions (3.3 / 3.3.1) ───────────────────────────────────────────
@@ -1390,8 +1364,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       expected_drawer_cash: expected,
       counted_cash: counted,
       variance: counted === null ? null : round2(counted - expected),
-      payment_breakdown: nonCash,
-    };
+      payment_breakdown: nonCash };
   }));
 
   app.post('/till-sessions/:id/close', guarded('manage_till', async ({ session, db: trx, req }) => {

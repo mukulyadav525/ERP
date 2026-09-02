@@ -19,9 +19,8 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, optionalUuid, str, optionalStr, num, oneOf,
-  resolveBranchScope, limit as clampLimit, arrayOf,
-} from '../../lib/http.js';
+  guarded, uuid, optionalUuid, str, num, oneOf,
+  resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { computeReturnLine, round2 } from '../../lib/tax.js';
@@ -93,7 +92,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
    * What is still returnable on an invoice, and whether the return window has
    * passed. The counter needs this before it can take anything back.
    */
-  app.get('/eligibility/:invoiceId', guarded('process_return', async ({ session, db: trx, req }) => {
+  app.get('/eligibility/:invoiceId', guarded('process_return', async ({ db: trx, req }) => {
     const invoiceId = uuid((req.params as any).invoiceId, 'invoice_id');
     const invoice = (await sql<any>`
       SELECT i.*, c.name AS customer_name, c.phone AS customer_phone
@@ -127,8 +126,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
       invoice: {
         invoice_id: invoice.invoice_id, invoice_number: invoice.invoice_number,
         invoice_type: invoice.invoice_type, grand_total: invoice.grand_total,
-        customer_name: invoice.customer_name, sold_at: invoice.server_received_at,
-      },
+        customer_name: invoice.customer_name, sold_at: invoice.server_received_at },
       days_since_sale: daysSince,
       // 12.3 — outside the return window an electrical or power-tool item is not
       // simply refused; it routes to a warranty claim instead.
@@ -144,10 +142,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
           warranty_months: l.warranty_months,
           route: remaining <= 0 ? 'FULLY_RETURNED'
                : withinWindow ? 'RETURN'
-               : l.warranty_months ? 'WARRANTY_CLAIM' : 'OUTSIDE_WINDOW',
-        };
-      }),
-    };
+               : l.warranty_months ? 'WARRANTY_CLAIM' : 'OUTSIDE_WINDOW' };
+      }) };
   }));
 
   app.post('/', guarded('process_return', async ({ session, db: trx, req }) => {
@@ -200,8 +196,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
     const requested = arrayOf(body.lines, 'lines', (l) => ({
       invoice_line_id: uuid(l.invoice_line_id, 'lines[].invoice_line_id'),
       qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-      condition: oneOf(l.condition ?? 'RESELLABLE', 'lines[].condition', ['RESELLABLE', 'DAMAGED'] as const),
-    }));
+      condition: oneOf(l.condition ?? 'RESELLABLE', 'lines[].condition', ['RESELLABLE', 'DAMAGED'] as const) }));
 
     const daysSince = Math.floor((Date.now() - new Date(invoice.server_received_at).getTime()) / 86_400_000);
 
@@ -234,10 +229,29 @@ export default async function returnsRoutes(app: FastifyInstance) {
     const prepared: any[] = [];
     let windowOverrideBy: string | null = null;
     for (const r of requested) {
-      // FOR UPDATE on the invoice line: without it two clerks processing the same
-      // return at the same moment both read already_returned = 0, both pass the
-      // remaining-quantity check, and the shop refunds twice. Read Committed does
-      // not save us here — the row has to be locked.
+      // Two statements, and the order is the whole point.
+      //
+      // The lock is taken FIRST, on its own. Doing it the obvious way — one query
+      // that locks the line and computes `already_returned` in a SELECT-list
+      // subquery — looks correct and is not: under READ COMMITTED, when the second
+      // transaction is finally granted the lock it re-evaluates the row's WHERE
+      // qualifiers against the new version, but the subquery in the select list
+      // still runs against the statement's ORIGINAL snapshot. So the second clerk
+      // reads already_returned = 0 even though the first clerk's return has just
+      // committed, and the shop refunds the same goods twice. (Verified: two
+      // simultaneous full returns of a 1-unit line both succeeded, and 2 units
+      // came back into stock.)
+      //
+      // Locking first and reading second gives the follow-up statement a fresh
+      // snapshot taken after the other transaction committed, so it sees the
+      // return that just happened.
+      const locked = (await sql<{ line_id: string }>`
+        SELECT line_id FROM invoice_lines
+         WHERE line_id = ${r.invoice_line_id} AND invoice_id = ${invoiceId}
+         FOR UPDATE
+      `.execute(trx)).rows[0];
+      if (!locked) throw badRequest('One of the returned lines does not belong to that invoice.');
+
       const line = (await sql<any>`
         SELECT il.*, p.name AS product_name, p.category_id,
                COALESCE(rw.window_days, ${Number(settings.return_window_days)}) AS window_days,
@@ -245,11 +259,16 @@ export default async function returnsRoutes(app: FastifyInstance) {
           FROM invoice_lines il JOIN products p ON p.product_id = il.product_id
           LEFT JOIN return_windows rw ON rw.category_id = p.category_id
          WHERE il.line_id = ${r.invoice_line_id} AND il.invoice_id = ${invoiceId}
-         FOR UPDATE OF il
       `.execute(trx)).rows[0];
       if (!line) throw badRequest('One of the returned lines does not belong to that invoice.');
 
-      const remaining = Number(line.base_unit_qty) - Number(line.already_returned);
+      // Quantities already claimed by earlier lines of THIS request count too — a
+      // single payload asking for 1 + 1 against a 1-unit line must not slip past a
+      // per-line check that only looks at what is already committed.
+      const claimedInThisRequest = prepared
+        .filter((q) => q.invoice_line_id === r.invoice_line_id)
+        .reduce((sum, q) => sum + q.qty_base_unit, 0);
+      const remaining = Number(line.base_unit_qty) - Number(line.already_returned) - claimedInThisRequest;
       if (r.qty_base_unit > remaining + 0.0001) {
         throw badRequest(`Only ${remaining} of "${line.product_name}" is left to return on this invoice.`);
       }
@@ -448,8 +467,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
         await postCredit(trx, {
           customerId: invoice.customer_id, branchId: invoice.branch_id,
           entryType: 'REFUND_ADJUSTMENT', amount: -storeCredit,
-          refTable: 'sales_returns', refId: ret.return_id,
-        });
+          refTable: 'sales_returns', refId: ret.return_id });
       }
 
       if (customer.phone) {
@@ -458,8 +476,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
           message_type: creditNoteNumber ? 'CREDIT_NOTE' : 'INVOICE_PDF',
           body: creditNoteNumber
             ? `Credit note ${creditNoteNumber} has been issued against invoice ${invoice.invoice_number} for ₹${returnedValue.toFixed(2)}.`
-            : `Your return against ${invoice.invoice_number} has been processed. Refund: ₹${cashRefund.toFixed(2)}.`,
-        });
+            : `Your return against ${invoice.invoice_number} has been processed. Refund: ₹${cashRefund.toFixed(2)}.` });
       }
     }
 
@@ -525,8 +542,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
         : null,
       gst_note: creditNoteNumber
         ? 'Report this credit note in GSTR-1 for the period it was issued.'
-        : 'Non-GST sale — no credit note is required.',
-    };
+        : 'Non-GST sale — no credit note is required.' };
   }));
 
   // ── Credit notes (12.1.1, and the GSTR-1 outward-supply reduction) ────────
@@ -567,7 +583,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
     `.execute(trx)).rows;
   }));
 
-  app.post('/warranty-claims', guarded('manage_warranty_claim', async ({ session, db: trx, req }) => {
+  app.post('/warranty-claims', guarded('manage_warranty_claim', async ({ db: trx, req }) => {
     const body = (req.body ?? {}) as Record<string, any>;
     const invoiceLineId = uuid(body.invoice_line_id, 'Invoice line');
 

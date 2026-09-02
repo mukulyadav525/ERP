@@ -13,9 +13,8 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, str, optionalStr, num, oneOf,
-  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf,
-} from '../../lib/http.js';
-import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
+import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
 import { newWeightedAvgCost, round2, roundTo } from '../../lib/tax.js';
 import { nextNumber } from '../../lib/numbering.js';
@@ -243,8 +242,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
     const lines = arrayOf(body.lines, 'lines', (l) => ({
       product_id: uuid(l.product_id, 'lines[].product_id'),
       qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-      rate: num(l.rate, 'lines[].rate', { min: 0 }),
-    }));
+      rate: num(l.rate, 'lines[].rate', { min: 0 }) }));
 
     const poNumber = await nextNumber(trx, branchId, 'PO');
     const po = (await sql<any>`
@@ -319,8 +317,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       batch_number: optionalStr(l.batch_number, 'lines[].batch_number', { max: 60 }),
       mfg_date: optionalStr(l.mfg_date, 'lines[].mfg_date', { max: 20 }),
       expiry_date: optionalStr(l.expiry_date, 'lines[].expiry_date', { max: 20 }),
-      serial_numbers: Array.isArray(l.serial_numbers) ? l.serial_numbers.map(String) : [],
-    }));
+      serial_numbers: Array.isArray(l.serial_numbers) ? l.serial_numbers.map(String) : [] }));
 
     const grnNumber = await nextNumber(trx, branchId, 'GRN');
     const grn = (await sql<any>`
@@ -358,8 +355,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       await applyMovement(trx, {
         branchId, productId: l.product_id, qtyChange: l.qty_base_unit,
         movementType: 'PURCHASE', refTable: 'grn', refId: grn.grn_id,
-        userId: session.user_id, inboundRate: l.rate,
-      });
+        userId: session.user_id, inboundRate: l.rate });
 
       for (const serial of l.serial_numbers) {
         await sql`
@@ -383,8 +379,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
     // running balance rather than a bare list of amounts.
     await postVendor(trx, {
       vendorId, branchId, entryType: 'GRN_PAYABLE', amount: total,
-      refTable: 'grn', refId: grn.grn_id,
-    });
+      refTable: 'grn', refId: grn.grn_id });
 
     if (poId) {
       await sql`UPDATE purchase_orders SET status = 'RECEIVED' WHERE po_id = ${poId}`.execute(trx);
@@ -408,8 +403,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
 
     const lines = arrayOf(body.lines, 'lines', (l) => ({
       grn_line_id: uuid(l.grn_line_id, 'lines[].grn_line_id'),
-      qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-    }));
+      qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }) }));
 
     const debitNoteNumber = await nextNumber(trx, grn.branch_id, 'DEBIT_NOTE');
     const dn = (await sql<any>`
@@ -443,8 +437,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       await applyMovement(trx, {
         branchId: grn.branch_id, productId: grnLine.product_id, qtyChange: -l.qty_base_unit,
         movementType: 'PURCHASE_RETURN', refTable: 'vendor_debit_notes', refId: dn.debit_note_id,
-        reasonCode: reason, userId: session.user_id, inboundRate: Number(grnLine.rate),
-      });
+        reasonCode: reason, userId: session.user_id, inboundRate: Number(grnLine.rate) });
       total = round2(total + l.qty_base_unit * Number(grnLine.rate));
     }
 
@@ -452,8 +445,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
 
     await postVendor(trx, {
       vendorId: grn.vendor_id, branchId: grn.branch_id, entryType: 'DEBIT_NOTE', amount: -total,
-      refTable: 'vendor_debit_notes', refId: dn.debit_note_id,
-    });
+      refTable: 'vendor_debit_notes', refId: dn.debit_note_id });
 
     await audit(trx, session, 'DEBIT_NOTE_ISSUED', 'vendor_debit_notes', dn.debit_note_id,
       { after: { debit_note_number: debitNoteNumber, total, grn_id: grnId } });
@@ -522,8 +514,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
 
     const lines = arrayOf(body.lines, 'lines', (l) => ({
       product_id: uuid(l.product_id, 'lines[].product_id'),
-      qty: num(l.dispatched_qty ?? l.qty_base_unit, 'lines[].dispatched_qty', { min: 0.0001 }),
-    }));
+      qty: num(l.dispatched_qty ?? l.qty_base_unit, 'lines[].dispatched_qty', { min: 0.0001 }) }));
 
     const transfer = (await sql<any>`
       INSERT INTO stock_transfers (from_branch_id, to_branch_id, status, transfer_doc_type, driver_ref, requested_by)
@@ -577,8 +568,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       // being counted twice or vanishing.
       await applyMovement(trx, {
         branchId: t.from_branch_id, productId: l.product_id, qtyChange: -Number(l.dispatched_qty),
-        movementType: 'TRANSFER_OUT', refTable: 'stock_transfers', refId: id, userId: session.user_id,
-      });
+        movementType: 'TRANSFER_OUT', refTable: 'stock_transfers', refId: id, userId: session.user_id });
     }
 
     await sql`
@@ -603,8 +593,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
 
     const received = arrayOf(body.lines, 'lines', (l) => ({
       line_id: uuid(l.line_id, 'lines[].line_id'),
-      received_qty: num(l.received_qty, 'lines[].received_qty', { min: 0 }),
-    }));
+      received_qty: num(l.received_qty, 'lines[].received_qty', { min: 0 }) }));
 
     let anyDiscrepancy = false;
     for (const r of received) {
@@ -625,8 +614,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
           userId: session.user_id,
           // 4.8.1 — the cost travels with the goods, recorded on the line at
           // dispatch, because the receiver's session cannot see the sender's stock.
-          inboundRate: line.dispatch_cost != null ? Number(line.dispatch_cost) : null,
-        });
+          inboundRate: line.dispatch_cost != null ? Number(line.dispatch_cost) : null });
       }
       if (Math.abs(Number(line.dispatched_qty) - r.received_qty) > 0.0001) anyDiscrepancy = true;
     }
@@ -642,8 +630,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       ok: true, status,
       message: anyDiscrepancy
         ? 'Quantities did not match what was dispatched. This transfer is held for the owner to resolve as a write-off or a counting correction.'
-        : 'Transfer received in full.',
-    };
+        : 'Transfer received in full.' };
   }));
 
   /** 4.4.1 — the Admin adjudication step: write it off, or correct the count. */
@@ -677,16 +664,14 @@ export default async function inventoryRoutes(app: FastifyInstance) {
           await applyMovement(trx, {
             branchId: responsibleBranch, productId: line.product_id, qtyChange: -variance,
             movementType: 'WRITE_OFF', refTable: 'stock_transfers', refId: id,
-            reasonCode: 'TRANSFER_LOSS', userId: session.user_id,
-          });
+            reasonCode: 'TRANSFER_LOSS', userId: session.user_id });
         }
       } else {
         // A counting error: the goods did arrive, so the receiver's count is corrected.
         await applyMovement(trx, {
           branchId: t.to_branch_id, productId: line.product_id, qtyChange: variance,
           movementType: 'COUNT_ADJUSTMENT', refTable: 'stock_transfers', refId: id,
-          reasonCode: 'TRANSFER_COUNT_CORRECTION', userId: session.user_id,
-        });
+          reasonCode: 'TRANSFER_COUNT_CORRECTION', userId: session.user_id });
       }
       await sql`
         UPDATE stock_transfer_lines SET resolution = ${resolution}, resolved_by = ${session.user_id}, resolved_at = now()
@@ -744,8 +729,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as Record<string, any>;
     const counts = arrayOf(body.counts, 'counts', (c) => ({
       product_id: uuid(c.product_id, 'counts[].product_id'),
-      counted_qty: num(c.counted_qty, 'counts[].counted_qty', { min: 0 }),
-    }), { min: 1, max: 5000 });
+      counted_qty: num(c.counted_qty, 'counts[].counted_qty', { min: 0 }) }), { min: 1, max: 5000 });
 
     const a = (await sql<any>`SELECT * FROM stock_audits WHERE audit_id = ${id}`.execute(trx)).rows[0];
     if (!a) throw notFound('Stock audit not found.');
@@ -770,8 +754,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
         await applyMovement(trx, {
           branchId: a.branch_id, productId: c.product_id, qtyChange: variance,
           movementType: 'COUNT_ADJUSTMENT', refTable: 'stock_audits', refId: id,
-          reasonCode: 'PHYSICAL_COUNT', userId: session.user_id,
-        });
+          reasonCode: 'PHYSICAL_COUNT', userId: session.user_id });
       }
     }
 
@@ -811,8 +794,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
 
     await applyMovement(trx, {
       branchId, productId, qtyChange: -qty, movementType: 'WRITE_OFF',
-      refTable: 'stock_writeoffs', refId: row.writeoff_id, reasonCode: reason, userId: session.user_id,
-    });
+      refTable: 'stock_writeoffs', refId: row.writeoff_id, reasonCode: reason, userId: session.user_id });
     await audit(trx, session, 'WRITE_OFF', 'stock_writeoffs', row.writeoff_id, { after: { productId, qty, reason } });
     return row;
   }));

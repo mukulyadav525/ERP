@@ -275,7 +275,7 @@ function ProductDetail({ product, onClose, onPriceChanged }: {
           {can('edit_pricing') && (
             <Card title="Change the price">
               <Alert tone="info">
-                The current price is closed off with today's date and a new one starts — invoices
+                The current price is closed off with today&rsquo;s date and a new one starts — invoices
                 already raised keep the rate they were billed at.
               </Alert>
               <div className="row" style={{ marginTop: 12 }}>

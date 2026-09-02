@@ -581,7 +581,7 @@ function TransfersTab() {
             ]} />
             {detail.status === 'TRANSFER_DISCREPANCY' && (
               <Alert tone="critical" title="Quantities did not match">
-                Neither branch's stock has been forced to agree. Decide whether the shortfall is a
+                Neither branch&rsquo;s stock has been forced to agree. Decide whether the shortfall is a
                 genuine loss (write it off against the responsible branch) or a miscount (correct the receiving count).
               </Alert>
             )}

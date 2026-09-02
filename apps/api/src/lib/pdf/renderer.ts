@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
-  COLORS, PAGE, TYPE, FONTS, amountInWords, dateOnly, money, pickFont, qty,
+  COLORS, PAGE, TYPE, FONTS, amountInWords, money, pickFont, qty,
 } from './theme.js';
 
 // ── The document model ──────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ function buildColumns(model: DocumentModel): Column[] {
   return cols;
 }
 
-function cellValue(col: Column, l: DocumentLine, index: number, model: DocumentModel): string {
+function cellValue(col: Column, l: DocumentLine, index: number): string {
   switch (col.key) {
     case 'sr':      return String(index + 1);
     case 'desc':    return l.description;
@@ -743,7 +743,7 @@ export async function renderDocument(model: DocumentModel): Promise<Buffer> {
             if (foot) needed = Math.max(needed, doc.widthOfString(foot));
             doc.font(FONTS.regular).fontSize(size);
             model.lines.forEach((l, i) => {
-              needed = Math.max(needed, doc.widthOfString(cellValue(c, l, i, model)));
+              needed = Math.max(needed, doc.widthOfString(cellValue(c, l, i)));
             });
             c.width = Math.max(c.width, Math.ceil(needed) + 8);
           }
@@ -812,7 +812,7 @@ export async function renderDocument(model: DocumentModel): Promise<Buffer> {
 
         cols.forEach((c, i) => {
           if (i === descIdx) return;
-          text(ctx, clip(ctx, cellValue(c, l, rowIndex, model), c.width - 6, cellSize), colX[i] + 3, y + 5, {
+          text(ctx, clip(ctx, cellValue(c, l, rowIndex), c.width - 6, cellSize), colX[i] + 3, y + 5, {
             width: c.width - 6, align: c.align, size: cellSize, color: COLORS.ink,
           });
         });

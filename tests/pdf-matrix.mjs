@@ -120,7 +120,10 @@ for (const n of [1, 5, 10, 20, 50]) {
   const lines = mkLines(5).map((l) => ({ ...l, taxable_value: l.line_total, gst_rate_pct: 0, cgst_amount: 0, sgst_amount: 0, igst_amount: 0 }));
   cases.push(['cashmemo-nongst', {
     kind: 'CASH_MEMO', title: 'CASH MEMO / BILL OF SUPPLY', business, billTo: null,
-    meta: [['Bill No.', 'NG-BHW/2026-27/0041'], ['Date', '21 Aug 2026, 11:02 am']],
+    // Deliberately fed the same metadata a GST bill gets, so that if a GST-only
+    // row ever leaks onto a bill of supply this case shows it.
+    meta: [['Bill No.', 'NG-BHW/2026-27/0041'], ['Date', '21 Aug 2026, 11:02 am'],
+           ['Order No.', 'PO-8812'], ['Served by', 'Ramesh Yadav']],
     lines, totals: totalsOf(lines), interstate: false, showTax: false,
     payments: [{ method: 'CASH', amount: 2000 }],
   }]);
@@ -177,6 +180,14 @@ for (const [name, model] of cases) {
   try {
     const buf = await renderDocument(model);
     writeFileSync(`${OUT}/${name}.pdf`, buf);
+    // A non-GST document must not carry the word CGST/SGST/IGST anywhere at all.
+    if (!model.showTax && model.kind !== 'ESTIMATE') {
+      const { execFileSync } = await import('node:child_process');
+      let txt = '';
+      try { txt = execFileSync('pdftotext', [`${OUT}/${name}.pdf`, '-'], { encoding: 'utf8' }); } catch { txt = ''; }
+      const leak = txt.match(/CGST|SGST|IGST/i);
+      if (leak) throw new Error(`a non-GST document mentions ${leak[0]}`);
+    }
     console.log(`  ok  ${name.padEnd(32)} ${String(buf.length).padStart(7)} bytes`);
   } catch (err) {
     failures += 1;

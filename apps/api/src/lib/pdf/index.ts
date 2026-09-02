@@ -113,10 +113,16 @@ export async function buildInvoicePdf(
   if (invoice.challan_date) meta.push(['Challan Date', dateOnly(invoice.challan_date)]);
   if (invoice.vehicle_no) meta.push(['Vehicle No.', String(invoice.vehicle_no)]);
   if (invoice.due_date) meta.push(['Due Date', dateOnly(invoice.due_date)]);
-  if (isGst && invoice.place_of_supply_state_code) {
-    meta.push(['Place of Supply', String(invoice.place_of_supply_state_code)]);
+  // Place of supply and supply type are GST concepts and belong only on a GST
+  // document. Printing "Intra-state (CGST + SGST)" on a bill of supply — which is
+  // what this did — puts the words CGST and SGST on a bill that charges neither,
+  // which is exactly the confusion a bill of supply exists to avoid.
+  if (isGst) {
+    if (invoice.place_of_supply_state_code) {
+      meta.push(['Place of Supply', String(invoice.place_of_supply_state_code)]);
+    }
+    meta.push(['Supply Type', interstate ? 'Inter-state (IGST)' : 'Intra-state (CGST + SGST)']);
   }
-  meta.push(['Supply Type', interstate ? 'Inter-state (IGST)' : 'Intra-state (CGST + SGST)']);
   if (invoice.sold_by_name) meta.push(['Served by', String(invoice.sold_by_name)]);
 
   const model: DocumentModel = {
