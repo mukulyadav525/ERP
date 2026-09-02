@@ -67,7 +67,10 @@ export function open<T>(handler: (req: FastifyRequest, reply: FastifyReply) => P
  * OWNER_ADMIN may pass an explicit branch, or omit it for a chain-wide view.
  */
 export function resolveBranchScope(session: Session, requested?: string | null): string | null {
-  if (session.role === 'OWNER_ADMIN') return requested || null;
+  // The admin's value is validated rather than passed through: an unparseable
+  // branch_id reached Postgres as a uuid cast and came back as a 500 with no clue
+  // what was wrong. A malformed id is a client error and should say so.
+  if (session.role === 'OWNER_ADMIN') return requested ? uuid(requested, 'branch_id') : null;
   return session.branch_id;
 }
 
@@ -79,7 +82,7 @@ export function resolveBranchScope(session: Session, requested?: string | null):
 export function writeBranch(session: Session, requested?: string | null): string {
   if (session.role === 'OWNER_ADMIN') {
     if (!requested) throw badRequest('branch_id is required when acting as Owner/Admin, which has no default branch.');
-    return requested;
+    return uuid(requested, 'branch_id');
   }
   if (!session.branch_id) throw forbidden('Your account is not assigned to a branch.');
   // A branch user's write always lands on their own branch; anything else is a

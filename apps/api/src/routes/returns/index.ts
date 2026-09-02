@@ -160,9 +160,42 @@ export default async function returnsRoutes(app: FastifyInstance) {
     if (invoice.status !== 'FINAL') throw badRequest('Only a finalised invoice can be returned against.');
 
     const settings = await loadSettings(trx, invoice.branch_id);
-    const refundMethod = settings.refund_method === 'ADMIN_CHOICE'
-      ? oneOf(body.refund_method ?? 'CASH', 'Refund method', ['CASH', 'UPI', 'CARD', 'CREDIT'] as const)
-      : (settings.refund_method === 'STORE_CREDIT' ? 'CREDIT' : (settings.refund_method as any));
+
+    // How the original sale was actually paid. Needed BEFORE the refund method is
+    // resolved, because the "original mode" policy is defined in terms of it.
+    const originalPayments = (await sql<{ method: string; amount: string }>`
+      SELECT method, SUM(amount) AS amount FROM invoice_payments
+       WHERE invoice_id = ${invoiceId} GROUP BY method
+    `.execute(trx)).rows;
+    const paidBy = (method: string) =>
+      Number(originalPayments.find((p) => p.method === method)?.amount ?? 0);
+
+    // Section 17 lists four values for "Refund method": ADMIN_CHOICE, CASH,
+    // ORIGINAL_MODE and STORE_CREDIT. Only the first two were handled; the other
+    // two are not payment_method enum members, so ORIGINAL_MODE was cast straight
+    // into `::payment_method` and every return at a shop configured that way died
+    // with a 500. Each policy is now mapped explicitly to a real payment method.
+    const refundMethod: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' = (() => {
+      switch (settings.refund_method) {
+        case 'ADMIN_CHOICE':
+          return oneOf(body.refund_method ?? 'CASH', 'Refund method', ['CASH', 'UPI', 'CARD', 'CREDIT'] as const);
+        case 'STORE_CREDIT':
+          return 'CREDIT';
+        case 'ORIGINAL_MODE': {
+          // Give the money back the way it came in. Where the sale was split, the
+          // largest non-points component wins; a points-only sale has no money to
+          // return, so it settles to the ledger as store credit.
+          const ranked = originalPayments
+            .filter((p) => p.method !== 'LOYALTY_POINTS')
+            .sort((a, b) => Number(b.amount) - Number(a.amount));
+          const top = ranked[0]?.method;
+          return top === 'CASH' || top === 'UPI' || top === 'CARD' || top === 'CREDIT' ? top : 'CREDIT';
+        }
+        case 'CASH':
+        default:
+          return 'CASH';
+      }
+    })();
 
     const requested = arrayOf(body.lines, 'lines', (l) => ({
       invoice_line_id: uuid(l.invoice_line_id, 'lines[].invoice_line_id'),
@@ -171,6 +204,31 @@ export default async function returnsRoutes(app: FastifyInstance) {
     }));
 
     const daysSince = Math.floor((Date.now() - new Date(invoice.server_received_at).getTime()) / 86_400_000);
+
+    // The till the cash is being handed back out of (3.3.1).
+    //
+    // An explicit session can be named, but the default matters more: cash for a
+    // refund comes out of whichever drawer the person processing it is standing
+    // at, so when none is given we fall back to this user's own open till at this
+    // branch. Making the link opt-in would have left the reconciliation gap in
+    // place for every caller that simply didn't know to pass the field.
+    let tillSessionId = optionalUuid(body.till_session_id, 'till_session_id');
+    if (tillSessionId) {
+      const till = (await sql<any>`
+        SELECT status, branch_id FROM till_sessions WHERE session_id = ${tillSessionId}
+      `.execute(trx)).rows[0];
+      if (!till) throw notFound('That till session does not exist.');
+      if (till.status !== 'OPEN') throw badRequest('That till session is already closed.');
+      if (till.branch_id !== invoice.branch_id) {
+        throw badRequest('That till session belongs to a different branch than the invoice.');
+      }
+    } else {
+      tillSessionId = (await sql<{ session_id: string }>`
+        SELECT session_id FROM till_sessions
+         WHERE branch_id = ${invoice.branch_id} AND cashier_user_id = ${session.user_id} AND status = 'OPEN'
+         ORDER BY opened_at DESC LIMIT 1
+      `.execute(trx)).rows[0]?.session_id ?? null;
+    }
 
     // ── Validate each line before writing anything ─────────────────────────
     const prepared: any[] = [];
@@ -267,6 +325,16 @@ export default async function returnsRoutes(app: FastifyInstance) {
           VALUES (${invoice.branch_id}, ${p.line.product_id}, 'SALE_RETURN', ${p.qty_base_unit},
                   'sales_returns', ${ret.return_id}, ${reason}, ${session.user_id})
         `.execute(trx);
+        // Resellable goods rejoin the batch they were sold out of, so the shelf
+        // total and the batch quantities keep agreeing and expiry tracking does
+        // not lose sight of units that are physically back on the shelf. Damaged
+        // goods deliberately do not — they are written off below.
+        if (p.line.batch_id) {
+          await sql`
+            UPDATE stock_batches SET qty_remaining = qty_remaining + ${p.qty_base_unit}
+             WHERE batch_id = ${p.line.batch_id}
+          `.execute(trx);
+        }
       } else {
         // Damaged goods come back in and are immediately written off, as two
         // explicit movements that net to zero. The earlier version booked only the
@@ -314,12 +382,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
     // a credit sale for cash would let someone take goods on account, return them,
     // and walk out with the shop's cash while still owing the full amount — so the
     // portion bought on credit can only ever go back to the ledger.
-    const originalPayments = (await sql<{ method: string; amount: string }>`
-      SELECT method, SUM(amount) AS amount FROM invoice_payments
-       WHERE invoice_id = ${invoiceId} GROUP BY method
-    `.execute(trx)).rows;
-    const paidBy = (method: string) =>
-      Number(originalPayments.find((p) => p.method === method)?.amount ?? 0);
+    // (originalPayments / paidBy were read above, before the refund method was
+    // resolved, because the ORIGINAL_MODE policy is defined in terms of them.)
     const invoicePaidTotal = originalPayments.reduce((sum, p) => sum + Number(p.amount), 0) || 1;
     const returnShare = Math.min(returnedValue / invoicePaidTotal, 1);
     // The share of THIS return that was originally bought on credit.
@@ -399,6 +463,22 @@ export default async function returnsRoutes(app: FastifyInstance) {
       }
     }
 
+    // ── The drawer (3.3.1) ──────────────────────────────────────────────────
+    // Cash handed back across the counter physically leaves the till. Recording the
+    // refund without a till event left the shift expecting money that had already
+    // gone, so every close after a cash refund read short by exactly that amount
+    // and the cashier wore the variance. A void already reversed its cash this way;
+    // a return has to as well.
+    let tillCashReversed = 0;
+    if (cashRefund > 0 && refundMethod === 'CASH' && tillSessionId) {
+      await sql`
+        INSERT INTO till_events (session_id, event_type, amount, ref_table, ref_id, note)
+        VALUES (${tillSessionId}, 'CASH_SALE', ${-cashRefund}, 'sales_returns', ${ret.return_id},
+                ${'Cash refund against ' + (invoice.invoice_number ?? invoiceId)})
+      `.execute(trx);
+      tillCashReversed = cashRefund;
+    }
+
     // Spread the money refund across the return lines in proportion to their value.
     for (const p of prepared) {
       const computed = computeReturnLine(p.line, p.qty_base_unit);
@@ -420,7 +500,9 @@ export default async function returnsRoutes(app: FastifyInstance) {
     await audit(trx, session, creditNoteId ? 'CREDIT_NOTE_ISSUED' : 'REFUND', 'sales_returns', ret.return_id,
       { after: { invoice_id: invoiceId, returned_value: returnedValue, cash_refund: cashRefund,
                  store_credit: storeCredit, points_revoked: pointsRevoked, points_restored: pointsRestored,
-                 credit_note_number: creditNoteNumber, window_override_by: windowOverrideBy } });
+                 credit_note_number: creditNoteNumber, window_override_by: windowOverrideBy,
+                 refund_method: refundMethod, till_session_id: tillSessionId,
+                 till_cash_reversed: tillCashReversed } });
 
     return {
       return_id: ret.return_id,
@@ -433,6 +515,11 @@ export default async function returnsRoutes(app: FastifyInstance) {
       store_credit_amount: storeCredit,
       refund_method: refundMethod,
       credit_settled: storeCredit,
+      till_session_id: tillSessionId,
+      till_cash_reversed: tillCashReversed,
+      till_note: cashRefund > 0 && refundMethod === 'CASH' && !tillSessionId
+        ? 'No till session was given, so this cash refund is not reflected in any drawer count. Pass till_session_id to keep the shift reconciliation correct.'
+        : null,
       refund_note: creditPortion > 0
         ? 'The portion originally bought on credit has been taken off the customer\'s balance rather than paid out.'
         : null,
@@ -530,6 +617,11 @@ export default async function returnsRoutes(app: FastifyInstance) {
       ['OPEN', 'SENT_TO_VENDOR', 'REPLACED', 'REPAIRED', 'REFUNDED', 'REJECTED'] as const);
     const terminal = ['REPLACED', 'REPAIRED', 'REFUNDED', 'REJECTED'].includes(status);
 
+    const before = (await sql<any>`
+      SELECT status, vendor_id FROM warranty_claims WHERE claim_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!before) throw notFound('That warranty claim was not found at your branch.');
+
     await sql`
       UPDATE warranty_claims
          SET status = ${status}::warranty_claim_status,
@@ -537,7 +629,11 @@ export default async function returnsRoutes(app: FastifyInstance) {
              resolved_at = ${terminal ? sql`now()` : null}
        WHERE claim_id = ${id}
     `.execute(trx);
-    await audit(trx, session, 'REFUND', 'warranty_claims', id, { after: { status } });
-    return { ok: true };
+    // Logged as WARRANTY_CLAIM_UPDATED, not REFUND: labelling every claim update a
+    // refund made the audit trail read as if the shop were paying money out each
+    // time a claim moved to "sent to vendor".
+    await audit(trx, session, 'WARRANTY_CLAIM_UPDATED', 'warranty_claims', id,
+      { before: { status: before.status }, after: { status } });
+    return { ok: true, claim_id: id, status };
   }));
 }

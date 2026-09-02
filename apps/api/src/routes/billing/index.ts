@@ -391,7 +391,15 @@ export default async function billingRoutes(app: FastifyInstance) {
       }
       // 11.2 — stacking points with a manual discount is off by default because it
       // makes the margin on a bill unpredictable.
-      if (!settings.allow_loyalty_discount_stacking && totals.discount_total > 0) {
+      //
+      // Measured against `givenAway`, not `totals.discount_total`. The two differ:
+      // discount_total counts only what was typed into the discount box, while
+      // givenAway also counts a line sold below its catalog price. The rule was
+      // therefore trivially bypassable — typing a 4% discount was refused, baking
+      // the identical 4% into the line rate went through, same margin either way.
+      // The discount ceiling above already measures the whole giveaway; this now
+      // agrees with it.
+      if (!settings.allow_loyalty_discount_stacking && givenAway > 0) {
         throw badRequest('This bill already has a discount. Loyalty points and discounts cannot be combined unless "Allow loyalty + discount stacking" is turned on.');
       }
     }
@@ -706,6 +714,16 @@ export default async function billingRoutes(app: FastifyInstance) {
         UPDATE stock_serials SET status = 'IN_STOCK', invoice_line_id = NULL
          WHERE invoice_line_id = ${line.line_id}
       `.execute(trx);
+      // The sale drew the quantity out of a specific batch (4.2); the void has to
+      // put it back. Restoring branch_stock but not the batch left the two
+      // disagreeing — the shelf total said the goods were there, and no batch
+      // claimed them, so expiry tracking quietly lost sight of the units.
+      if (line.batch_id) {
+        await sql`
+          UPDATE stock_batches SET qty_remaining = qty_remaining + ${line.base_unit_qty}
+           WHERE batch_id = ${line.batch_id}
+        `.execute(trx);
+      }
     }
 
     const payments = (await sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx)).rows;
@@ -977,12 +995,24 @@ export default async function billingRoutes(app: FastifyInstance) {
     const id = uuid((req.params as any).id, 'conflict_id');
     const resolution = oneOf((req.body as any)?.resolution, 'Resolution',
       ['SUBSTITUTED', 'BACKORDERED', 'NEGATIVE_STOCK_OVERRIDE', 'CANCELLED'] as const);
-    await sql`
+    // RETURNING, and then check it. Without this the endpoint answered {ok:true}
+    // for a conflict id that does not exist, is at another branch, or was resolved
+    // by somebody else a moment earlier — and wrote an audit entry saying a human
+    // had dealt with something that is still sitting open in the queue.
+    const updated = await sql<{ conflict_id: string }>`
       UPDATE stock_conflicts
          SET status = 'RESOLVED', resolution = ${resolution}, resolved_by = ${session.user_id}, resolved_at = now()
        WHERE conflict_id = ${id} AND status = 'OPEN'
+      RETURNING conflict_id
     `.execute(trx);
+    if (!updated.rows.length) {
+      const existing = (await sql<{ status: string }>`
+        SELECT status FROM stock_conflicts WHERE conflict_id = ${id}
+      `.execute(trx)).rows[0];
+      if (!existing) throw notFound('That stock conflict was not found at your branch.');
+      throw conflict(`That conflict has already been resolved (${existing.status}).`);
+    }
     await audit(trx, session, 'STOCK_CONFLICT_RESOLVED', 'stock_conflicts', id, { after: { resolution } });
-    return { ok: true };
+    return { ok: true, conflict_id: id, resolution };
   }));
 }
