@@ -616,6 +616,13 @@ CREATE TABLE customers (
     email           TEXT,
     dob             DATE,                            -- optional, for 11.1 birthday greetings
     gstin           TEXT,                             -- for B2B customers
+    -- A GST tax invoice to a registered buyer has to carry their name, address and
+    -- place of supply, so these are invoice fields rather than optional CRM extras
+    -- (Sections 58.2, 15). Nullable: a walk-in retail customer has none of them.
+    company_name    TEXT,
+    address         TEXT,
+    state           TEXT,
+    state_code      TEXT,
     customer_type   customer_type NOT NULL DEFAULT 'RETAIL',
     credit_allowed  BOOLEAN NOT NULL DEFAULT FALSE,
     credit_limit    NUMERIC(14,2) NOT NULL DEFAULT 0,

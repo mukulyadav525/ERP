@@ -17,6 +17,7 @@ import { loadSettings } from '../../lib/settings.js';
 import { computeLine, totalInvoice, round2 } from '../../lib/tax.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
+import { buildEstimatePdf } from '../../lib/pdf/index.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
 
@@ -79,6 +80,80 @@ export default async function quotationsRoutes(app: FastifyInstance) {
       price_type: quotation.price_type,
     }));
     return { ...quotation, lines, totals: totalInvoice(computed) };
+  }));
+
+  // ── Estimate / Quotation PDF — Template A (Sections 58.1, 61) ─────────────
+  //
+  // The same renderer and the same visual system as the tax invoice, so a
+  // customer who receives a quote and then a bill sees one shop rather than two
+  // pieces of software. What differs is the title, the accent colour, the
+  // validity terms, and the fact that it says plainly that it is not a tax
+  // invoice — a quote that could be mistaken for a bill is a real problem.
+  app.get('/:id/pdf', guarded('view_quotations', async ({ db: trx, req, reply }) => {
+    const id = uuid((req.params as any).id, 'quotation_id');
+    const quotation = (await sql<any>`
+      SELECT q.*, c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+             c.address AS customer_address, c.company_name AS customer_company,
+             c.state AS customer_state, c.state_code AS customer_state_code,
+             b.name AS branch_name, b.gstin AS branch_gstin, b.address AS branch_address,
+             b.phone AS branch_phone, b.state_code AS branch_state_code,
+             u.full_name AS created_by_name
+        FROM quotations q
+        JOIN customers c ON c.customer_id = q.customer_id
+        JOIN branches b ON b.branch_id = q.branch_id
+        LEFT JOIN users u ON u.user_id = q.created_by
+       WHERE q.quotation_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!quotation) throw notFound('Quotation not found.');
+
+    const lines = (await sql<any>`
+      SELECT ql.*, p.name AS product_name, p.sku, p.base_unit, p.hsn_code,
+             p.base_unit::text AS unit_label,
+             COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct
+        FROM quotation_lines ql
+        JOIN products p ON p.product_id = ql.product_id
+        LEFT JOIN LATERAL (SELECT gst_rate_pct FROM hsn_tax_rates
+                            WHERE hsn_code = p.hsn_code AND effective_to IS NULL LIMIT 1) htr ON TRUE
+       WHERE ql.quotation_id = ${id} ORDER BY ql.line_id
+    `.execute(trx)).rows;
+
+    // Priced through the shared tax engine, exactly as GET /:id does, so the
+    // printed estimate and the on-screen one cannot disagree (3.1.1).
+    const computed = lines.map((l: any) => computeLine({
+      qty_in_sale_unit: Number(l.qty_base_unit), multiplier_to_base: 1,
+      rate_per_base_unit: Number(l.rate), gst_rate_pct: Number(l.gst_rate_pct),
+      price_type: quotation.price_type,
+    }));
+    const totals = totalInvoice(computed);
+
+    const docLines = lines.map((l: any, i: number) => ({
+      ...l,
+      qty_in_sale_unit: Number(l.qty_base_unit),
+      rate_locked_at_scan: Number(l.rate),
+      discount_amount: computed[i].discount_amount,
+      taxable_value: computed[i].taxable_value,
+      cgst_amount: computed[i].cgst_amount,
+      sgst_amount: computed[i].sgst_amount,
+      igst_amount: computed[i].igst_amount,
+      line_total: computed[i].line_total,
+    }));
+
+    const pdf = await buildEstimatePdf(trx, {
+      ...quotation,
+      subtotal: totals.subtotal,
+      discount_total: totals.discount_total,
+      cgst_total: totals.cgst_total,
+      sgst_total: totals.sgst_total,
+      igst_total: totals.igst_total,
+      grand_total: totals.grand_total,
+      with_gst: totals.tax_total > 0,
+      valid_until: quotation.reservation_hold_until,
+    }, docLines);
+
+    reply.header('Content-Type', 'application/pdf');
+    reply.header('Content-Disposition',
+      `inline; filename="Estimate-${String(quotation.quotation_number ?? id).replace(/[^\w.-]/g, '_')}.pdf"`);
+    return reply.send(pdf);
   }));
 
   app.post('/', guarded('create_quotation', async ({ session, db: trx, req }) => {

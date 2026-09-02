@@ -33,7 +33,7 @@ import {
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
-import { generateInvoicePdf } from '../../lib/pdf.js';
+import { buildInvoicePdf } from '../../lib/pdf/index.js';
 import type { Tx } from '../../lib/db.js';
 import type { Session } from '../../lib/session.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
@@ -136,31 +136,60 @@ export default async function billingRoutes(app: FastifyInstance) {
     };
   }));
 
-  // ── Invoice PDF (3.6 printed + WhatsApp PDF) ──────────────────────────────
+  // ── Invoice PDF (3.6 printed + WhatsApp PDF, Sections 58-64) ──────────────
+  //
+  // Everything on the page is read here, from the finalised rows, and handed to
+  // the renderer (63). Nothing is taken from the request, so a reprint months
+  // later is byte-for-byte the document the customer was given — and a client
+  // cannot influence what a tax invoice says by changing what it posts.
   app.get('/invoices/:id/pdf', guarded('view_billing', async ({ db: trx, req, reply }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
     const invoice = (await sql<any>`
       SELECT i.*, b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
              b.phone AS branch_phone, b.state_code AS branch_state_code,
-             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin
+             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+             c.address AS customer_address, c.company_name AS customer_company,
+             c.state AS customer_state, c.state_code AS customer_state_code,
+             eu.full_name AS sold_by_name
         FROM invoices i JOIN branches b ON b.branch_id = i.branch_id
         LEFT JOIN customers c ON c.customer_id = i.customer_id
+        LEFT JOIN employees e ON e.employee_id = i.sold_by_employee_id
+        LEFT JOIN users eu ON eu.user_id = e.user_id
        WHERE i.invoice_id = ${id}
     `.execute(trx)).rows[0];
     if (!invoice) throw notFound('Invoice not found.');
 
     const lines = (await sql<any>`
-      SELECT il.*, p.name AS product_name, p.hsn_code, COALESCE(pu.unit_label, p.base_unit::text) AS unit_label
-        FROM invoice_lines il JOIN products p ON p.product_id = il.product_id
+      SELECT il.*, p.name AS product_name, p.sku, p.hsn_code,
+             COALESCE(pu.unit_label, p.base_unit::text) AS unit_label,
+             sb.batch_number,
+             tr.base_shade, tr.tint_formula,
+             -- The rate that applied on the billing date, not today's (2.7).
+             COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+             (SELECT string_agg(ss.serial_number, ', ') FROM stock_serials ss
+               WHERE ss.invoice_line_id = il.line_id) AS serial_numbers
+        FROM invoice_lines il
+        JOIN products p ON p.product_id = il.product_id
         LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+        LEFT JOIN stock_batches sb ON sb.batch_id = il.batch_id
+        LEFT JOIN paint_tint_records tr ON tr.invoice_line_id = il.line_id
+        LEFT JOIN LATERAL (
+            SELECT gst_rate_pct FROM hsn_tax_rates
+             WHERE hsn_code = p.hsn_code
+               AND daterange(effective_from, effective_to, '[)') @> ${invoice.server_received_at}::date
+             LIMIT 1
+        ) htr ON TRUE
        WHERE il.invoice_id = ${id} ORDER BY il.line_id
     `.execute(trx)).rows;
     const payments = (await sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx)).rows;
 
-    const pdf = await generateInvoicePdf(invoice, lines, payments);
+    const pdf = await buildInvoicePdf(trx, invoice, lines, payments);
+    const label = invoice.status === 'DRAFT'
+      ? `Draft-${String(id).slice(0, 8)}`
+      : (invoice.invoice_number ?? id);
     reply.header('Content-Type', 'application/pdf');
     reply.header('Content-Disposition',
-      `inline; filename="Invoice-${(invoice.invoice_number ?? id).replace(/[^\w.-]/g, '_')}.pdf"`);
+      `inline; filename="${(invoice.invoice_type === 'GST' ? 'Invoice-' : 'Bill-')}${String(label).replace(/[^\w.-]/g, '_')}.pdf"`);
     return reply.send(pdf);
   }));
 
