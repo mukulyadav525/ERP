@@ -1,12 +1,23 @@
-# Hardware Store ERP
+# BHAWANI ONE — Smart Business Management System
 
-A multi-branch ERP for a hardware retail chain: catalog, GST billing, inventory and
-procurement, quotations, customer credit, returns and warranty, CRM, expenses, HR,
-reporting, and an admin control panel — built against the v6 requirements document.
+A multi-branch ERP for a hardware, paint, plumbing and electrical retail chain: catalog,
+GST billing, inventory and procurement, quotations, customer credit, returns and warranty,
+CRM, expenses, HR, reporting, and an admin control panel — built against the v6
+requirements document.
 
-**Status:** complete and verified. 260 API checks and 39 UI checks pass from a database
-built out of `db/schema.sql` + `db/seed.sql`. See `REQUIREMENTS_CHECKLIST.md` for the
-requirement-by-requirement mapping.
+**Status:** verified against a database built from scratch out of `db/schema.sql` +
+`db/seed.sql`. `npm run verify` runs typecheck, lint, build and the whole suite:
+
+| Suite | What it covers | Checks |
+|---|---|---|
+| `tests/tax-properties.mjs` | GST rounding, base-unit maths, returns, weighted-average cost, over ~50,000 generated cases | 20 |
+| `apps/api/scripts/smoke-test.mjs` | per-role and per-branch API behaviour, RLS in raw SQL | 254 |
+| `tests/regression.mjs` | every defect found in the production audit, plus negative and concurrency cases | 68 |
+| `tests/workflows.mjs` | the ten end-to-end business journeys, each cross-checked against the database | 68 |
+| `tests/pdf-matrix.mjs` + `pdf-geometry.mjs` | 13 document permutations, then an automatic margin/overlap check | 13 + 13 |
+| `tests/uitest.mjs` | a real browser: every page, 390px layout, the draft flow, roles, Hindi, themes, dead controls | 73 |
+
+See `REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping.
 
 ## Stack
 
@@ -44,16 +55,22 @@ erp-project/
 │   └── seed.sql                ← the entire demo dataset
 ├── apps/
 │   ├── api/                    ← Fastify + Kysely
-│   │   ├── src/lib/            ← db scoping, rbac, sessions, tax, ledger, audit, pdf
+│   │   ├── src/lib/            ← db scoping, rbac, sessions, tax, billing engine, ledger, audit
+│   │   ├── src/lib/pdf/        ← the document system: theme, renderer, business profile
 │   │   ├── src/routes/         ← one folder per requirements section
-│   │   └── scripts/smoke-test.mjs   ← 260 checks
+│   │   ├── assets/fonts/       ← Lohit Devanagari, for Hindi documents (OFL)
+│   │   └── scripts/smoke-test.mjs
 │   └── web/                    ← Next.js
 │       ├── styles/globals.css  ← the design tokens
 │       ├── components/ui.tsx   ← the shared component library
 │       └── pages/              ← 13 screens
-├── uitest.mjs                  ← 39 Playwright checks
-├── shots.mjs                   ← screenshot capture
-├── screenshots/
+├── tests/
+│   ├── tax-properties.mjs      ← property tests for the tax engine
+│   ├── regression.mjs          ← the audit's findings, locked down
+│   ├── workflows.mjs           ← the ten end-to-end business journeys
+│   ├── pdf-matrix.mjs          ← renders every document permutation
+│   ├── pdf-geometry.mjs        ← asserts nothing clips or overlaps
+│   └── uitest.mjs              ← browser checks (Playwright)
 ├── REQUIREMENTS_CHECKLIST.md
 └── docker-compose.yml
 ```
@@ -86,16 +103,31 @@ delivering.
 ## Verifying
 
 ```bash
-npm run typecheck
-npm run build
-node apps/api/scripts/smoke-test.mjs     # 260 checks, per-role and per-branch
-node uitest.mjs                          # 39 checks, desktop + mobile
+npm run verify        # typecheck + lint + build + every suite below
+npm test              # tax properties, API, regression, workflows, documents
+npm run test:ui       # browser checks (needs: npx playwright install chromium)
 ```
 
-The smoke test asserts real behaviour, not just status codes: that a Branch-1 cashier
-reads zero Branch-2 invoices *in SQL as `erp_app`*, that cost columns are masked for
-staff, that a void reverses the money, that two concurrent credit sales cannot both
-squeeze under one limit, and that a revoked token stops working immediately.
+The suites assert behaviour, not status codes: that a Branch-1 cashier reads zero
+Branch-2 invoices *in SQL as `erp_app`*, that cost columns are masked for staff, that a
+void reverses the money, that two concurrent credit sales cannot both squeeze under one
+limit, that two clerks refunding the same line at once cannot refund it twice, that a
+finalised invoice cannot be altered even by the database role the API connects as, and
+that the figure on the screen, in the ledger, in the report and on the PDF is the same
+figure.
+
+## Printed documents
+
+Three templates share one renderer (`src/lib/pdf/`): the **GST tax invoice**, the
+**non-GST cash memo / bill of supply**, and the **estimate / quotation**. They page
+automatically, repeat the column headings, size their money columns to the figures they
+actually hold, and carry the tax summary, amount in words, bank and UPI details,
+declaration, terms and signature. A draft prints as a watermarked proforma with no
+number, because it has not drawn one from the gapless series.
+
+Nothing about the shop is hard-coded. Name, logo, address, GSTIN, bank, UPI, declaration,
+terms and signature label all come from the **Business profile** in Admin → Settings,
+chain-wide or overridden per branch.
 
 ## Demo credentials
 

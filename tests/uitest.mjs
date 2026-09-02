@@ -14,7 +14,10 @@
 import { chromium } from '../node_modules/playwright/index.mjs';
 
 const WEB = process.env.WEB_URL ?? 'http://localhost:3000';
-const EXECUTABLE = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+// Playwright normally finds its own browser. CHROMIUM_PATH is an escape hatch for
+// environments that ship Chromium separately (a CI image, a sandbox) so the suite
+// does not have to download one.
+const EXECUTABLE = process.env.CHROMIUM_PATH ?? null;
 
 const C = { g: '\x1b[32m', r: '\x1b[31m', d: '\x1b[90m', b: '\x1b[1m', x: '\x1b[0m' };
 let passed = 0;
@@ -62,7 +65,14 @@ const PAGES = [
   ['/hr', 'Staff'], ['/reports', 'Reports'], ['/admin', 'Admin'],
 ];
 
-const browser = await chromium.launch({ executablePath: EXECUTABLE });
+let browser;
+try {
+  browser = await chromium.launch(EXECUTABLE ? { executablePath: EXECUTABLE } : {});
+} catch (err) {
+  console.error(`${C.r}Could not start Chromium.${C.x} Run "npx playwright install chromium",\n` +
+                `or set CHROMIUM_PATH to an existing browser binary.\n${err.message}`);
+  process.exit(2);
+}
 
 try {
   // ── Every page loads, for the Owner ───────────────────────────────────────

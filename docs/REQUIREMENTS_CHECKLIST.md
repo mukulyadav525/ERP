@@ -1,13 +1,19 @@
-# Hardware Store ERP — Requirements Compliance Checklist
+# BHAWANI ONE — Requirements Compliance Checklist
 
-**Status: 25 / 25 complete.** Verified against a database built from scratch out of
-`db/schema.sql` + `db/seed.sql`, with **260 API checks and 39 UI checks passing, 0 failures.**
+Verified against a database built from scratch out of `db/schema.sql` + `db/seed.sql`.
+**496 automated checks pass, 0 failures**, across six suites — see `PRODUCTION_AUDIT.md`
+for the audit that produced most of them, the defects it found, and the remaining issues.
 
 - Schema: `db/schema.sql` — 74 tables, all with row-level security enabled, 69 RLS policies
-- Seed: `db/seed.sql` — 3 branches, 11 users across 5 roles, 25 products, 60 customers, ~10,100 invoices over 270 days
-- API: Fastify + Kysely, 185 endpoints across 13 route modules, every one behind a permission gate
-- Web: Next.js, 13 pages on one design system, light/dark, responsive, Hindi/English
-- Tests: `apps/api/scripts/smoke-test.mjs` (260 checks) and `uitest.mjs` (39 checks)
+- Seed: `db/seed.sql` — 3 branches, 11 users across 5 roles, 25 products, 60 customers, ~9,900 invoices over 270 days
+- API: Fastify + Kysely across 13 route modules, every endpoint behind a permission gate
+- Web: Next.js, 13 pages on one design system, light/dark, responsive to 390px, Hindi/English
+- Tests: tax properties (20), API smoke (254), regression (68), workflows (68), documents (26), browser (73)
+
+**Since the first release:** billing gained a draft → review → edit → finalise flow with
+server-side recalculation at every step (Sections 11, 12, 62); the printed documents were
+rebuilt as three templates on one renderer with a configurable business profile
+(Sections 58–68); and thirteen defects were found and fixed, four of them financial.
 
 There is exactly **one** schema file and **one** seed file in the project. No other `.sql` exists.
 
@@ -114,6 +120,6 @@ quietly break a system months later.
 psql "$MIGRATION_DATABASE_URL" -v erp_app_password=<pw> -f db/schema.sql
 psql "$MIGRATION_DATABASE_URL" -f db/seed.sql
 npm install && npm run build && npm run dev
-node apps/api/scripts/smoke-test.mjs   # 260 checks
-node uitest.mjs                        # 39 checks
+npm run verify                         # typecheck + lint + build + all suites
+npm run test:ui                        # browser checks (npx playwright install chromium)
 ```

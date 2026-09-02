@@ -24,6 +24,7 @@
     "test:workflows": "node tests/workflows.mjs"
   },
   "devDependencies": {
-    "kysely-codegen": "^0.20.0"
+    "kysely-codegen": "^0.20.0",
+    "playwright": "^1.62.1"
   }
 }
