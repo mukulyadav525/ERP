@@ -55,6 +55,10 @@ export const SETTING_DEFAULTS = {
   // Compliance (Section 15)
   backup_frequency_hours:          24,
   einvoice_enabled:                false,
+  // Printed documents (Section 65). The full shape and its defaults live in
+  // lib/pdf/business-profile.ts, which is what the renderer reads; this entry
+  // exists so the key is a known setting and shows up in the admin panel.
+  business_profile:                {} as Record<string, unknown>,
 };
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

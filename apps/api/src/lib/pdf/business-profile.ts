@@ -124,8 +124,14 @@ export async function loadBusinessProfile(
     // always carries the GSTIN of the branch that actually issued it.
     profile.address = profile.address ?? branch.address ?? null;
     profile.phone = profile.phone ?? branch.phone ?? null;
+    // GSTIN stays branch-first: a document must carry the GSTIN of the branch that
+    // actually issued it, and a chain-wide profile cannot know which that is.
     profile.gstin = branch.gstin ?? profile.gstin ?? null;
-    profile.state_code = branch.state_code ?? profile.state_code ?? null;
+    // The printed state code follows the profile when the admin has set one. The
+    // branches table stores whatever the operator typed there ("MH"), which is
+    // fine for deciding intra- vs inter-state, but a tax invoice is expected to
+    // show the numeric GST state code ("27") — so an explicit setting wins.
+    profile.state_code = profile.state_code ?? branch.state_code ?? null;
     // The branch name is the trading name customers know ("Andheri West"), so it
     // is shown as the location line rather than replacing the business name.
     if (branch.name && !profile.city_state) profile.city_state = branch.name;

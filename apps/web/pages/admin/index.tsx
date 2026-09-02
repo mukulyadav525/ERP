@@ -1,5 +1,5 @@
 // Section 17 — Admin Control Panel.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import useSWR from 'swr';
 import { apiDelete, apiPost, apiPut, downloadCsv, fetcher, formatDate, formatDateTime, inr, num } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
@@ -62,11 +62,144 @@ function AdminScreen() {
 }
 
 // ── Settings (Section 17) ───────────────────────────────────────────────────
+
+/**
+ * A JSON setting that can actually be changed.
+ *
+ * The previous version rendered these read-only, behind a "view" disclosure —
+ * which meant a setting the requirements describe as admin-configurable could
+ * not be configured. The text is validated before it is sent so a stray comma
+ * is caught here rather than by a 400 from the server.
+ */
+function JsonSetting({ setting, disabled, busy, onSave }: {
+  setting: any; disabled: boolean; busy: boolean; onSave: (value: unknown) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(() => JSON.stringify(setting.effective_value ?? {}, null, 2));
+  const [error, setError] = useState<string | null>(null);
+
+  if (!open) {
+    return (
+      <div style={{ textAlign: 'right' }}>
+        <Button size="sm" disabled={disabled} onClick={() => {
+          setText(JSON.stringify(setting.effective_value ?? {}, null, 2));
+          setError(null); setOpen(true);
+        }}>Edit</Button>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <textarea value={text} rows={7} spellCheck={false}
+        aria-label={`${setting.label} value`}
+        style={{ width: '100%', fontFamily: 'var(--mono, monospace)', fontSize: 12 }}
+        onChange={(e) => { setText(e.target.value); setError(null); }} />
+      {error && <div className="small" style={{ color: 'var(--danger)', marginTop: 4 }}>{error}</div>}
+      <div className="row tight" style={{ marginTop: 6, justifyContent: 'flex-end' }}>
+        <Button size="sm" onClick={() => setOpen(false)}>Cancel</Button>
+        <Button size="sm" variant="primary" busy={busy} onClick={() => {
+          try {
+            const parsed = JSON.parse(text);
+            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+              setError('This setting must be a JSON object.'); return;
+            }
+            onSave(parsed); setOpen(false);
+          } catch (err: any) { setError(err.message); }
+        }}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+/** The fields printed on every invoice, cash memo and estimate (Section 65). */
+const PROFILE_FIELDS: { key: string; label: string; hint?: string; wide?: boolean }[] = [
+  { key: 'name', label: 'Business name' },
+  { key: 'legal_name', label: 'Legal name', hint: 'Used on the signature line, if different' },
+  { key: 'dealing_in', label: 'Dealing in', hint: 'The categories line under the shop name', wide: true },
+  { key: 'address', label: 'Address', wide: true },
+  { key: 'city_state', label: 'City / State line' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'alt_phone', label: 'Alternate phone' },
+  { key: 'email', label: 'Email' },
+  { key: 'gstin', label: 'GSTIN' },
+  { key: 'state', label: 'State' },
+  { key: 'state_code', label: 'State code' },
+  { key: 'bank_name', label: 'Bank' },
+  { key: 'bank_branch', label: 'Bank branch' },
+  { key: 'bank_account_no', label: 'Account number' },
+  { key: 'bank_ifsc', label: 'IFSC' },
+  { key: 'upi_id', label: 'UPI ID' },
+  { key: 'jurisdiction', label: 'Jurisdiction', hint: 'Printed as "Subject to … jurisdiction"' },
+  { key: 'signature_label', label: 'Signature label' },
+  { key: 'declaration', label: 'Declaration', wide: true },
+];
+
+/**
+ * The business identity behind every printed document.
+ *
+ * A form rather than a JSON blob, because the person who needs to change the
+ * shop's GSTIN or bank account is the owner, not an engineer — and a mistyped
+ * brace should not be able to break every invoice the shop prints.
+ */
+function BusinessProfileModal({ open, onClose, value, onSave, busy }: {
+  open: boolean; onClose: () => void; value: any; onSave: (v: any) => void; busy: boolean;
+}) {
+  const [draft, setDraft] = useState<Record<string, any>>({});
+  const [terms, setTerms] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    const v = value ?? {};
+    setDraft({ ...v });
+    setTerms(Array.isArray(v.terms) ? v.terms.join('\n') : '');
+  }, [open, value]);
+
+  const set = (k: string, v: string) => setDraft((d) => ({ ...d, [k]: v }));
+
+  return (
+    <Modal open={open} onClose={onClose} wide title="Business profile — printed documents"
+      footer={<>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" busy={busy} onClick={() => onSave({
+          ...draft,
+          terms: terms.split('\n').map((t) => t.trim()).filter(Boolean).slice(0, 8),
+        })}>Save profile</Button>
+      </>}>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        These appear on GST invoices, cash memos and estimates. A branch may hold its own
+        profile — pick the branch above before editing to override the chain-wide one.
+      </p>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+        {PROFILE_FIELDS.map((f) => (
+          <div key={f.key} style={f.wide ? { gridColumn: '1 / -1' } : undefined}>
+            <Field label={f.label} hint={f.hint}>
+              {f.wide && (f.key === 'declaration' || f.key === 'address')
+                ? <textarea rows={2} value={draft[f.key] ?? ''} onChange={(e) => set(f.key, e.target.value)} />
+                : <input value={draft[f.key] ?? ''} onChange={(e) => set(f.key, e.target.value)} />}
+            </Field>
+          </div>
+        ))}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <Field label="Terms & conditions" hint="One per line, up to 8">
+            <textarea rows={4} value={terms} onChange={(e) => setTerms(e.target.value)} />
+          </Field>
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <Field label="Logo" hint="A data: URI (data:image/png;base64,…) or an absolute path on the server. Leave blank to use the monogram.">
+            <input value={draft.logo ?? ''} onChange={(e) => set('logo', e.target.value)} />
+          </Field>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function SettingsTab() {
   const toast = useToast();
   const { branches } = useAuth();
   const [branchId, setBranchId] = useState('');
   const [saving, setSaving] = useState<string | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const path = `/api/admin/settings${branchId ? `?branch_id=${branchId}` : ''}`;
   const { data, error, isLoading, mutate } = useSWR<any[]>(path, fetcher);
@@ -173,14 +306,12 @@ function SettingsTab() {
                             </select>
                           )}
                           {s.type === 'json' && (
-                            <details>
-                              <summary className="muted small" style={{ cursor: 'pointer', textAlign: 'right' }}>
-                                view
-                              </summary>
-                              <pre className="mono small" style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>
-                                {JSON.stringify(value, null, 1)}
-                              </pre>
-                            </details>
+                            s.key === 'business_profile'
+                              ? <Button size="sm" onClick={() => setProfileOpen(true)} disabled={saving === s.key}>
+                                  Edit profile
+                                </Button>
+                              : <JsonSetting setting={s} disabled={disabled} busy={saving === s.key}
+                                             onSave={(v) => void save(s, v)} />
                           )}
                           {s.is_overridden_at_branch && (
                             <button className="btn ghost sm" style={{ marginTop: 6 }}
@@ -198,6 +329,18 @@ function SettingsTab() {
           </>
         )}
       </AsyncSection>
+
+      <BusinessProfileModal
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        value={(data ?? []).find((s: any) => s.key === 'business_profile')?.effective_value}
+        busy={saving === 'business_profile'}
+        onSave={(v) => {
+          const setting = (data ?? []).find((x: any) => x.key === 'business_profile');
+          if (setting) void save(setting, v);
+          setProfileOpen(false);
+        }}
+      />
     </div>
   );
 }

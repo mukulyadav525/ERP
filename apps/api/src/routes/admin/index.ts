@@ -11,6 +11,7 @@ import {
 import { badRequest, notFound } from '../../lib/errors.js';
 import { SETTING_DEFAULTS, loadSettings, type SettingKey } from '../../lib/settings.js';
 import { audit } from '../../lib/audit.js';
+import { BUSINESS_PROFILE_SETTING, DEFAULT_BUSINESS_PROFILE, normaliseProfile } from '../../lib/pdf/index.js';
 
 /**
  * The catalogue the Admin Settings screen renders from. Keeping the labels, types
@@ -67,6 +68,8 @@ const SETTING_META: Record<string, {
               { value: 'HARD_BLOCK', label: 'Block credit sales while offline' }],
     help: 'An offline till cannot confirm a live balance, so credit is drawn conservatively against the cached figure.' },
 
+  business_profile:           { label: 'Business profile (printed documents)', group: 'Documents', type: 'json', per_branch: true,
+    help: 'Name, logo, address, GSTIN, bank and UPI details, declaration, terms and signature label printed on invoices, cash memos and estimates. A branch may override the chain-wide profile with its own letterhead and bank account.' },
   login_method_by_role:       { label: 'Login method by role', group: 'Security', type: 'json', per_branch: false,
     help: 'Google for Owner/Manager and phone+PIN for shop-floor staff by default.' },
   otp_expiry_minutes:         { label: 'OTP expiry (minutes)', group: 'Security', type: 'number', per_branch: false, min: 1, max: 60,
@@ -187,7 +190,23 @@ export default async function adminRoutes(app: FastifyInstance) {
         break;
       }
       case 'json':
-        if (typeof value !== 'object' || value === null) throw badRequest(`"${meta.label}" must be an object.`);
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          throw badRequest(`"${meta.label}" must be an object.`);
+        }
+        if (key === BUSINESS_PROFILE_SETTING) {
+          // The name is checked on the RAW input, before normalising. Normalising
+          // substitutes a default for a blank name — correct when rendering a
+          // document, wrong here, where it would quietly accept a profile the
+          // admin thought they had filled in and replace the shop's identity with
+          // placeholder text on every future invoice.
+          const raw = value as Record<string, unknown>;
+          if (!('name' in raw) || typeof raw.name !== 'string' || !raw.name.trim()) {
+            throw badRequest('The business profile needs a name — it is printed at the top of every document.');
+          }
+          // This is a whole-document replace, like every other setting, so the
+          // client must send the complete profile rather than a patch.
+          value = normaliseProfile(value) as unknown as Record<string, unknown>;
+        }
         break;
     }
 
