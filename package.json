@@ -1,0 +1,20 @@
+{
+  "name": "erp-project",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/api & npm run dev --workspace=apps/web",
+    "db:migrate": "psql \"$MIGRATION_DATABASE_URL\" -f db/schema.sql",
+    "build": "npm run build --workspace=apps/api && npm run build --workspace=apps/web",
+    "db:seed": "psql \"$MIGRATION_DATABASE_URL\" -f db/seed.sql",
+    "db:reset": "npm run db:migrate && npm run db:seed",
+    "typecheck": "npm run typecheck --workspace=apps/api && npm run typecheck --workspace=apps/web",
+    "smoke": "node apps/api/scripts/smoke-test.mjs"
+  },
+  "devDependencies": {
+    "kysely-codegen": "^0.20.0"
+  }
+}
