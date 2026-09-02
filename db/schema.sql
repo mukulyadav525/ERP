@@ -2225,7 +2225,12 @@ BEGIN
         v_status
         USING ERRCODE = 'restrict_violation';
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+-- SECURITY DEFINER with a PINNED search_path, like every other definer function
+-- in this file. Without the pin, the app role could create a temp table called
+-- `invoices`, put it ahead of public on its search_path, and have this trigger
+-- read a fabricated status — turning the guard that protects finalised invoices
+-- into the thing that waves the delete through.
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
 DROP TRIGGER IF EXISTS trg_invoice_lines_draft_only ON invoice_lines;
 CREATE TRIGGER trg_invoice_lines_draft_only

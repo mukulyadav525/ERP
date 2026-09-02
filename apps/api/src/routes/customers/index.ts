@@ -7,7 +7,8 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, str, optionalStr, num, bool, oneOf, limit as clampLimit, writeBranch } from '../../lib/http.js';
+  guarded, uuid, str, optionalStr, num, bool, oneOf, limit as clampLimit, writeBranch,
+} from '../../lib/http.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { round2 } from '../../lib/tax.js';
 import { audit } from '../../lib/audit.js';
@@ -88,7 +89,8 @@ export default async function customersRoutes(app: FastifyInstance) {
       loyalty: loyalty.rows,
       lifetime_value: round2(invoices.rows
         .filter((i: any) => i.status === 'FINAL')
-        .reduce((s: number, i: any) => s + Number(i.grand_total), 0)) };
+        .reduce((s: number, i: any) => s + Number(i.grand_total), 0)),
+      };
   }));
 
   app.post('/', guarded('edit_customer', async ({ session, db: trx, req }) => {
@@ -184,7 +186,8 @@ export default async function customersRoutes(app: FastifyInstance) {
     // a credit sale is being rung up at another cannot overwrite it.
     const posted = await postCredit(trx, {
       customerId: id, branchId, entryType: 'PAYMENT_RECEIVED',
-      amount: -amount, refTable: 'manual' });
+      amount: -amount, refTable: 'manual',
+    });
     const balanceAfter = posted.balance_after;
     const entry = { entry_id: posted.entry_id, amount: -amount, balance_after: balanceAfter };
 

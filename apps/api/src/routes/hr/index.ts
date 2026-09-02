@@ -9,7 +9,8 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, str, optionalStr, num, oneOf,
-  writeBranch, resolveBranchScope, limit as clampLimit } from '../../lib/http.js';
+  writeBranch, resolveBranchScope, limit as clampLimit,
+} from '../../lib/http.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';

@@ -23,10 +23,12 @@ import { sql } from 'kysely';
 import { db } from '../../lib/db.js';
 import { env } from '../../lib/env.js';
 import {
-  guarded, uuid, str, optionalStr, oneOf, limit as clampLimit } from '../../lib/http.js';
+  guarded, uuid, str, optionalStr, oneOf, limit as clampLimit,
+} from '../../lib/http.js';
 import { badRequest, forbidden, tooMany, unauthorized, notFound } from '../../lib/errors.js';
 import {
-  issueToken, hashToken, issueResetToken, hashResetToken, generateOtp, bearerFrom } from '../../lib/session.js';
+  issueToken, hashToken, issueResetToken, hashResetToken, generateOtp, bearerFrom,
+} from '../../lib/session.js';
 import { ALL_ROLES, ROLE_META } from '../../lib/rbac.js';
 import { audit } from '../../lib/audit.js';
 import { queueAuthMessage } from '../../lib/whatsapp.js';
@@ -66,7 +68,8 @@ function finishLogin(row: AuthRow | undefined, token: string, branchName?: strin
           branch_name: branchName ?? null,
           full_name: row.full_name, email: row.email, phone: row.phone,
           language_pref: row.language_pref ?? 'en',
-          must_change_password: row.must_change_password ?? false } };
+          must_change_password: row.must_change_password ?? false },
+        };
     case 'LOCKED':
       throw tooMany('Too many failed attempts. This account is locked for a short while — ask your manager to reset it, or try again later.');
     case 'INACTIVE':
@@ -182,7 +185,8 @@ export default async function authRoutes(app: FastifyInstance) {
       // Development convenience, behind an explicit opt-in rather than a guess at
       // the environment: a deploy that merely forgot NODE_ENV would otherwise hand
       // out live verification codes in the HTTP response.
-      ...(env.exposeDevOtp && issued ? { dev_otp: otp } : {}) };
+      ...(env.exposeDevOtp && issued ? { dev_otp: otp } : {}),
+    };
   });
 
   app.post('/login/otp', authLimit, async (req) => {
@@ -271,7 +275,8 @@ export default async function authRoutes(app: FastifyInstance) {
     return {
       ok: true,
       message: 'If that account exists, reset instructions have been sent to the registered phone or email.',
-      ...(env.exposeDevOtp && row?.issued ? { dev_reset_token: token } : {}) };
+      ...(env.exposeDevOtp && row?.issued ? { dev_reset_token: token } : {}),
+    };
   });
 
   app.post('/reset', { config: { rateLimit: { max: 10, timeWindow: '10 minutes' } } }, async (req) => {
@@ -301,7 +306,8 @@ export default async function authRoutes(app: FastifyInstance) {
       email: session.email ?? null, phone: session.phone ?? null,
       language_pref: session.language_pref ?? 'en',
       must_change_password: session.must_change_password ?? false,
-      expires_at: session.expires_at };
+      expires_at: session.expires_at,
+    };
   }));
 
   app.post('/logout', async (req) => {
@@ -384,7 +390,8 @@ export default async function authRoutes(app: FastifyInstance) {
         ok: true,
         approval_id: row.approval_id,
         approver_name: row.approver_name,
-        expires_in_minutes: 10 };
+        expires_in_minutes: 10,
+      };
     }));
 
   // ── Active sessions (7.2 device-level login audit) ────────────────────────

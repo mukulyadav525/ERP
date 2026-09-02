@@ -20,7 +20,8 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, str, num, oneOf,
-  resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
+  resolveBranchScope, limit as clampLimit, arrayOf,
+} from '../../lib/http.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { computeReturnLine, round2 } from '../../lib/tax.js';
@@ -126,7 +127,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
       invoice: {
         invoice_id: invoice.invoice_id, invoice_number: invoice.invoice_number,
         invoice_type: invoice.invoice_type, grand_total: invoice.grand_total,
-        customer_name: invoice.customer_name, sold_at: invoice.server_received_at },
+        customer_name: invoice.customer_name, sold_at: invoice.server_received_at,
+      },
       days_since_sale: daysSince,
       // 12.3 — outside the return window an electrical or power-tool item is not
       // simply refused; it routes to a warranty claim instead.
@@ -142,7 +144,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
           warranty_months: l.warranty_months,
           route: remaining <= 0 ? 'FULLY_RETURNED'
                : withinWindow ? 'RETURN'
-               : l.warranty_months ? 'WARRANTY_CLAIM' : 'OUTSIDE_WINDOW' };
+               : l.warranty_months ? 'WARRANTY_CLAIM' : 'OUTSIDE_WINDOW',
+             };
       }) };
   }));
 
@@ -196,7 +199,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
     const requested = arrayOf(body.lines, 'lines', (l) => ({
       invoice_line_id: uuid(l.invoice_line_id, 'lines[].invoice_line_id'),
       qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-      condition: oneOf(l.condition ?? 'RESELLABLE', 'lines[].condition', ['RESELLABLE', 'DAMAGED'] as const) }));
+      condition: oneOf(l.condition ?? 'RESELLABLE', 'lines[].condition', ['RESELLABLE', 'DAMAGED'] as const),
+    }));
 
     const daysSince = Math.floor((Date.now() - new Date(invoice.server_received_at).getTime()) / 86_400_000);
 
@@ -467,7 +471,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
         await postCredit(trx, {
           customerId: invoice.customer_id, branchId: invoice.branch_id,
           entryType: 'REFUND_ADJUSTMENT', amount: -storeCredit,
-          refTable: 'sales_returns', refId: ret.return_id });
+          refTable: 'sales_returns', refId: ret.return_id,
+        });
       }
 
       if (customer.phone) {
@@ -519,7 +524,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
                  store_credit: storeCredit, points_revoked: pointsRevoked, points_restored: pointsRestored,
                  credit_note_number: creditNoteNumber, window_override_by: windowOverrideBy,
                  refund_method: refundMethod, till_session_id: tillSessionId,
-                 till_cash_reversed: tillCashReversed } });
+                 till_cash_reversed: tillCashReversed },
+               });
 
     return {
       return_id: ret.return_id,
@@ -542,7 +548,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
         : null,
       gst_note: creditNoteNumber
         ? 'Report this credit note in GSTR-1 for the period it was issued.'
-        : 'Non-GST sale — no credit note is required.' };
+        : 'Non-GST sale — no credit note is required.',
+      };
   }));
 
   // ── Credit notes (12.1.1, and the GSTR-1 outward-supply reduction) ────────

@@ -7,7 +7,8 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, str, optionalStr, num, oneOf, limit as clampLimit } from '../../lib/http.js';
+  guarded, uuid, str, optionalStr, num, oneOf, limit as clampLimit,
+} from '../../lib/http.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { audit } from '../../lib/audit.js';
@@ -136,7 +137,8 @@ export default async function crmRoutes(app: FastifyInstance) {
         .replace(/\{\{\s*date\s*\}\}/g, new Date().toLocaleDateString('en-IN'));
       await queueMessage(trx, {
         to_phone: r.phone, customer_id: r.customer_id, campaign_id: id,
-        message_type: 'CAMPAIGN', body: message });
+        message_type: 'CAMPAIGN', body: message,
+      });
     }
     return { ok: true, queued: recipients.length, segment };
   }));
@@ -186,7 +188,8 @@ export default async function crmRoutes(app: FastifyInstance) {
       await queueMessage(trx, {
         to_phone: c.phone, customer_id: c.customer_id, campaign_id: campaign?.campaign_id ?? null,
         message_type: 'BIRTHDAY',
-        body: template.replace(/\{\{\s*name\s*\}\}/g, c.name) });
+        body: template.replace(/\{\{\s*name\s*\}\}/g, c.name),
+      });
     }
     return { ok: true, queued: todays.length };
   }));

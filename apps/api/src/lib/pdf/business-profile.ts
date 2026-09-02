@@ -91,6 +91,14 @@ export function normaliseProfile(raw: unknown): BusinessProfile {
   }
   // A name is the one field a document cannot be printed without.
   if (!out.name) out.name = DEFAULT_BUSINESS_PROFILE.name;
+
+  // The logo is embedded, never read off the server's filesystem by path. A
+  // stored path would make the setting a file-read primitive pointed at whatever
+  // the API process can reach — a small thing, but there is no reason to hand it
+  // out, and a data: URI is what the admin screen produces anyway.
+  if (out.logo && !/^data:image\/(png|jpe?g);base64,/i.test(out.logo)) {
+    out.logo = null;
+  }
   return out;
 }
 

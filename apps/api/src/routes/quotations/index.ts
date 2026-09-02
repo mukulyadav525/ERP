@@ -10,12 +10,12 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, optionalStr, num, oneOf,
-  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
+  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf,
+} from '../../lib/http.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { computeLine, totalInvoice, round2 } from '../../lib/tax.js';
 import { nextNumber } from '../../lib/numbering.js';
-import {} from '../../lib/audit.js';
 import { buildEstimatePdf } from '../../lib/pdf/index.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
@@ -76,7 +76,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
     const computed = lines.map((l: any) => computeLine({
       qty_in_sale_unit: Number(l.qty_base_unit), multiplier_to_base: 1,
       rate_per_base_unit: Number(l.rate), gst_rate_pct: Number(l.gst_rate_pct),
-      price_type: quotation.price_type }));
+      price_type: quotation.price_type,
+    }));
     return { ...quotation, lines, totals: totalInvoice(computed) };
   }));
 
@@ -120,7 +121,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
     const computed = lines.map((l: any) => computeLine({
       qty_in_sale_unit: Number(l.qty_base_unit), multiplier_to_base: 1,
       rate_per_base_unit: Number(l.rate), gst_rate_pct: Number(l.gst_rate_pct),
-      price_type: quotation.price_type }));
+      price_type: quotation.price_type,
+    }));
     const totals = totalInvoice(computed);
 
     const docLines = lines.map((l: any, i: number) => ({
@@ -132,7 +134,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
       cgst_amount: computed[i].cgst_amount,
       sgst_amount: computed[i].sgst_amount,
       igst_amount: computed[i].igst_amount,
-      line_total: computed[i].line_total }));
+      line_total: computed[i].line_total,
+    }));
 
     const pdf = await buildEstimatePdf(trx, {
       ...quotation,
@@ -164,7 +167,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
     const lines = arrayOf(body.lines, 'lines', (l) => ({
       product_id: uuid(l.product_id, 'lines[].product_id'),
       qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-      rate: l.rate === undefined ? null : num(l.rate, 'lines[].rate', { min: 0 }) }));
+      rate: l.rate === undefined ? null : num(l.rate, 'lines[].rate', { min: 0 }),
+    }));
 
     const quotationNumber = await nextNumber(trx, branchId, 'QUOTATION');
     const quotation = (await sql<any>`
@@ -406,7 +410,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
       const posted = await postCredit(trx, {
         customerId: quotation.customer_id, branchId: quotation.branch_id,
         entryType: 'SALE_ON_CREDIT', amount: totals.payable,
-        refTable: 'invoices', refId: invoice.invoice_id, enforceLimit: true });
+        refTable: 'invoices', refId: invoice.invoice_id, enforceLimit: true,
+      });
       if (posted.over_limit) {
         throw conflict(`Converting this quote would take ${customer.name} to ₹${posted.balance_after.toFixed(2)} against a credit limit of ₹${posted.credit_limit.toFixed(2)}. Take payment, or raise the limit first.`);
       }
@@ -421,7 +426,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
     return {
       ok: true, invoice_id: invoice.invoice_id, invoice_number: invoiceNumber, totals,
       billed_to: payOnCredit ? 'CREDIT' : 'CASH',
-      place_of_supply: placeOfSupply };
+      place_of_supply: placeOfSupply,
+    };
   }));
 
   app.post('/:id/cancel', guarded('approve_quotation', async ({ db: trx, req }) => {
@@ -463,7 +469,8 @@ export default async function quotationsRoutes(app: FastifyInstance) {
     const customerId = uuid(body.customer_id, 'Customer');
     const lines = arrayOf(body.lines, 'lines', (l) => ({
       product_id: uuid(l.product_id, 'lines[].product_id'),
-      qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }) }));
+      qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
+    }));
 
     const challanNumber = await nextNumber(trx, branchId, 'CHALLAN');
     const challan = (await sql<any>`

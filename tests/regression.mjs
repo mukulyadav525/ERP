@@ -234,6 +234,70 @@ try {
     void blocked;
   }
 
+  section('A draft survives its product being retired (self-review finding)');
+  {
+    // Found by attacking the draft flow after building it: retiring a catalog
+    // product left an open draft that could not be read, edited OR discarded,
+    // because every path re-priced it first and the pricing threw.
+    const cat = (await call('GET', '/api/catalog/categories', { token: owner.token })).body[0];
+    const doomed = async () => {
+      const n = `${Date.now()}${Math.round(Math.random() * 1e6)}`;
+      const prod = await call('POST', '/api/catalog/products', { token: owner.token,
+        body: { name: `Retired ${n}`, sku: `RET-${n}`, category_id: cat.category_id, base_unit: 'PIECE',
+                hsn_code: '3917', default_price_type: 'TAX_INCLUSIVE', mrp: 100, selling_price: 80 } });
+      const d = await call('POST', '/api/billing/drafts', { token: cashier.token,
+        body: { invoice_type: 'GST', lines: [{ product_id: prod.body.product_id, qty_in_sale_unit: 1 }] } });
+      await call('PUT', `/api/catalog/products/${prod.body.product_id}`, { token: owner.token, body: { is_active: false } });
+      return d.body.invoice_id;
+    };
+
+    const readable = await call('GET', `/api/billing/drafts/${await doomed()}`, { token: cashier.token });
+    check('it can still be opened, and says what is wrong',
+      readable.status === 200 && Boolean(readable.body.pricing_error),
+      String(readable.body.pricing_error ?? readable.status).slice(0, 70));
+    check('and still lists the line that has to go',
+      (readable.body.unpriced_lines ?? []).length === 1);
+
+    const replaced = await call('PUT', `/api/billing/drafts/${readable.body.invoice_id}`, { token: cashier.token,
+      body: { lines: [{ product_id: P.product_id, qty_in_sale_unit: 1 }] } });
+    check('replacing the offending line repairs it', replaced.status === 200 && Number(replaced.body.totals.payable) > 0,
+      `payable ₹${replaced.body.totals?.payable}`);
+
+    check('and an unrepaired one can simply be thrown away',
+      (await call('DELETE', `/api/billing/drafts/${await doomed()}`, { token: cashier.token })).status === 200);
+
+    const fin = await call('POST', `/api/billing/drafts/${await doomed()}/finalize`, { token: cashier.token,
+      body: { payments: [{ method: 'CASH', amount: 1 }] } });
+    check('finalising it is refused with a message, not a 500', fin.status === 400,
+      `${fin.status} ${String(fin.body.error).slice(0, 60)}`);
+  }
+
+  section('The draft-only trigger cannot be tricked (self-review finding)');
+  {
+    // Every SECURITY DEFINER function in the schema pins its search_path; the one
+    // added for draft mutability originally did not, which would have let the app
+    // role shadow `invoices` with a temp table and read a fabricated status.
+    const cfg = await q(`SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc WHERE proname = 'erp_only_drafts_are_mutable'`);
+    check('the trigger function pins its search_path',
+      /search_path=public/.test(cfg[0]?.cfg ?? ''), cfg[0]?.cfg ?? 'not set');
+    const unpinned = await q(`SELECT count(*)::int c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                               WHERE n.nspname = 'public' AND p.prosecdef AND p.proconfig IS NULL`);
+    check('no SECURITY DEFINER function is left unpinned', unpinned[0].c === 0, `${unpinned[0].c} unpinned`);
+  }
+
+  section('The printed logo cannot point at the server\'s filesystem');
+  {
+    const attempt = await call('PUT', '/api/admin/settings/business_profile', { token: owner.token,
+      body: { value: { name: 'Bhawani Paint & Electric Hardware Stores', logo: '/etc/passwd' } } });
+    check('a filesystem path is dropped rather than stored',
+      attempt.status === 200 && (attempt.body.value?.logo ?? null) === null,
+      `stored logo: ${JSON.stringify(attempt.body.value?.logo)}`);
+    const ok = await call('PUT', '/api/admin/settings/business_profile', { token: owner.token,
+      body: { value: { name: 'Bhawani Paint & Electric Hardware Stores',
+                       logo: 'data:image/png;base64,iVBORw0KGgo=' } } });
+    check('an embedded image is kept', ok.status === 200 && String(ok.body.value?.logo).startsWith('data:image/png'));
+  }
+
   // ══ Concurrency ═══════════════════════════════════════════════════════════
   section('Concurrency (Section 40)');
   {

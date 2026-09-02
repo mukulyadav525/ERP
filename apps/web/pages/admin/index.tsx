@@ -185,7 +185,7 @@ function BusinessProfileModal({ open, onClose, value, onSave, busy }: {
           </Field>
         </div>
         <div style={{ gridColumn: '1 / -1' }}>
-          <Field label="Logo" hint="A data: URI (data:image/png;base64,…) or an absolute path on the server. Leave blank to use the monogram.">
+          <Field label="Logo" hint="Paste an embedded image as a data: URI (data:image/png;base64,…). Leave blank to use the monogram.">
             <input value={draft.logo ?? ''} onChange={(e) => set('logo', e.target.value)} />
           </Field>
         </div>

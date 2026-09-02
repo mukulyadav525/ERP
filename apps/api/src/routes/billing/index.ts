@@ -21,13 +21,15 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, str, optionalStr, num, bool, oneOf,
-  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf } from '../../lib/http.js';
+  writeBranch, resolveBranchScope, limit as clampLimit, arrayOf,
+} from '../../lib/http.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';
 import {
   priceBasket, rawLinesFromStored, assertPaymentsSettle,
-  type PricedBasket, type ParsedPayment } from '../../lib/billing-engine.js';
+  type PricedBasket, type ParsedPayment,
+} from '../../lib/billing-engine.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
@@ -129,7 +131,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       ...invoice,
       lines: maskCost(lines.rows, showCost, { keepRate: true }),
       payments: payments.rows,
-      returns: returns.rows };
+      returns: returns.rows,
+    };
   }));
 
   // ── Invoice PDF (3.6 printed + WhatsApp PDF, Sections 58-64) ──────────────
@@ -250,7 +253,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       branchId, invoiceType, rawLines, settings,
       branchStateCode: branch.state_code,
       placeOfSupplyStateCode: placeOfSupply,
-      applyCashRounding: bool(body.apply_cash_rounding, 'apply_cash_rounding', false) });
+      applyCashRounding: bool(body.apply_cash_rounding, 'apply_cash_rounding', false),
+    });
     const prepared = priced.lines;
     const totals = priced.totals;
 
@@ -291,7 +295,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       if (available < line.computed.base_unit_qty) {
         conflicts.push({
           product_id: line.product_id, product_name: line.product_name,
-          requested: line.computed.base_unit_qty, available });
+          requested: line.computed.base_unit_qty, available,
+        });
       }
     }
 
@@ -331,7 +336,8 @@ export default async function billingRoutes(app: FastifyInstance) {
     const payments = arrayOf(body.payments ?? [], 'payments', (p) => ({
       method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
       amount: num(p.amount, 'payments[].amount', { min: 0 }),
-      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: 1, max: 6 });
+      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: 1, max: 6,
+    });
 
     assertPaymentsSettle(payments, totals.payable);
 
@@ -392,7 +398,8 @@ export default async function billingRoutes(app: FastifyInstance) {
         // Over-limit sales are surfaced to the Owner rather than silently accepted.
         await audit(trx, session, 'CREDIT_LIMIT_CHANGE', 'customers', customer.customer_id,
           { after: { over_limit: true, projected_balance: projected, limit: effectiveLimit,
-                     approved_by: creditGrant.approver_id, approver: creditGrant.approver_name } });
+                     approved_by: creditGrant.approver_id, approver: creditGrant.approver_name },
+                   });
       }
     }
 
@@ -594,7 +601,8 @@ export default async function billingRoutes(app: FastifyInstance) {
         const posted = await postCredit(trx, {
           customerId: customer.customer_id, branchId, entryType: 'SALE_ON_CREDIT',
           amount: p.amount, refTable: 'invoices', refId: invoice.invoice_id,
-          enforceLimit: !creditOverrideBy });
+          enforceLimit: !creditOverrideBy,
+        });
         if (posted.over_limit) {
           throw conflict(`${customer.name} would go to ₹${posted.balance_after.toFixed(2)} against a limit of ₹${posted.credit_limit.toFixed(2)}. A manager PIN is needed to allow it.`);
         }
@@ -643,7 +651,8 @@ export default async function billingRoutes(app: FastifyInstance) {
 
     await audit(trx, session, 'INVOICE_FINALIZED', 'invoices', invoice.invoice_id, {
       after: { invoice_number: invoiceNumber, grand_total: totals.grand_total,
-               payable: totals.payable, from_draft: Boolean(opts.draftId) } });
+               payable: totals.payable, from_draft: Boolean(opts.draftId) },
+             });
 
     return {
       ...invoice,
@@ -652,7 +661,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       stock_conflicts: conflicts,
       warning: conflicts.length
         ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.'
-        : null };
+        : null,
+      };
   }
 
   /**
@@ -678,6 +688,22 @@ export default async function billingRoutes(app: FastifyInstance) {
   // from the catalog, the unit multiplier and the GST rate every single time. So
   // "edit the bill" cannot become "edit the amount the customer is charged".
   // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The draft row alone, with no pricing. Discarding a draft must not depend on
+   * whether its contents can still be priced.
+   */
+  async function loadDraftRow(trx: Tx, id: string) {
+    const row = (await sql<any>`
+      SELECT invoice_id, branch_id, status, created_by, grand_total, invoice_number
+        FROM invoices WHERE invoice_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!row) throw notFound('That draft was not found at your branch.');
+    if (row.status !== 'DRAFT') {
+      throw badRequest(`Invoice ${row.invoice_number ?? ''} is ${row.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
+    }
+    return row;
+  }
 
   /** Loads a draft with its lines and payments, re-priced from scratch. */
   async function loadDraft(trx: Tx, id: string) {
@@ -716,18 +742,31 @@ export default async function billingRoutes(app: FastifyInstance) {
     const settings = await loadSettings(trx, draft.branch_id);
     // Re-priced, never read back as stored: the stored figures are a cache of the
     // last computation, and this is the recomputation that makes them trustworthy.
-    const priced = storedLines.length
-      ? await priceBasket(trx, {
+    // Pricing can legitimately fail on an OLD draft — the clearest case being a
+    // product retired from the catalog while the bill sat open at the counter.
+    // Letting that throw made the draft unreadable, uneditable AND undiscardable:
+    // the cashier was left with a dead bill on screen and no way out of it. The
+    // failure is reported instead, so the screen can name the offending line and
+    // the cashier can remove it or throw the draft away.
+    let priced: PricedBasket | null = null;
+    let pricingError: string | null = null;
+    if (storedLines.length) {
+      try {
+        priced = await priceBasket(trx, {
           branchId: draft.branch_id,
           invoiceType: draft.invoice_type,
           rawLines: rawLinesFromStored(storedLines),
           settings,
           branchStateCode: draft.branch_state_code,
           placeOfSupplyStateCode: draft.place_of_supply_state_code,
-          applyCashRounding: Number(draft.round_off) !== 0 })
-      : null;
+          applyCashRounding: Number(draft.round_off) !== 0,
+        });
+      } catch (err) {
+        pricingError = err instanceof Error ? err.message : 'This draft can no longer be priced.';
+      }
+    }
 
-    return { draft, storedLines, payments, settings, priced };
+    return { draft, storedLines, payments, settings, priced, pricingError };
   }
 
   /** Writes a priced basket over a draft's lines, and refreshes its totals. */
@@ -783,7 +822,8 @@ export default async function billingRoutes(app: FastifyInstance) {
     return arrayOf(body.payments ?? [], 'payments', (p) => ({
       method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
       amount: num(p.amount, 'payments[].amount', { min: 0, max: 1e9 }),
-      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: required ? 1 : 0, max: 6 });
+      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: required ? 1 : 0, max: 6,
+    });
   }
 
   /**
@@ -807,16 +847,28 @@ export default async function billingRoutes(app: FastifyInstance) {
       discount_limit_pct: manager ? 100 : Number(settings.staff_discount_limit_pct),
       needs_approval_beyond_limit: !manager,
       finalize: true,
-      discard_any_draft: manager };
+      discard_any_draft: manager,
+    };
   }
 
   const draftView = (loaded: Awaited<ReturnType<typeof loadDraft>>, session: Session) => ({
     ...loaded.draft,
+    // Non-null when the stored lines can no longer be priced. The screen shows it
+    // and offers the two ways out: drop the offending line, or discard the draft.
+    pricing_error: loaded.pricingError,
+    unpriced_lines: loaded.pricingError
+      ? loaded.storedLines.map((l: any) => ({
+          product_id: l.product_id, product_name: l.product_name, sku: l.sku,
+          qty_in_sale_unit: Number(l.qty_in_sale_unit),
+          rate_locked_at_scan: Number(l.rate_locked_at_scan),
+        }))
+      : [],
     // The server's arithmetic, not the client's. This is the figure the review
     // screen must display and the figure finalisation will charge.
     totals: loaded.priced?.totals ?? {
       subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0,
-      tax_total: 0, grand_total: 0, round_off: 0, payable: 0 },
+      tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
+    },
     lines: (loaded.priced?.lines ?? []).map((l, i) => ({
       ...l.computed,
       product_id: l.product_id,
@@ -837,7 +889,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       implied_discount: l.implied_discount,
       gst_rate_pct: l.gst_rate_pct,
       batch_id: l.batch_id,
-      line_total: l.computed.line_total })),
+      line_total: l.computed.line_total,
+    })),
     payments: loaded.payments,
     catalog_value: loaded.priced?.catalog_value ?? 0,
     given_away: loaded.priced?.given_away ?? 0,
@@ -976,6 +1029,12 @@ export default async function billingRoutes(app: FastifyInstance) {
     const rawLines = body.lines === undefined
       ? rawLinesFromStored(loaded.storedLines)
       : arrayOf(body.lines, 'lines', (l) => l, { min: 0, max: 200 });
+    // Sending a fresh list of lines replaces whatever is stored, including a line
+    // that can no longer be priced — that is the way out of a stuck draft. Only an
+    // edit that keeps the existing lines needs them to still be priceable.
+    if (body.lines === undefined && loaded.pricingError) {
+      throw badRequest(`${loaded.pricingError} Send the corrected list of items with this change, or discard the draft.`);
+    }
 
     const applyCashRounding = body.apply_cash_rounding === undefined
       ? Number(draft.round_off) !== 0
@@ -987,9 +1046,11 @@ export default async function billingRoutes(app: FastifyInstance) {
           branchStateCode: draft.branch_state_code,
           placeOfSupplyStateCode: placeOfSupply,
           applyCashRounding,
-          repriceFromCatalog: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) })
+          repriceFromCatalog: bool(body.reprice_from_catalog, 'reprice_from_catalog', false),
+        })
       : { lines: [], totals: { subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0,
-            igst_total: 0, tax_total: 0, grand_total: 0, round_off: 0, payable: 0 },
+            igst_total: 0, tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
+          },
           catalog_value: 0, given_away: 0, discount_pct: 0, interstate: false,
           place_of_supply_state_code: placeOfSupply } as PricedBasket;
 
@@ -1010,7 +1071,8 @@ export default async function billingRoutes(app: FastifyInstance) {
     await audit(trx, session, 'INVOICE_DRAFT_UPDATED', 'invoices', id, {
       before: { grand_total: draft.grand_total, invoice_type: draft.invoice_type },
       after: { grand_total: priced.totals.grand_total, invoice_type: invoiceType,
-               repriced: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) } });
+               repriced: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) },
+             });
 
     return draftView(await loadDraft(trx, id), session);
   }));
@@ -1018,7 +1080,10 @@ export default async function billingRoutes(app: FastifyInstance) {
   // ── Discard a draft ───────────────────────────────────────────────────────
   app.delete('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
-    const loaded = await loadDraft(trx, id);
+    // Deliberately the row-only load: a draft whose product has been retired from
+    // the catalog cannot be priced, and refusing to throw it away because of that
+    // is how a cashier ends up stuck with a bill they can neither use nor clear.
+    const loaded = { draft: await loadDraftRow(trx, id) };
     // Somebody else's half-built bill is not yours to throw away; a manager can
     // clear an abandoned one.
     const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
@@ -1057,6 +1122,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as Record<string, any>;
     const loaded = await loadDraft(trx, id);
     if (!loaded.storedLines.length) throw badRequest('This draft has no items on it yet.');
+    if (loaded.pricingError) throw badRequest(`${loaded.pricingError} Fix the bill before finalising it.`);
 
     // Payments come from the request if given, otherwise from what was saved onto
     // the draft — a cashier who already entered the split does not have to retype it.
@@ -1079,7 +1145,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       sold_by_employee_id: body.sold_by_employee_id,
       discount_approval_id: body.discount_approval_id,
       negative_stock_approval_id: body.negative_stock_approval_id,
-      credit_approval_id: body.credit_approval_id }, { draftId: id });
+      credit_approval_id: body.credit_approval_id }, { draftId: id,
+    });
   }));
 
   /**
@@ -1107,7 +1174,8 @@ export default async function billingRoutes(app: FastifyInstance) {
     return {
       accepted: known,
       still_pending: ids.filter((id) => !accepted.has(id)),
-      instructions: 'Re-post anything under still_pending to POST /api/billing/invoices with the same client_txn_id. Duplicates are ignored.' };
+      instructions: 'Re-post anything under still_pending to POST /api/billing/invoices with the same client_txn_id. Duplicates are ignored.',
+    };
   }));
 
   // ── Void (3.6: a void keeps its number, it is never reused) ────────────────
@@ -1163,7 +1231,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       await postCredit(trx, {
         customerId: invoice.customer_id, branchId: invoice.branch_id,
         entryType: 'REFUND_ADJUSTMENT', amount: -creditPaid,
-        refTable: 'invoices', refId: id });
+        refTable: 'invoices', refId: id,
+      });
     }
 
     // 2. Loyalty: take back what was earned, give back what was spent.
@@ -1209,13 +1278,15 @@ export default async function billingRoutes(app: FastifyInstance) {
     await audit(trx, session, 'INVOICE_VOIDED', 'invoices', id, {
       before: { status: invoice.status, grand_total: invoice.grand_total },
       after: { status: 'VOID', reason, credit_reversed: creditPaid, cash_reversed: cashPaid,
-               till_session_id: invoice.till_session_id } });
+               till_session_id: invoice.till_session_id },
+             });
 
     return {
       ok: true,
       credit_reversed: creditPaid,
       cash_reversed: cashPaid,
-      message: 'Invoice voided. Stock, credit, loyalty points and the till entry have all been reversed.' };
+      message: 'Invoice voided. Stock, credit, loyalty points and the till entry have all been reversed.',
+    };
   }));
 
   // ── Till sessions (3.3 / 3.3.1) ───────────────────────────────────────────
@@ -1364,7 +1435,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       expected_drawer_cash: expected,
       counted_cash: counted,
       variance: counted === null ? null : round2(counted - expected),
-      payment_breakdown: nonCash };
+      payment_breakdown: nonCash,
+    };
   }));
 
   app.post('/till-sessions/:id/close', guarded('manage_till', async ({ session, db: trx, req }) => {

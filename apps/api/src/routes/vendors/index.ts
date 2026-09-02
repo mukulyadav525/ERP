@@ -7,9 +7,9 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
-  guarded, uuid, str, optionalStr, num, limit as clampLimit, writeBranch } from '../../lib/http.js';
+  guarded, uuid, str, optionalStr, num, limit as clampLimit, writeBranch,
+} from '../../lib/http.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
-import {} from '../../lib/tax.js';
 import { audit } from '../../lib/audit.js';
 import { loadSettings, canSeeCost } from '../../lib/settings.js';
 import { postVendor } from '../../lib/ledger.js';
@@ -62,7 +62,8 @@ export default async function vendorsRoutes(app: FastifyInstance) {
       balance_owed: Number(ledger.rows[0]?.balance_after ?? 0),
       ledger: ledger.rows,
       grns: showCost ? grns.rows : grns.rows.map(({ total_value, ...r }: any) => r),
-      products: showCost ? products.rows : products.rows.map(({ last_purchase_rate, ...r }: any) => r) };
+      products: showCost ? products.rows : products.rows.map(({ last_purchase_rate, ...r }: any) => r),
+    };
   }));
 
   app.post('/', guarded('edit_vendor', async ({ db: trx, req }) => {
@@ -121,7 +122,8 @@ export default async function vendorsRoutes(app: FastifyInstance) {
     if (amount > current + 0.01) throw badRequest(`Only ₹${current.toFixed(2)} is payable to this vendor.`);
 
     const posted = await postVendor(trx, {
-      vendorId: id, branchId, entryType: 'PAYMENT_MADE', amount: -amount, refTable: 'manual' });
+      vendorId: id, branchId, entryType: 'PAYMENT_MADE', amount: -amount, refTable: 'manual',
+    });
     await audit(trx, session, 'EXPENSE_APPROVED', 'vendor_ledger', posted.entry_id,
       { after: { vendor_id: id, amount, balance_after: posted.balance_after } });
     return { entry_id: posted.entry_id, amount: -amount, balance_after: posted.balance_after };

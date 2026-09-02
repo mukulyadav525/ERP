@@ -164,7 +164,8 @@ export function computeReturnLine(
   const sgst = round2(Number(original.sgst_amount) * ratio);
   const igst = round2(Number(original.igst_amount) * ratio);
   return { taxable_value: taxable, cgst_amount: cgst, sgst_amount: sgst, igst_amount: igst,
-           line_total: round2(taxable + cgst + sgst + igst) };
+           line_total: round2(taxable + cgst + sgst + igst),
+         };
 }
 
 /** Indian fiscal year, matching the SQL erp_fiscal_year() used for numbering. */
