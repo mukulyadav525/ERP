@@ -25,12 +25,17 @@ import {
 } from '../../lib/http.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
-import { computeLine, totalInvoice, round2, type ComputedLine } from '../../lib/tax.js';
+import { round2 } from '../../lib/tax.js';
+import {
+  priceBasket, rawLinesFromStored, assertPaymentsSettle,
+  type PreparedLine, type PricedBasket, type ParsedPayment,
+} from '../../lib/billing-engine.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import { generateInvoicePdf } from '../../lib/pdf.js';
 import type { Tx } from '../../lib/db.js';
+import type { Session } from '../../lib/session.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
 
 const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS'] as const;
@@ -159,9 +164,27 @@ export default async function billingRoutes(app: FastifyInstance) {
     return reply.send(pdf);
   }));
 
-  // ── Create an invoice ─────────────────────────────────────────────────────
-  app.post('/invoices', guarded('create_invoice', async ({ session, db: trx, req }) => {
-    const body = (req.body ?? {}) as Record<string, any>;
+  // ── Commit a sale ─────────────────────────────────────────────────────────
+  /**
+   * Everything that has to happen for a bill to become a real commercial
+   * document: number, stock, payments, ledger, loyalty, till, audit.
+   *
+   * There is exactly one copy of it, because there are now two ways in — a sale
+   * posted straight to FINAL (the fast counter path and the offline replay), and
+   * a DRAFT that has been reviewed and edited first. Two copies would drift, and
+   * the one that drifted would be the one that silently stopped decrementing
+   * stock or posting to the ledger.
+   *
+   * `opts.draftId` converts an existing DRAFT row in place rather than inserting
+   * a new invoice, so the draft the cashier reviewed and the invoice the customer
+   * receives are the same record, with the same id, and no orphan is left behind.
+   */
+  async function commitSale(
+    ctx: { session: Session; db: Tx },
+    body: Record<string, any>,
+    opts: { draftId?: string } = {},
+  ) {
+    const { session, db: trx } = ctx;
     const branchId = writeBranch(session, body.branch_id);
     const settings = await loadSettings(trx, branchId);
 
@@ -193,111 +216,25 @@ export default async function billingRoutes(app: FastifyInstance) {
     // place of supply is the customer's state when we know it, else the branch's.
     const placeOfSupply = optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 })
       ?? branch.state_code;
-    const interstate = placeOfSupply !== branch.state_code;
 
     // ── Price each line ─────────────────────────────────────────────────────
-    const prepared: Array<{
-      product_id: string; product_unit_id: string | null; qty_in_sale_unit: number;
-      computed: ComputedLine; price_type: 'TAX_INCLUSIVE' | 'TAX_EXCLUSIVE';
-      rate_locked_at_scan: number; catalog_rate: number; implied_discount: number;
-      batch_id: string | null;
-      tint?: { base_shade?: string | null; tint_formula?: string | null } | null;
-      serials: string[]; product_name: string;
-    }> = [];
-
-    for (const raw of rawLines) {
-      const productId = uuid(raw.product_id, 'lines[].product_id');
-      const qty = num(raw.qty_in_sale_unit, 'lines[].qty_in_sale_unit', { min: 0.0001 });
-      const productUnitId = optionalUuid(raw.product_unit_id, 'lines[].product_unit_id');
-
-      const product = (await sql<any>`
-        SELECT p.product_id, p.name, p.base_unit, p.hsn_code, p.default_price_type, p.batch_tracked, p.serial_tracked,
-               COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
-               COALESCE(pu.product_unit_id, defu.product_unit_id) AS resolved_unit_id,
-               pp.selling_price,
-               COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct
-          FROM products p
-          LEFT JOIN product_units pu ON pu.product_unit_id = ${productUnitId} AND pu.product_id = p.product_id
-          LEFT JOIN product_units defu ON defu.product_id = p.product_id AND defu.is_default_sale_unit
-          LEFT JOIN LATERAL (
-              SELECT selling_price FROM product_prices
-               WHERE product_id = p.product_id AND effective_to IS NULL
-               ORDER BY (branch_id = ${branchId}) DESC NULLS LAST LIMIT 1
-          ) pp ON TRUE
-          LEFT JOIN LATERAL (
-              SELECT gst_rate_pct FROM hsn_tax_rates
-               WHERE hsn_code = p.hsn_code
-                 AND daterange(effective_from, effective_to, '[)') @> CURRENT_DATE
-               LIMIT 1
-          ) htr ON TRUE
-         WHERE p.product_id = ${productId} AND p.is_active
-      `.execute(trx)).rows[0];
-      if (!product) throw badRequest(`One of the items is no longer in the catalog. Remove it and try again.`);
-
-      // 3.9 — a barcode is a speed option, never mandatory, unless the owner has
-      // turned that on for this branch.
-      if (settings.require_barcode_at_billing && !raw.scanned_barcode) {
-        const hasBarcode = (await sql<any>`SELECT 1 FROM product_barcodes WHERE product_id = ${productId} LIMIT 1`.execute(trx)).rows[0];
-        if (hasBarcode) throw badRequest(`"${product.name}" must be scanned — barcode entry is required at this branch.`);
-      }
-
-      // 3.10 — the price locked into the cart at scan time wins, because a price
-      // that moves under a customer mid-sale is worse than a few minutes of
-      // staleness. But "the client said so" cannot be the end of it: a rate below
-      // the catalog price is a discount by another name, and if it were not
-      // counted as one, posting rate: 1 would bypass the 3.4 ceiling entirely and
-      // leave no audit trail. The shortfall is therefore folded into the line's
-      // discount for the ceiling calculation below.
-      const catalogRate = Number(product.selling_price ?? 0);
-      if (!catalogRate) throw badRequest(`"${product.name}" has no selling price set. Add one in the catalog first.`);
-      const lockedRate = raw.rate_locked_at_scan === undefined
-        ? catalogRate
-        : num(raw.rate_locked_at_scan, 'lines[].rate_locked_at_scan', { min: 0 });
-
-      const priceType = oneOf(raw.price_type ?? product.default_price_type, 'lines[].price_type', PRICE_TYPES);
-      const gstRate = invoiceType === 'NON_GST' ? 0 : Number(product.gst_rate_pct);
-
-      const computed = computeLine({
-        qty_in_sale_unit: qty,
-        multiplier_to_base: Number(product.multiplier_to_base),
-        rate_per_base_unit: lockedRate,
-        gst_rate_pct: gstRate,
-        price_type: priceType,
-        discount_amount: raw.discount_amount === undefined ? 0 : num(raw.discount_amount, 'lines[].discount_amount', { min: 0 }),
-        interstate,
-      }, Number(settings.fractional_unit_rounding_dp));
-
-      // How much of the catalog price this line gave away, whether it was entered
-      // as a discount or quietly baked into a lowered rate.
-      const impliedDiscount = round2(
-        Math.max(catalogRate - lockedRate, 0) * computed.base_unit_qty + computed.discount_amount,
-      );
-
-      prepared.push({
-        product_id: productId,
-        product_unit_id: product.resolved_unit_id ?? null,
-        qty_in_sale_unit: qty,
-        computed,
-        price_type: priceType,
-        rate_locked_at_scan: lockedRate,
-        catalog_rate: catalogRate,
-        implied_discount: impliedDiscount,
-        batch_id: optionalUuid(raw.batch_id, 'lines[].batch_id'),
-        tint: raw.tint ?? null,
-        serials: Array.isArray(raw.serial_numbers) ? raw.serial_numbers.map(String) : [],
-        product_name: product.name,
-      });
-    }
-
-    const totals = totalInvoice(prepared.map((p) => p.computed), bool(body.apply_cash_rounding, 'apply_cash_rounding', false));
+    // Shared with the draft path, so a reviewed bill and a straight-to-final bill
+    // can never price the same basket differently.
+    const priced = await priceBasket(trx, {
+      branchId, invoiceType, rawLines, settings,
+      branchStateCode: branch.state_code,
+      placeOfSupplyStateCode: placeOfSupply,
+      applyCashRounding: bool(body.apply_cash_rounding, 'apply_cash_rounding', false),
+    });
+    const prepared = priced.lines;
+    const totals = priced.totals;
+    const interstate = priced.interstate;
 
     // ── 3.4 discount ceiling ────────────────────────────────────────────────
     // Measured against the CATALOG value of the basket, not against what was
     // billed, so a lowered line rate counts the same as a typed discount.
-    const catalogValue = round2(prepared.reduce(
-      (sum, p) => sum + p.catalog_rate * p.computed.base_unit_qty, 0));
-    const givenAway = round2(prepared.reduce((sum, p) => sum + p.implied_discount, 0));
-    const discountPct = catalogValue > 0 ? (givenAway / catalogValue) * 100 : 0;
+    const givenAway = priced.given_away;
+    const discountPct = priced.discount_pct;
     const discountLimit = Number(settings.staff_discount_limit_pct);
 
     let discountApprovedBy: string | null = null;
@@ -374,10 +311,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }),
     }), { min: 1, max: 6 });
 
-    const paidTotal = round2(payments.reduce((s, p) => s + p.amount, 0));
-    if (Math.abs(paidTotal - totals.payable) > 0.01) {
-      throw badRequest(`Payments total ₹${paidTotal.toFixed(2)} but the bill is ₹${totals.payable.toFixed(2)}. They must match.`);
-    }
+    assertPaymentsSettle(payments, totals.payable);
 
     // ── 11.2 loyalty redemption ─────────────────────────────────────────────
     const loyaltyPayment = payments.find((p) => p.method === 'LOYALTY_POINTS');
@@ -448,7 +382,6 @@ export default async function billingRoutes(app: FastifyInstance) {
     const claimed = body.device_created_at ? new Date(body.device_created_at) : new Date();
     const deviceCreatedAt = Number.isFinite(claimed.getTime()) ? claimed : new Date();
     const now = new Date();
-    const deviceClockSkewDays = Math.abs(now.getTime() - deviceCreatedAt.getTime()) / 86_400_000;
     // 10.2 sales attribution feeds the incentive report, so the tag has to be a
     // real employee AT THIS BRANCH. A foreign key alone would not do it: Postgres
     // bypasses RLS when checking a reference, so the FK would happily accept
@@ -482,18 +415,64 @@ export default async function billingRoutes(app: FastifyInstance) {
     // year comes from the SERVER clock.
     const invoiceNumber = await nextNumber(trx, branchId, 'INVOICE', now);
 
-    const invoice = (await sql<any>`
-      INSERT INTO invoices (invoice_number, branch_id, till_session_id, customer_id, invoice_type, status,
-                            subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
-                            round_off, place_of_supply_state_code, client_txn_id, device_created_at,
-                            is_offline_conflict, created_by, sold_by_employee_id)
-      VALUES (${invoiceNumber}, ${branchId}, ${tillSessionId}, ${customerId}, ${invoiceType}::invoice_type, 'FINAL',
-              ${totals.subtotal}, ${totals.discount_total}, ${totals.cgst_total}, ${totals.sgst_total},
-              ${totals.igst_total}, ${totals.grand_total}, ${totals.round_off}, ${placeOfSupply},
-              ${clientTxnId}, ${deviceCreatedAt}, ${conflicts.length > 0 && isOfflineSale},
-              ${session.user_id}, ${soldBy})
-      RETURNING *
-    `.execute(trx)).rows[0];
+    let invoice: any;
+    if (opts.draftId) {
+      // Converting a reviewed draft.
+      //
+      // The lock comes first, and the order of what follows matters: the draft's
+      // provisional lines have to be cleared while the row is still a DRAFT,
+      // because the database refuses to alter the lines of a FINAL invoice — that
+      // immutability is the point, and this path must work with it rather than
+      // around it. Flip the status first and the conversion is vetoed by our own
+      // guarantee.
+      //
+      // FOR UPDATE also settles the race: two clerks pressing Finalize on the same
+      // draft at the same moment serialise here, and the second one finds the row
+      // already FINAL and is refused rather than billing the customer twice.
+      const locked = (await sql<{ status: string }>`
+        SELECT status FROM invoices WHERE invoice_id = ${opts.draftId} FOR UPDATE
+      `.execute(trx)).rows[0];
+      if (!locked) throw notFound('That draft was not found at your branch.');
+      if (locked.status !== 'DRAFT') {
+        throw conflict('That draft has already been finalised or discarded.');
+      }
+
+      await sql`DELETE FROM paint_tint_records WHERE invoice_line_id IN
+                  (SELECT line_id FROM invoice_lines WHERE invoice_id = ${opts.draftId})`.execute(trx);
+      await sql`DELETE FROM invoice_lines WHERE invoice_id = ${opts.draftId}`.execute(trx);
+      await sql`DELETE FROM invoice_payments WHERE invoice_id = ${opts.draftId}`.execute(trx);
+
+      invoice = (await sql<any>`
+        UPDATE invoices
+           SET invoice_number = ${invoiceNumber}, status = 'FINAL',
+               till_session_id = ${tillSessionId}, customer_id = ${customerId},
+               invoice_type = ${invoiceType}::invoice_type,
+               subtotal = ${totals.subtotal}, discount_total = ${totals.discount_total},
+               cgst_total = ${totals.cgst_total}, sgst_total = ${totals.sgst_total},
+               igst_total = ${totals.igst_total}, grand_total = ${totals.grand_total},
+               round_off = ${totals.round_off}, place_of_supply_state_code = ${placeOfSupply},
+               is_offline_conflict = ${conflicts.length > 0 && isOfflineSale},
+               sold_by_employee_id = ${soldBy},
+               notes = ${optionalStr(body.notes, 'Notes', { max: 1000 })},
+               server_received_at = now(), updated_at = now()
+         WHERE invoice_id = ${opts.draftId} AND status = 'DRAFT'
+        RETURNING *
+      `.execute(trx)).rows[0];
+      if (!invoice) throw conflict('That draft has already been finalised or discarded.');
+    } else {
+      invoice = (await sql<any>`
+        INSERT INTO invoices (invoice_number, branch_id, till_session_id, customer_id, invoice_type, status,
+                              subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
+                              round_off, place_of_supply_state_code, client_txn_id, device_created_at,
+                              is_offline_conflict, created_by, sold_by_employee_id, notes)
+        VALUES (${invoiceNumber}, ${branchId}, ${tillSessionId}, ${customerId}, ${invoiceType}::invoice_type, 'FINAL',
+                ${totals.subtotal}, ${totals.discount_total}, ${totals.cgst_total}, ${totals.sgst_total},
+                ${totals.igst_total}, ${totals.grand_total}, ${totals.round_off}, ${placeOfSupply},
+                ${clientTxnId}, ${deviceCreatedAt}, ${conflicts.length > 0 && isOfflineSale},
+                ${session.user_id}, ${soldBy}, ${optionalStr(body.notes, 'Notes', { max: 1000 })})
+        RETURNING *
+      `.execute(trx)).rows[0];
+    }
 
     for (const line of prepared) {
       const inserted = (await sql<any>`
@@ -642,6 +621,11 @@ export default async function billingRoutes(app: FastifyInstance) {
         { after: { discount_pct: round2(discountPct), limit: discountLimit, approved_by: discountApprovedBy } });
     }
 
+    await audit(trx, session, 'INVOICE_FINALIZED', 'invoices', invoice.invoice_id, {
+      after: { invoice_number: invoiceNumber, grand_total: totals.grand_total,
+               payable: totals.payable, from_draft: Boolean(opts.draftId) },
+    });
+
     return {
       ...invoice,
       totals,
@@ -651,6 +635,428 @@ export default async function billingRoutes(app: FastifyInstance) {
         ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.'
         : null,
     };
+  }
+
+  /**
+   * The direct path: price, check and finalise in one request. This is what the
+   * fast counter sale and the offline replay use.
+   */
+  app.post('/invoices', guarded('create_invoice', async (ctx) =>
+    commitSale(ctx, (ctx.req.body ?? {}) as Record<string, any>)));
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // DRAFT BILLS — prepare, review, edit, finalise (Sections 3.x, 11, 12, 62)
+  //
+  // A cashier must be able to build a bill, look at it with the customer, change
+  // it, and only then commit it. That is what a draft is: a working document with
+  // no invoice number, no stock movement, no ledger entry and no loyalty posting.
+  // None of those happen until finalisation, which is the single moment the bill
+  // becomes a commercial document.
+  //
+  // The rule that makes this safe: every read and every edit re-prices the basket
+  // on the server. The browser never sends a subtotal, a tax figure or a grand
+  // total, and if it did they would be ignored — `priceBasket` recomputes them
+  // from the catalog, the unit multiplier and the GST rate every single time. So
+  // "edit the bill" cannot become "edit the amount the customer is charged".
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Loads a draft with its lines and payments, re-priced from scratch. */
+  async function loadDraft(trx: Tx, id: string, session: Session) {
+    const draft = (await sql<any>`
+      SELECT i.*, b.name AS branch_name, b.state_code AS branch_state_code, b.gstin AS branch_gstin,
+             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+             c.credit_allowed, c.credit_limit, c.loyalty_points_balance,
+             u.full_name AS created_by_name
+        FROM invoices i
+        JOIN branches b ON b.branch_id = i.branch_id
+        LEFT JOIN customers c ON c.customer_id = i.customer_id
+        LEFT JOIN users u ON u.user_id = i.created_by
+       WHERE i.invoice_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!draft) throw notFound('That draft was not found at your branch.');
+    if (draft.status !== 'DRAFT') {
+      throw badRequest(`Invoice ${draft.invoice_number ?? ''} is ${draft.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
+    }
+
+    const storedLines = (await sql<any>`
+      SELECT il.*, p.name AS product_name, p.sku
+        FROM invoice_lines il JOIN products p ON p.product_id = il.product_id
+       WHERE il.invoice_id = ${id} ORDER BY il.line_id
+    `.execute(trx)).rows;
+    const payments = (await sql<any>`
+      SELECT method, amount, ref_no FROM invoice_payments WHERE invoice_id = ${id}
+    `.execute(trx)).rows;
+
+    const settings = await loadSettings(trx, draft.branch_id);
+    // Re-priced, never read back as stored: the stored figures are a cache of the
+    // last computation, and this is the recomputation that makes them trustworthy.
+    const priced = storedLines.length
+      ? await priceBasket(trx, {
+          branchId: draft.branch_id,
+          invoiceType: draft.invoice_type,
+          rawLines: rawLinesFromStored(storedLines),
+          settings,
+          branchStateCode: draft.branch_state_code,
+          placeOfSupplyStateCode: draft.place_of_supply_state_code,
+          applyCashRounding: Number(draft.round_off) !== 0,
+        })
+      : null;
+
+    return { draft, storedLines, payments, settings, priced };
+  }
+
+  /** Writes a priced basket over a draft's lines, and refreshes its totals. */
+  async function writeDraftContents(
+    trx: Tx, invoiceId: string, priced: PricedBasket, settings: Awaited<ReturnType<typeof loadSettings>>,
+    payments: ParsedPayment[],
+  ) {
+    await sql`DELETE FROM paint_tint_records WHERE invoice_line_id IN
+                (SELECT line_id FROM invoice_lines WHERE invoice_id = ${invoiceId})`.execute(trx);
+    await sql`DELETE FROM invoice_lines WHERE invoice_id = ${invoiceId}`.execute(trx);
+    await sql`DELETE FROM invoice_payments WHERE invoice_id = ${invoiceId}`.execute(trx);
+
+    for (const line of priced.lines) {
+      const inserted = (await sql<any>`
+        INSERT INTO invoice_lines (invoice_id, product_id, product_unit_id, qty_in_sale_unit, base_unit_qty,
+                                   price_type, rate_locked_at_scan, discount_amount, taxable_value,
+                                   cgst_amount, sgst_amount, igst_amount, batch_id)
+        VALUES (${invoiceId}, ${line.product_id}, ${line.product_unit_id}, ${line.qty_in_sale_unit},
+                ${line.computed.base_unit_qty}, ${line.price_type}::price_type, ${line.rate_locked_at_scan},
+                ${line.computed.discount_amount}, ${line.computed.taxable_value}, ${line.computed.cgst_amount},
+                ${line.computed.sgst_amount}, ${line.computed.igst_amount}, ${line.batch_id})
+        RETURNING line_id
+      `.execute(trx)).rows[0];
+      if (line.tint && (line.tint.base_shade || line.tint.tint_formula) && settings.enable_tinting_records) {
+        await sql`
+          INSERT INTO paint_tint_records (invoice_line_id, base_shade, tint_formula)
+          VALUES (${inserted.line_id}, ${line.tint.base_shade ?? null}, ${line.tint.tint_formula ?? null})
+        `.execute(trx);
+      }
+    }
+
+    // Intended payments are kept alongside the draft so a half-taken split payment
+    // survives a page reload. They post nothing until finalisation.
+    for (const p of payments) {
+      if (p.amount <= 0) continue;
+      await sql`
+        INSERT INTO invoice_payments (invoice_id, method, amount, ref_no)
+        VALUES (${invoiceId}, ${p.method}::payment_method, ${p.amount}, ${p.ref_no})
+      `.execute(trx);
+    }
+
+    await sql`
+      UPDATE invoices
+         SET subtotal = ${priced.totals.subtotal}, discount_total = ${priced.totals.discount_total},
+             cgst_total = ${priced.totals.cgst_total}, sgst_total = ${priced.totals.sgst_total},
+             igst_total = ${priced.totals.igst_total}, grand_total = ${priced.totals.grand_total},
+             round_off = ${priced.totals.round_off}, updated_at = now()
+       WHERE invoice_id = ${invoiceId}
+    `.execute(trx);
+  }
+
+  function parsePayments(body: Record<string, any>, { required = true } = {}): ParsedPayment[] {
+    return arrayOf(body.payments ?? [], 'payments', (p) => ({
+      method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
+      amount: num(p.amount, 'payments[].amount', { min: 0, max: 1e9 }),
+      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }),
+    }), { min: required ? 1 : 0, max: 6 });
+  }
+
+  /**
+   * What this session is allowed to change on a draft (Section 7.1 field-level
+   * permissions). Returned with every draft so the review screen can grey out
+   * what the person cannot touch, while the server still enforces it.
+   */
+  function draftPermissions(session: Session, settings: Awaited<ReturnType<typeof loadSettings>>) {
+    const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
+    return {
+      edit_lines: true,
+      edit_quantity: true,
+      edit_customer: true,
+      edit_invoice_type: true,
+      edit_discount: true,
+      edit_notes: true,
+      edit_payment: true,
+      // A cashier may lower a rate, but only inside the staff ceiling; past that
+      // the server demands a manager grant at finalisation (3.4).
+      override_price: true,
+      discount_limit_pct: manager ? 100 : Number(settings.staff_discount_limit_pct),
+      needs_approval_beyond_limit: !manager,
+      finalize: true,
+      discard_any_draft: manager,
+    };
+  }
+
+  const draftView = (loaded: Awaited<ReturnType<typeof loadDraft>>, session: Session) => ({
+    ...loaded.draft,
+    // The server's arithmetic, not the client's. This is the figure the review
+    // screen must display and the figure finalisation will charge.
+    totals: loaded.priced?.totals ?? {
+      subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0,
+      tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
+    },
+    lines: (loaded.priced?.lines ?? []).map((l, i) => ({
+      ...l.computed,
+      product_id: l.product_id,
+      product_name: l.product_name,
+      sku: loaded.storedLines[i]?.sku ?? null,
+      hsn_code: l.hsn_code,
+      unit_label: l.unit_label,
+      qty_in_sale_unit: l.qty_in_sale_unit,
+      product_unit_id: l.product_unit_id,
+      price_type: l.price_type,
+      rate_locked_at_scan: l.rate_locked_at_scan,
+      catalog_rate: l.catalog_rate,
+      // Shown on the review screen so the cashier can see at a glance which lines
+      // are being sold below catalog and by how much.
+      price_changed_since_scan: round2(l.catalog_rate - l.rate_locked_at_scan) !== 0,
+      implied_discount: l.implied_discount,
+      gst_rate_pct: l.gst_rate_pct,
+      batch_id: l.batch_id,
+      line_total: l.computed.line_total,
+    })),
+    payments: loaded.payments,
+    catalog_value: loaded.priced?.catalog_value ?? 0,
+    given_away: loaded.priced?.given_away ?? 0,
+    discount_pct: round2(loaded.priced?.discount_pct ?? 0),
+    interstate: loaded.priced?.interstate ?? false,
+    permissions: draftPermissions(session, loaded.settings),
+    payment_shortfall: round2(
+      (loaded.priced?.totals.payable ?? 0) -
+      loaded.payments.reduce((s: number, p: any) => s + Number(p.amount), 0),
+    ),
+  });
+
+  // ── List drafts ───────────────────────────────────────────────────────────
+  app.get('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) => {
+    const q = (req.query ?? {}) as Record<string, string | undefined>;
+    const branchId = resolveBranchScope(session, q.branch_id);
+    return (await sql<any>`
+      SELECT i.invoice_id, i.branch_id, b.name AS branch_name, i.invoice_type, i.status,
+             i.grand_total, i.round_off, i.notes, i.server_received_at, i.updated_at,
+             c.name AS customer_name, c.phone AS customer_phone,
+             u.full_name AS created_by_name,
+             (SELECT count(*) FROM invoice_lines WHERE invoice_id = i.invoice_id) AS line_count
+        FROM invoices i
+        JOIN branches b ON b.branch_id = i.branch_id
+        LEFT JOIN customers c ON c.customer_id = i.customer_id
+        LEFT JOIN users u ON u.user_id = i.created_by
+       WHERE i.status = 'DRAFT'
+         ${branchId ? sql`AND i.branch_id = ${branchId}` : sql``}
+         ${q.mine === 'true' ? sql`AND i.created_by = ${session.user_id}` : sql``}
+       ORDER BY i.updated_at DESC
+       LIMIT ${clampLimit(q.limit, 50, 200)}
+    `.execute(trx)).rows;
+  }));
+
+  // ── Open a draft ──────────────────────────────────────────────────────────
+  app.post('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) => {
+    const body = (req.body ?? {}) as Record<string, any>;
+    const branchId = writeBranch(session, body.branch_id);
+    const settings = await loadSettings(trx, branchId);
+    const invoiceType = oneOf(body.invoice_type ?? 'GST', 'Invoice type', INVOICE_TYPES);
+    const customerId = optionalUuid(body.customer_id, 'customer_id');
+
+    const branch = (await sql<any>`SELECT * FROM branches WHERE branch_id = ${branchId}`.execute(trx)).rows[0];
+    if (!branch) throw notFound('Branch not found.');
+    if (customerId) {
+      const customer = (await sql<any>`SELECT customer_id FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
+      if (!customer) throw notFound('Customer not found.');
+    }
+
+    // A draft may legitimately start empty — the cashier opens the bill first and
+    // scans into it — so `lines` is optional here in a way it never is for a sale.
+    const rawLines = body.lines === undefined
+      ? []
+      : arrayOf(body.lines, 'lines', (l) => l, { min: 0, max: 200 });
+    const placeOfSupply = optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 })
+      ?? branch.state_code;
+    const applyCashRounding = bool(body.apply_cash_rounding, 'apply_cash_rounding', false);
+
+    const priced = rawLines.length
+      ? await priceBasket(trx, {
+          branchId, invoiceType, rawLines, settings,
+          branchStateCode: branch.state_code,
+          placeOfSupplyStateCode: placeOfSupply,
+          applyCashRounding,
+        })
+      : null;
+
+    // No invoice_number: the CHECK constraint on `invoices` permits NULL only
+    // while the row is not FINAL, which is exactly the guarantee wanted here —
+    // a draft physically cannot hold a number from the gapless series (3.6).
+    const draft = (await sql<any>`
+      INSERT INTO invoices (invoice_number, branch_id, customer_id, invoice_type, status,
+                            subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
+                            round_off, place_of_supply_state_code, device_created_at, created_by, notes)
+      VALUES (NULL, ${branchId}, ${customerId}, ${invoiceType}::invoice_type, 'DRAFT',
+              ${priced?.totals.subtotal ?? 0}, ${priced?.totals.discount_total ?? 0},
+              ${priced?.totals.cgst_total ?? 0}, ${priced?.totals.sgst_total ?? 0},
+              ${priced?.totals.igst_total ?? 0}, ${priced?.totals.grand_total ?? 0},
+              ${priced?.totals.round_off ?? 0}, ${placeOfSupply}, now(), ${session.user_id},
+              ${optionalStr(body.notes, 'Notes', { max: 1000 })})
+      RETURNING invoice_id
+    `.execute(trx)).rows[0];
+
+    if (priced) {
+      await writeDraftContents(trx, draft.invoice_id, priced, settings,
+        parsePayments(body, { required: false }));
+    }
+    await audit(trx, session, 'INVOICE_DRAFT_CREATED', 'invoices', draft.invoice_id,
+      { after: { lines: rawLines.length, invoice_type: invoiceType } });
+
+    return draftView(await loadDraft(trx, draft.invoice_id, session), session);
+  }));
+
+  // ── Read a draft (always server-recomputed) ───────────────────────────────
+  app.get('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'invoice_id');
+    return draftView(await loadDraft(trx, id, session), session);
+  }));
+
+  // ── Edit a draft ──────────────────────────────────────────────────────────
+  /**
+   * A whole-document replace, not a patch, because a bill is only meaningful as a
+   * whole: quantity, discount, price type, invoice type and customer all feed the
+   * same arithmetic, and applying them one at a time would let a client observe a
+   * half-edited total.
+   *
+   * `reprice_from_catalog` is the explicit "refresh cart prices" action from 3.10.
+   * Without it, line rates stay locked at what they were when scanned, which is
+   * the whole point of the price lock — an admin changing the catalog mid-sale
+   * must not move the number the customer is looking at.
+   */
+  app.put('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'invoice_id');
+    const body = (req.body ?? {}) as Record<string, any>;
+    const loaded = await loadDraft(trx, id, session);
+    const { draft, settings } = loaded;
+
+    const invoiceType = body.invoice_type === undefined
+      ? (draft.invoice_type as 'GST' | 'NON_GST')
+      : oneOf(body.invoice_type, 'Invoice type', INVOICE_TYPES);
+    const customerId = body.customer_id === undefined
+      ? draft.customer_id
+      : optionalUuid(body.customer_id, 'customer_id');
+    if (customerId) {
+      const customer = (await sql<any>`SELECT customer_id FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
+      if (!customer) throw notFound('Customer not found.');
+    }
+    const placeOfSupply = body.place_of_supply_state_code === undefined
+      ? draft.place_of_supply_state_code
+      : (optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 }) ?? draft.branch_state_code);
+
+    const rawLines = body.lines === undefined
+      ? rawLinesFromStored(loaded.storedLines)
+      : arrayOf(body.lines, 'lines', (l) => l, { min: 0, max: 200 });
+
+    const applyCashRounding = body.apply_cash_rounding === undefined
+      ? Number(draft.round_off) !== 0
+      : bool(body.apply_cash_rounding, 'apply_cash_rounding', false);
+
+    const priced = rawLines.length
+      ? await priceBasket(trx, {
+          branchId: draft.branch_id, invoiceType, rawLines, settings,
+          branchStateCode: draft.branch_state_code,
+          placeOfSupplyStateCode: placeOfSupply,
+          applyCashRounding,
+          repriceFromCatalog: bool(body.reprice_from_catalog, 'reprice_from_catalog', false),
+        })
+      : { lines: [], totals: { subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0,
+            igst_total: 0, tax_total: 0, grand_total: 0, round_off: 0, payable: 0 },
+          catalog_value: 0, given_away: 0, discount_pct: 0, interstate: false,
+          place_of_supply_state_code: placeOfSupply } as PricedBasket;
+
+    await sql`
+      UPDATE invoices
+         SET invoice_type = ${invoiceType}::invoice_type, customer_id = ${customerId},
+             place_of_supply_state_code = ${placeOfSupply},
+             notes = ${body.notes === undefined ? draft.notes : optionalStr(body.notes, 'Notes', { max: 1000 })},
+             updated_at = now()
+       WHERE invoice_id = ${id} AND status = 'DRAFT'
+    `.execute(trx);
+
+    const payments = body.payments === undefined
+      ? loaded.payments.map((p: any) => ({ method: p.method, amount: Number(p.amount), ref_no: p.ref_no }))
+      : parsePayments(body, { required: false });
+
+    await writeDraftContents(trx, id, priced, settings, payments);
+    await audit(trx, session, 'INVOICE_DRAFT_UPDATED', 'invoices', id, {
+      before: { grand_total: draft.grand_total, invoice_type: draft.invoice_type },
+      after: { grand_total: priced.totals.grand_total, invoice_type: invoiceType,
+               repriced: bool(body.reprice_from_catalog, 'reprice_from_catalog', false) },
+    });
+
+    return draftView(await loadDraft(trx, id, session), session);
+  }));
+
+  // ── Discard a draft ───────────────────────────────────────────────────────
+  app.delete('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'invoice_id');
+    const loaded = await loadDraft(trx, id, session);
+    // Somebody else's half-built bill is not yours to throw away; a manager can
+    // clear an abandoned one.
+    const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
+    if (!manager && loaded.draft.created_by !== session.user_id) {
+      throw forbidden('That draft was started by someone else. Ask a manager to discard it.');
+    }
+
+    await sql`DELETE FROM paint_tint_records WHERE invoice_line_id IN
+                (SELECT line_id FROM invoice_lines WHERE invoice_id = ${id})`.execute(trx);
+    await sql`DELETE FROM invoice_lines WHERE invoice_id = ${id}`.execute(trx);
+    await sql`DELETE FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx);
+    const deleted = await sql<{ invoice_id: string }>`
+      DELETE FROM invoices WHERE invoice_id = ${id} AND status = 'DRAFT' RETURNING invoice_id
+    `.execute(trx);
+    if (!deleted.rows.length) throw conflict('That draft is no longer a draft.');
+
+    await audit(trx, session, 'INVOICE_DRAFT_DISCARDED', 'invoices', id,
+      { before: { grand_total: loaded.draft.grand_total } });
+    return { ok: true, discarded: id };
+  }));
+
+  // ── Finalise a draft ──────────────────────────────────────────────────────
+  /**
+   * The moment the working document becomes a commercial one. It runs the exact
+   * same `commitSale` path a direct sale runs, built from the lines stored in the
+   * database rather than from anything the client posts — so a browser that edits
+   * its local copy of the bill and then presses Finalize changes nothing at all.
+   *
+   * The request body may still carry the things that are genuinely decided at this
+   * step and cannot be stored earlier: the till the cash goes into, the manager
+   * approval grants, and the salesperson tag.
+   */
+  app.post('/drafts/:id/finalize', guarded('create_invoice', async (ctx) => {
+    const { session, db: trx, req } = ctx;
+    const id = uuid((req.params as any).id, 'invoice_id');
+    const body = (req.body ?? {}) as Record<string, any>;
+    const loaded = await loadDraft(trx, id, session);
+    if (!loaded.storedLines.length) throw badRequest('This draft has no items on it yet.');
+
+    // Payments come from the request if given, otherwise from what was saved onto
+    // the draft — a cashier who already entered the split does not have to retype it.
+    const payments = body.payments === undefined
+      ? loaded.payments.map((p: any) => ({ method: p.method, amount: Number(p.amount), ref_no: p.ref_no }))
+      : parsePayments(body);
+    if (!payments.length) throw badRequest('Enter how the customer is paying before finalising.');
+
+    return commitSale(ctx, {
+      branch_id: loaded.draft.branch_id,
+      invoice_type: loaded.draft.invoice_type,
+      customer_id: loaded.draft.customer_id,
+      place_of_supply_state_code: loaded.draft.place_of_supply_state_code,
+      apply_cash_rounding: Number(loaded.draft.round_off) !== 0,
+      notes: loaded.draft.notes,
+      // Straight from the database — the authoritative copy of what was reviewed.
+      lines: rawLinesFromStored(loaded.storedLines),
+      payments,
+      till_session_id: body.till_session_id,
+      sold_by_employee_id: body.sold_by_employee_id,
+      discount_approval_id: body.discount_approval_id,
+      negative_stock_approval_id: body.negative_stock_approval_id,
+      credit_approval_id: body.credit_approval_id,
+    }, { draftId: id });
   }));
 
   /**

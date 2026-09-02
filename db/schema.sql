@@ -786,6 +786,12 @@ CREATE TABLE invoices (
     is_offline_conflict BOOLEAN NOT NULL DEFAULT FALSE,  -- STOCK_CONFLICT flag (3.5.1 ENG-FIX)
     conflict_resolved_by UUID REFERENCES users(user_id),
     created_by      UUID REFERENCES users(user_id),
+    -- Free text the cashier can put on the bill (delivery instruction, site name,
+    -- vehicle number). Editable while DRAFT, frozen once FINAL like everything else.
+    notes           TEXT,
+    -- A draft is edited repeatedly before it becomes a commercial document, so it
+    -- needs a "last touched" that is separate from when it was first opened.
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_final_invoice_has_number
         CHECK (status <> 'FINAL' OR invoice_number IS NOT NULL)   -- enforces the rule above, not just documents it
 );
@@ -2176,3 +2182,56 @@ REVOKE DELETE, UPDATE ON audit_log, stock_ledger, login_attempts FROM erp_app;
 REVOKE ALL ON auth_message_outbox FROM erp_app;
 REVOKE ALL ON override_approvals FROM erp_app;
 REVOKE DELETE ON invoices, invoice_lines, credit_notes, credit_note_lines FROM erp_app;
+
+-- ── Draft bills are editable; finalised ones are not (Sections 3.x, 11, 12) ──
+-- A draft is a working document: the cashier adds, removes and re-prices lines
+-- on it before the bill becomes a commercial record. That needs DELETE on the
+-- line tables, which the blanket REVOKE above rightly withheld — its purpose was
+-- to make a FINAL invoice physically unalterable, and that must survive.
+--
+-- So the privilege is granted back and then narrowed by a trigger, which is
+-- strictly stronger than leaving it revoked and doing the check in application
+-- code: a bug in a route, or a second service connecting with the same role,
+-- still cannot delete a line off a finalised invoice.
+GRANT DELETE ON invoices, invoice_lines TO erp_app;
+
+CREATE OR REPLACE FUNCTION erp_only_drafts_are_mutable() RETURNS TRIGGER AS $$
+DECLARE
+    v_status invoice_status;
+BEGIN
+    IF TG_TABLE_NAME = 'invoices' THEN
+        v_status := OLD.status;
+    ELSE
+        SELECT status INTO v_status FROM invoices WHERE invoice_id = OLD.invoice_id;
+    END IF;
+
+    -- A missing parent means the invoice row itself is being removed in the same
+    -- statement, which only the draft path can do (the invoices trigger below has
+    -- already vetted it).
+    IF v_status IS NULL OR v_status = 'DRAFT' THEN
+        RETURN OLD;
+    END IF;
+
+    RAISE EXCEPTION
+        'Invoice % is % and cannot be altered. Use a void, a sales return or a credit note instead.',
+        COALESCE((SELECT invoice_number FROM invoices WHERE invoice_id = OLD.invoice_id), OLD.invoice_id::text),
+        v_status
+        USING ERRCODE = 'restrict_violation';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_invoice_lines_draft_only ON invoice_lines;
+CREATE TRIGGER trg_invoice_lines_draft_only
+    BEFORE DELETE ON invoice_lines
+    FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
+
+DROP TRIGGER IF EXISTS trg_invoice_payments_draft_only ON invoice_payments;
+CREATE TRIGGER trg_invoice_payments_draft_only
+    BEFORE DELETE ON invoice_payments
+    FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
+
+DROP TRIGGER IF EXISTS trg_invoices_draft_only ON invoices;
+CREATE TRIGGER trg_invoices_draft_only
+    BEFORE DELETE ON invoices
+    FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
+
