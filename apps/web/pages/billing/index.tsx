@@ -10,16 +10,16 @@
 //  • split payment must reconcile to the bill before the button enables (3.2)
 //  • an offline sale is queued locally and replayed with a client_txn_id (3.5)
 // ============================================================================
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import useSWR from 'swr';
 import {
-  apiGet, apiPost, downloadFile, fetcher, inr, num, withBranch, formatDateTime,
+  apiGet, apiPost, apiPut, apiDelete, downloadFile, fetcher, inr, num, withBranch, formatDateTime,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
 import { useToast } from '../../lib/ToastContext';
 import {
-  Alert, AsyncSection, Badge, Button, Card, DataTable, EmptyState, Field, Modal,
+  Alert, AsyncSection, Badge, Button, Card, DataTable, EmptyState, Field, KeyValue, Modal,
   PageHeader, RequirePermission, SearchInput, StatusBadge, StatTile, Tabs, useDebounced,
 } from '../../components/ui';
 
@@ -139,6 +139,13 @@ function PosTab() {
   ]);
   const [busy, setBusy] = useState(false);
   const [lastInvoice, setLastInvoice] = useState<any | null>(null);
+  // ── Review before finalising (Sections 11, 62) ───────────────────────────
+  // `draft` is the SERVER's copy of the bill, re-priced by the server on every
+  // save. The review screen renders that object and never the local cart totals,
+  // which is the whole point: what the cashier approves is what the server will
+  // charge, not what the browser calculated.
+  const [draft, setDraft] = useState<any | null>(null);
+  const [reviewing, setReviewing] = useState(false);
   const [overridePin, setOverridePin] = useState('');
   const [pinModal, setPinModal] = useState<null | 'DISCOUNT' | 'NEGATIVE_STOCK' | 'CREDIT_LIMIT'>(null);
   // A manager's approval is a single-use grant tied to this purpose, this branch
@@ -225,6 +232,7 @@ function PosTab() {
   function clearCart() {
     setCart([]); setCustomer(null); setPayments([{ method: 'CASH', amount: 0 }]);
     setApprovals({});
+    setDraft(null); setReviewing(false);
   }
 
   /** 3.10 — the explicit refresh. Prices only move when the cashier asks. */
@@ -252,6 +260,93 @@ function PosTab() {
       toast.success(`Approved by ${res.approver_name}`,
         `Valid for this sale only, for the next ${res.expires_in_minutes} minutes.`);
     } catch (err) { toast.error(err); }
+  }
+
+  /** The cart, in the shape both the draft and the sale endpoints accept. */
+  function billBody() {
+    return {
+      invoice_type: invoiceType,
+      customer_id: customer?.customer_id ?? null,
+      lines: cart.map((l) => ({
+        product_id: l.product_id,
+        qty_in_sale_unit: l.qty,
+        rate_locked_at_scan: l.rate,
+        price_type: l.price_type,
+        discount_amount: l.discount || 0,
+      })),
+      payments: payments.filter((p) => Number(p.amount) > 0)
+        .map((p) => ({ method: p.method, amount: Number(p.amount), ref_no: p.ref_no || undefined })),
+    };
+  }
+
+  /**
+   * Saves the bill as a draft and opens the review screen.
+   *
+   * Nothing is committed here: no invoice number is drawn, no stock moves, no
+   * ledger entry is written. The response is the server's own pricing of the
+   * basket, which is what the review screen then shows.
+   */
+  async function openReview() {
+    if (!cart.length) return;
+    setBusy(true);
+    try {
+      const saved = draft?.invoice_id
+        ? await apiPut<any>(`/api/billing/drafts/${draft.invoice_id}`, billBody())
+        : await apiPost<any>('/api/billing/drafts', billBody());
+      setDraft(saved);
+      setReviewing(true);
+    } catch (err) { toast.error(err); }
+    finally { setBusy(false); }
+  }
+
+  /** Back to the cart. The draft stays on the server so nothing is retyped. */
+  function backToEdit() { setReviewing(false); }
+
+  async function discardDraft() {
+    if (!draft?.invoice_id) { clearCart(); return; }
+    setBusy(true);
+    try {
+      await apiDelete(`/api/billing/drafts/${draft.invoice_id}`);
+      clearCart();
+      toast.success('Draft discarded.');
+    } catch (err) { toast.error(err); }
+    finally { setBusy(false); }
+  }
+
+  /**
+   * Finalises the reviewed draft. The lines are NOT re-sent: the server bills
+   * what it stored and re-priced, so editing the page in a browser console
+   * between review and finalise changes nothing.
+   */
+  async function finalizeDraft() {
+    if (!draft?.invoice_id) return;
+    const payable = Number(draft?.totals?.payable ?? 0);
+    const paid = round2(payments.reduce((sum, pp) => sum + (Number(pp.amount) || 0), 0));
+    if (Math.abs(paid - payable) > 0.01) {
+      toast.error(new Error(`Payments are ₹${Math.abs(payable - paid).toFixed(2)} ${paid < payable ? 'short' : 'over'}.`));
+      return;
+    }
+    if (needsDiscountApproval && !approvals.DISCOUNT) { setPinModal('DISCOUNT'); return; }
+    setBusy(true);
+    try {
+      const invoice = await apiPost<any>(`/api/billing/drafts/${draft.invoice_id}/finalize`, {
+        till_session_id: openTill?.session_id ?? null,
+        discount_approval_id: approvals.DISCOUNT ?? undefined,
+        negative_stock_approval_id: approvals.NEGATIVE_STOCK ?? undefined,
+        credit_approval_id: approvals.CREDIT_LIMIT ?? undefined,
+        payments: payments.filter((pp) => Number(pp.amount) > 0)
+          .map((pp) => ({ method: pp.method, amount: Number(pp.amount), ref_no: pp.ref_no || undefined })),
+      });
+      setLastInvoice(invoice);
+      clearCart();
+      void refreshTills();
+      toast.success(`Bill ${invoice.invoice_number} created`, inr(invoice.grand_total, { decimals: true }));
+    } catch (err: any) {
+      if (err?.status === 409 && /manager PIN/i.test(String(err.message))) {
+        setPinModal(/credit limit/i.test(String(err.message)) ? 'CREDIT_LIMIT' : 'NEGATIVE_STOCK');
+      }
+      toast.error(err);
+    } finally { setBusy(false); }
   }
 
   async function completeSale() {
@@ -331,6 +426,28 @@ function PosTab() {
     void drain();
     return () => window.removeEventListener('online', drain);
   }, [toast]);
+
+  // The review step takes over the whole POS panel rather than opening a modal:
+  // this is the screen the cashier turns towards the customer, and a dialog over
+  // a half-visible cart is the wrong thing to show them.
+  if (reviewing && draft) {
+    return (
+      <>
+        <ReviewScreen
+          draft={draft} payments={payments} setPayments={setPayments}
+          openTill={openTill} busy={busy}
+          onEdit={backToEdit}
+          onFinalize={() => void finalizeDraft()}
+          onDiscard={() => void discardDraft()}
+          t={t}
+        />
+        <PinModal purpose={pinModal} pin={overridePin} setPin={setOverridePin}
+                  givenAwayPct={givenAwayPct} discountLimit={discountLimit}
+                  onClose={() => { setPinModal(null); setOverridePin(''); }}
+                  onVerify={verifyPin} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -531,36 +648,9 @@ function PosTab() {
             )}
           </Card>
 
-          <Card title={t('payment')} description="Split across as many methods as you need"
-            right={<Button size="sm" onClick={() => setPayments((p) => [...p, { method: 'UPI', amount: Math.max(balance, 0) }])}>
-              + Split
-            </Button>}>
+          <Card title={t('payment')} description="Split across as many methods as you need">
             <div className="stack">
-              {payments.map((p, i) => (
-                <div className="row tight" key={i}>
-                  <select value={p.method} style={{ width: 130 }}
-                    onChange={(e) => setPayments((prev) => prev.map((x, j) => (j === i ? { ...x, method: e.target.value } : x)))}>
-                    <option value="CASH">{t('cash')}</option>
-                    <option value="UPI">UPI</option>
-                    <option value="CARD">{t('card')}</option>
-                    <option value="CREDIT">{t('credit')}</option>
-                    <option value="LOYALTY_POINTS">{t('points')}</option>
-                  </select>
-                  <input type="number" min={0} step="any" value={p.amount} style={{ flex: 1, textAlign: 'right' }}
-                    onChange={(e) => setPayments((prev) => prev.map((x, j) => (j === i ? { ...x, amount: Number(e.target.value) || 0 } : x)))} />
-                  {payments.length > 1 && (
-                    <button className="icon-btn" aria-label="Remove"
-                      onClick={() => setPayments((prev) => prev.filter((_, j) => j !== i))}>×</button>
-                  )}
-                </div>
-              ))}
-              {(payments.some((p) => p.method === 'UPI' || p.method === 'CARD')) && (
-                <Field label="Reference (UPI txn / card auth)">
-                  <input value={payments.find((p) => p.method === 'UPI' || p.method === 'CARD')?.ref_no ?? ''}
-                    onChange={(e) => setPayments((prev) => prev.map((x) =>
-                      (x.method === 'UPI' || x.method === 'CARD') ? { ...x, ref_no: e.target.value } : x))} />
-                </Field>
-              )}
+              <PaymentEditor payments={payments} setPayments={setPayments} payable={totals.grand} t={t} />
               {payments.some((p) => p.method === 'CREDIT') && !customer && (
                 <Alert tone="critical">A credit sale needs an identified customer.</Alert>
               )}
@@ -574,7 +664,15 @@ function PosTab() {
             </div>
           </Card>
 
+          {/* Review is the primary path (Section 62): prepare, check with the
+              customer, then finalise. Finishing straight from the cart stays
+              available for the fast counter sale where there is nothing to review. */}
           <Button variant="primary" size="lg" className="block" busy={busy}
+            disabled={!cart.length}
+            onClick={() => void openReview()}>
+            {t('reviewBill')} · {inr(totals.grand)}
+          </Button>
+          <Button size="lg" className="block" busy={busy}
             disabled={!cart.length || Math.abs(balance) > 0.01}
             onClick={() => void completeSale()}>
             {t('completeSale')} · {inr(totals.grand)}
@@ -583,27 +681,10 @@ function PosTab() {
       </div>
 
       {/* Manager override PIN (3.4 / 3.8) */}
-      <Modal open={pinModal !== null} onClose={() => { setPinModal(null); setOverridePin(''); }}
-        title="Manager approval"
-        footer={<>
-          <Button onClick={() => { setPinModal(null); setOverridePin(''); }}>Cancel</Button>
-          <Button variant="primary" onClick={() => void verifyPin(pinModal!)}>Approve</Button>
-        </>}>
-        <p className="muted">
-          {pinModal === 'DISCOUNT'
-            ? `This bill is ${givenAwayPct.toFixed(1)}% below the catalog price, above the ${discountLimit}% staff limit.`
-            : pinModal === 'NEGATIVE_STOCK'
-            ? 'System stock is short for one or more items.'
-            : 'This sale would take the customer over their credit limit.'}
-          {' '}A manager or the owner can approve it with their PIN. The approval covers
-          this sale only and expires in a few minutes.
-        </p>
-        <Field label="Manager PIN">
-          <input type="password" inputMode="numeric" maxLength={6} value={overridePin} autoFocus
-            onChange={(e) => setOverridePin(e.target.value.replace(/\D/g, ''))}
-            style={{ letterSpacing: '0.4em', fontSize: 17 }} />
-        </Field>
-      </Modal>
+      <PinModal purpose={pinModal} pin={overridePin} setPin={setOverridePin}
+                givenAwayPct={givenAwayPct} discountLimit={discountLimit}
+                onClose={() => { setPinModal(null); setOverridePin(''); }}
+                onVerify={verifyPin} />
 
       {/* Post-sale receipt actions */}
       <Modal open={Boolean(lastInvoice)} onClose={() => setLastInvoice(null)} title="Sale complete"
@@ -628,6 +709,261 @@ function PosTab() {
 }
 
 // ── Invoice history ─────────────────────────────────────────────────────────
+/**
+ * The review screen (Sections 11, 62).
+ *
+ * Every figure on it comes from `draft`, which is the server's own pricing of the
+ * basket — not the local cart. That is deliberate and is the point of the whole
+ * step: the cashier and the customer approve the number the server will actually
+ * charge. "Edit bill" goes back to the cart, and saving re-prices on the server
+ * again, so there is no path where an edit changes the paper without changing the
+ * arithmetic.
+ */
+
+/**
+ * The split-payment editor, shared by the cart and the review screen so the two
+ * cannot offer different payment options for the same bill (3.2).
+ */
+
+/**
+ * The manager-PIN prompt. Shared by the cart and the review screen, because an
+ * override can become necessary at either point and the two must ask for it the
+ * same way. What comes back is a single-use grant bound to this purpose, branch
+ * and cashier — never the manager's user id, which would be reusable forever.
+ */
+function PinModal({ purpose, pin, setPin, givenAwayPct, discountLimit, onClose, onVerify }: {
+  purpose: null | 'DISCOUNT' | 'NEGATIVE_STOCK' | 'CREDIT_LIMIT';
+  pin: string;
+  setPin: (v: string) => void;
+  givenAwayPct: number;
+  discountLimit: number;
+  onClose: () => void;
+  onVerify: (purpose: 'DISCOUNT' | 'NEGATIVE_STOCK' | 'CREDIT_LIMIT') => void;
+}) {
+  return (
+    <Modal open={purpose !== null} onClose={onClose} title="Manager approval"
+      footer={<>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={() => purpose && onVerify(purpose)}>Approve</Button>
+      </>}>
+      <p className="muted">
+        {purpose === 'DISCOUNT'
+          ? `This bill is ${givenAwayPct.toFixed(1)}% below the catalog price, above the ${discountLimit}% staff limit.`
+          : purpose === 'NEGATIVE_STOCK'
+          ? 'System stock is short for one or more items.'
+          : 'This sale would take the customer over their credit limit.'}
+        {' '}A manager or the owner can approve it with their PIN. The approval covers
+        this sale only and expires in a few minutes.
+      </p>
+      <Field label="Manager PIN">
+        <input type="password" inputMode="numeric" maxLength={6} value={pin} autoFocus
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+          style={{ letterSpacing: '0.4em', fontSize: 17 }} />
+      </Field>
+    </Modal>
+  );
+}
+
+function PaymentEditor({ payments, setPayments, payable, t }: {
+  payments: { method: string; amount: number; ref_no?: string }[];
+  setPayments: React.Dispatch<React.SetStateAction<{ method: string; amount: number; ref_no?: string }[]>>;
+  payable: number;
+  t: (k: string) => string;
+}) {
+  const paid = round2(payments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const balance = round2(payable - paid);
+  return (
+    <div className="stack">
+      {payments.map((p, i) => (
+        <div className="row tight" key={i}>
+          <select value={p.method} style={{ width: 130 }} aria-label="Payment method"
+            onChange={(e) => setPayments((prev) => prev.map((x, j) => (j === i ? { ...x, method: e.target.value } : x)))}>
+            <option value="CASH">{t('cash')}</option>
+            <option value="UPI">UPI</option>
+            <option value="CARD">{t('card')}</option>
+            <option value="CREDIT">{t('credit')}</option>
+            <option value="LOYALTY_POINTS">{t('points')}</option>
+          </select>
+          <input type="number" min={0} step="any" value={p.amount} style={{ flex: 1, textAlign: 'right' }}
+            aria-label="Amount"
+            onChange={(e) => setPayments((prev) => prev.map((x, j) => (j === i ? { ...x, amount: Number(e.target.value) || 0 } : x)))} />
+          {payments.length > 1 && (
+            <button className="icon-btn" aria-label="Remove payment"
+              onClick={() => setPayments((prev) => prev.filter((_, j) => j !== i))}>×</button>
+          )}
+        </div>
+      ))}
+      <Button size="sm" onClick={() => setPayments((prev) => [...prev, { method: 'UPI', amount: Math.max(balance, 0) }])}>
+        + Split
+      </Button>
+      {(payments.some((p) => p.method === 'UPI' || p.method === 'CARD')) && (
+        <Field label="Reference (UPI txn / card auth)">
+          <input value={payments.find((p) => p.method === 'UPI' || p.method === 'CARD')?.ref_no ?? ''}
+            onChange={(e) => setPayments((prev) => prev.map((x) =>
+              (x.method === 'UPI' || x.method === 'CARD') ? { ...x, ref_no: e.target.value } : x))} />
+        </Field>
+      )}
+    </div>
+  );
+}
+
+function ReviewScreen({
+  draft, payments, setPayments, openTill, busy, onEdit, onFinalize, onDiscard, t,
+}: {
+  draft: any;
+  payments: { method: string; amount: number; ref_no?: string }[];
+  setPayments: React.Dispatch<React.SetStateAction<{ method: string; amount: number; ref_no?: string }[]>>;
+  openTill: TillSession | undefined;
+  busy: boolean;
+  onEdit: () => void;
+  onFinalize: () => void;
+  onDiscard: () => void;
+  t: (k: string) => string;
+}) {
+  const totals = draft?.totals ?? {};
+  const payable = Number(totals.payable ?? 0);
+  const paid = round2(payments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const shortfall = round2(payable - paid);
+  const isGst = draft?.invoice_type === 'GST';
+
+  return (
+    <div className="stack">
+      <Alert tone="info" title={`${t('reviewBill')} — ${t('draftNotFinal')}`}>
+        These are the server&rsquo;s figures, recalculated from the catalog. Nothing has been
+        billed yet: no invoice number, no stock movement, no ledger entry. Check the bill with
+        the customer, then finalise it.
+      </Alert>
+
+      {/* Raised here rather than at finalisation, so the cashier finds out before
+          they have told the customer the bill is done. */}
+      {(draft?.stock_warnings?.length ?? 0) > 0 && (
+        <Alert tone="warning" title="Not enough stock for this bill">
+          {draft.stock_warnings.map((w: any) => (
+            <div key={w.product_name}>
+              {w.product_name} — asked {num(w.requested, 2)}, {Math.max(Number(w.available), 0)} on hand
+            </div>
+          ))}
+          <div style={{ marginTop: 6 }}>
+            Finalising will be refused unless a manager approves it with a PIN, or the
+            quantity is reduced.
+          </div>
+        </Alert>
+      )}
+
+      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 0.85fr)' }}>
+        <div className="stack">
+          <Card
+            title={isGst ? 'Tax invoice preview' : 'Cash memo preview'}
+            description={draft?.customer_name
+              ? `${draft.customer_name}${draft.customer_phone ? ` · ${draft.customer_phone}` : ''}`
+              : 'Walk-in customer'}
+            right={<Badge tone={isGst ? 'info' : 'neutral'}>{isGst ? 'GST' : 'Non-GST'}</Badge>}
+          >
+            <div style={{ overflowX: 'auto' }}>
+              <DataTable
+                columns={[
+                  { key: 'product_name', header: 'Item',
+                    render: (r: any) => (
+                      <span>
+                        <span style={{ display: 'block' }}>{r.product_name}</span>
+                        <span className="muted small mono">
+                          {r.sku ? `${r.sku} · ` : ''}{r.unit_label}
+                          {r.price_changed_since_scan ? ' · price held from scan' : ''}
+                        </span>
+                      </span>
+                    ) },
+                  { key: 'qty_in_sale_unit', header: 'Qty', align: 'right',
+                    render: (r: any) => num(r.qty_in_sale_unit, 2) },
+                  { key: 'rate_locked_at_scan', header: 'Rate', align: 'right',
+                    render: (r: any) => inr(r.rate_locked_at_scan, { decimals: true }) },
+                  { key: 'discount_amount', header: 'Disc.', align: 'right',
+                    render: (r: any) => (Number(r.discount_amount) ? inr(r.discount_amount, { decimals: true }) : '—') },
+                  ...(isGst ? [{ key: 'gst_rate_pct', header: 'GST', align: 'right' as const,
+                    render: (r: any) => `${num(r.gst_rate_pct, 0)}%` }] : []),
+                  { key: 'line_total', header: 'Amount', align: 'right',
+                    render: (r: any) => <strong>{inr(r.line_total, { decimals: true })}</strong> },
+                ]}
+                rows={draft?.lines ?? []}
+                emptyText="This draft has no items."
+              />
+            </div>
+          </Card>
+
+          <Card title="Payment" description="The split must settle the bill exactly">
+            <PaymentEditor payments={payments} setPayments={setPayments} payable={payable} t={t} />
+            {Math.abs(shortfall) > 0.01 && (
+              <div style={{ marginTop: 10 }}>
+                <Alert tone="warning" title={shortfall > 0 ? 'Payment is short' : 'Payment is over'}>
+                  {inr(Math.abs(shortfall), { decimals: true })} {shortfall > 0 ? 'still to collect.' : 'more than the bill.'}
+                </Alert>
+              </div>
+            )}
+          </Card>
+        </div>
+
+        <div className="stack">
+          <Card title="Bill summary" right={<span className="muted small">{t('serverRecalculated')}</span>}>
+            <KeyValue items={[
+              ['Items', String(draft?.lines?.length ?? 0)],
+              ['Gross', inr(round2(Number(totals.subtotal ?? 0) + Number(totals.discount_total ?? 0)), { decimals: true })],
+              ...(Number(totals.discount_total) > 0
+                ? [['Discount', `− ${inr(totals.discount_total, { decimals: true })}`] as [string, React.ReactNode]] : []),
+              [isGst ? 'Taxable value' : 'Subtotal', inr(totals.subtotal, { decimals: true })],
+              ...(isGst && Number(totals.igst_total) > 0
+                ? [['IGST', inr(totals.igst_total, { decimals: true })] as [string, React.ReactNode]]
+                : isGst
+                  ? ([['CGST', inr(totals.cgst_total, { decimals: true })],
+                      ['SGST', inr(totals.sgst_total, { decimals: true })]] as [string, React.ReactNode][])
+                  : []),
+              ...(Number(totals.round_off)
+                ? [['Round off', inr(totals.round_off, { decimals: true })] as [string, React.ReactNode]] : []),
+            ]} />
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              marginTop: 12, paddingTop: 12, borderTop: '2px solid var(--border)',
+            }}>
+              <strong>Total payable</strong>
+              <strong style={{ fontSize: 22 }}>{inr(payable, { decimals: true })}</strong>
+            </div>
+            {Number(draft?.given_away) > 0 && (
+              <p className="muted small" style={{ marginTop: 8 }}>
+                {inr(draft.given_away, { decimals: true })} given away against catalog
+                ({num(draft.discount_pct, 1)}%).
+              </p>
+            )}
+            {!openTill && (
+              <p className="muted small" style={{ marginTop: 8 }}>
+                No till session is open, so cash on this bill will not appear in a drawer count.
+              </p>
+            )}
+          </Card>
+
+          <Card title="Next step">
+            <div className="stack" style={{ gap: 8 }}>
+              <Button variant="primary" busy={busy}
+                      disabled={busy || !draft?.lines?.length || Math.abs(shortfall) > 0.01}
+                      onClick={onFinalize}>
+                {t('finalizeBill')}
+              </Button>
+              <Button onClick={onEdit} disabled={busy}>← {t('editBill')}</Button>
+              <Button onClick={() => downloadFile(`/api/billing/invoices/${draft.invoice_id}/pdf`,
+                                                  `draft-${String(draft.invoice_id).slice(0, 8)}.pdf`)}>
+                {t('previewPdf')}
+              </Button>
+              <Button variant="danger" onClick={onDiscard} disabled={busy}>{t('discardDraft')}</Button>
+            </div>
+            <p className="muted small" style={{ marginTop: 10 }}>
+              Finalising assigns the invoice number, moves stock, posts the payment and the
+              ledger, and locks the bill. After that a correction has to go through a return,
+              a credit note or a void.
+            </p>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InvoicesTab() {
   const { activeBranchId, can } = useAuth();
   const { t } = useI18n();

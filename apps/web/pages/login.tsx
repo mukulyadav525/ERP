@@ -105,7 +105,7 @@ export default function LoginPage() {
   return (
     <>
       <Head>
-        <title>Sign in · Hardware ERP</title>
+        <title>Sign in · Bhawani One</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
       {GOOGLE_CLIENT_ID && (
@@ -122,10 +122,10 @@ export default function LoginPage() {
             <div style={{
               width: 46, height: 46, borderRadius: 12, background: 'var(--accent)', color: '#fff',
               display: 'inline-grid', placeItems: 'center', fontSize: 17, fontWeight: 800, marginBottom: 10,
-            }}>HE</div>
-            <h1 style={{ fontSize: 21, fontWeight: 700, letterSpacing: '-0.02em' }}>Hardware ERP</h1>
+            }}>BO</div>
+            <h1 style={{ fontSize: 21, fontWeight: 700, letterSpacing: '-0.02em' }}>BHAWANI ONE</h1>
             <div className="muted small" style={{ marginTop: 2 }}>
-              {lang === 'hi' ? 'मल्टी-ब्रांच स्टोर प्रबंधन' : 'Multi-branch store management'}
+              {lang === 'hi' ? 'स्मार्ट बिज़नेस मैनेजमेंट सिस्टम' : 'Smart Business Management System'}
             </div>
           </div>
 

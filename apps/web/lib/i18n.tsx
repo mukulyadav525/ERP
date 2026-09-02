@@ -33,6 +33,28 @@ export const STRINGS: Dict = {
   navHR:            { en: 'Staff',          hi: 'स्टाफ' },
   navAdmin:         { en: 'Admin',          hi: 'एडमिन' },
 
+  // Brand
+  brandTagline:     { en: 'Smart Business Management', hi: 'स्मार्ट बिज़नेस मैनेजमेंट' },
+
+  // Draft bills — review and edit before finalising (Sections 11, 62)
+  draftBill:        { en: 'Draft bill',        hi: 'ड्राफ्ट बिल' },
+  drafts:           { en: 'Drafts',            hi: 'ड्राफ्ट' },
+  saveDraft:        { en: 'Save as draft',     hi: 'ड्राफ्ट सहेजें' },
+  reviewBill:       { en: 'Review bill',       hi: 'बिल जाँचें' },
+  editBill:         { en: 'Edit bill',         hi: 'बिल बदलें' },
+  finalizeBill:     { en: 'Finalise bill',     hi: 'बिल पक्का करें' },
+  discardDraft:     { en: 'Discard draft',     hi: 'ड्राफ्ट हटाएँ' },
+  resumeDraft:      { en: 'Resume',            hi: 'जारी रखें' },
+  previewPdf:       { en: 'Preview PDF',       hi: 'पीडीएफ देखें' },
+  refreshPrices:    { en: 'Refresh prices',    hi: 'दाम ताज़ा करें' },
+  noDrafts:         { en: 'No draft bills',    hi: 'कोई ड्राफ्ट बिल नहीं' },
+  draftSaved:       { en: 'Draft saved',       hi: 'ड्राफ्ट सहेजा गया' },
+  draftNotFinal:    { en: 'Not a tax invoice until finalised', hi: 'पक्का होने तक कर बीजक नहीं' },
+  serverRecalculated: { en: 'Recalculated by the server', hi: 'सर्वर द्वारा पुनः गणना' },
+  backToCart:       { en: 'Back to cart',      hi: 'कार्ट पर लौटें' },
+  businessProfile:  { en: 'Business profile',  hi: 'व्यवसाय प्रोफ़ाइल' },
+  printedDocuments: { en: 'Printed documents', hi: 'छपे दस्तावेज़' },
+
   // Common actions
   save:      { en: 'Save',      hi: 'सहेजें' },
   cancel:    { en: 'Cancel',    hi: 'रद्द करें' },

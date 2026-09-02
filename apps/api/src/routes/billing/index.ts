@@ -708,9 +708,16 @@ export default async function billingRoutes(app: FastifyInstance) {
       throw badRequest(`Invoice ${draft.invoice_number ?? ''} is ${draft.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
     }
 
+    // Availability is read alongside the lines so the review screen can warn about
+    // short stock BEFORE the cashier tells the customer the bill is done. The
+    // binding check still happens under a row lock at finalisation — this is an
+    // early warning, not the enforcement.
     const storedLines = (await sql<any>`
-      SELECT il.*, p.name AS product_name, p.sku
-        FROM invoice_lines il JOIN products p ON p.product_id = il.product_id
+      SELECT il.*, p.name AS product_name, p.sku,
+             COALESCE(bs.base_unit_qty, 0) - COALESCE(bs.reserved_qty, 0) AS available_qty
+        FROM invoice_lines il
+        JOIN products p ON p.product_id = il.product_id
+        LEFT JOIN branch_stock bs ON bs.product_id = il.product_id AND bs.branch_id = ${trx ? sql`(SELECT branch_id FROM invoices WHERE invoice_id = ${id})` : sql`NULL`}
        WHERE il.invoice_id = ${id} ORDER BY il.line_id
     `.execute(trx)).rows;
     const payments = (await sql<any>`
@@ -830,6 +837,8 @@ export default async function billingRoutes(app: FastifyInstance) {
       product_id: l.product_id,
       product_name: l.product_name,
       sku: loaded.storedLines[i]?.sku ?? null,
+      available_qty: Number(loaded.storedLines[i]?.available_qty ?? 0),
+      short_by: Math.max(round2(l.computed.base_unit_qty - Number(loaded.storedLines[i]?.available_qty ?? 0)), 0),
       hsn_code: l.hsn_code,
       unit_label: l.unit_label,
       qty_in_sale_unit: l.qty_in_sale_unit,
@@ -851,6 +860,13 @@ export default async function billingRoutes(app: FastifyInstance) {
     discount_pct: round2(loaded.priced?.discount_pct ?? 0),
     interstate: loaded.priced?.interstate ?? false,
     permissions: draftPermissions(session, loaded.settings),
+    // Surfaced as a whole-document flag so the review screen can say plainly that
+    // finalising will be refused (or need a manager PIN) before it is attempted.
+    stock_warnings: (loaded.priced?.lines ?? []).map((l, i) => ({
+      product_name: l.product_name,
+      requested: l.computed.base_unit_qty,
+      available: Number(loaded.storedLines[i]?.available_qty ?? 0),
+    })).filter((w) => w.available < w.requested),
     payment_shortfall: round2(
       (loaded.priced?.totals.payable ?? 0) -
       loaded.payments.reduce((s: number, p: any) => s + Number(p.amount), 0),

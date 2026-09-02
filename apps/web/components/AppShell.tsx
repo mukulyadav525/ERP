@@ -41,7 +41,7 @@ function usePageTitle(): string {
   const { t } = useI18n();
   const item = NAV_CONFIG.flatMap((s) => s.items)
     .find((i) => i.href === router.pathname || (i.href !== '/' && router.pathname.startsWith(i.href)));
-  return item ? t(item.labelKey) : 'Hardware ERP';
+  return item ? t(item.labelKey) : 'Bhawani One';
 }
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -73,7 +73,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Head>
-        <title>{`${title} · Hardware ERP`}</title>
+        <title>{`${title} · Bhawani One`}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="theme-color" content="#131722" />
       </Head>
@@ -83,10 +83,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
         <aside className={`sidebar${menuOpen ? ' open' : ''}`}>
           <div className="sidebar-brand">
-            <span className="mark" aria-hidden>HE</span>
+            <span className="mark" aria-hidden>BO</span>
             <span>
-              <span className="name">Hardware ERP</span>
-              <span className="sub">Multi-branch</span>
+              <span className="name">BHAWANI ONE</span>
+              <span className="sub">{t('brandTagline')}</span>
             </span>
           </div>
 
