@@ -742,7 +742,11 @@ async function main() {
     const asManager = await call('GET', '/api/crm/messages?limit=200', { token: tokens.manager1 });
     const bodies = JSON.stringify(asManager.body ?? []);
     assert('no verification code appears in the message log', !/verification code is \d{6}/i.test(bodies));
-    assert('no reset token appears in the message log', !/Reset your Hardware ERP/i.test(bodies));
+    // Matched on the message SHAPE, not on a brand name: the business name is
+    // configurable, so pinning the assertion to one would quietly stop testing
+    // anything the moment a shop set its own.
+    assert('no reset token appears in the message log',
+      !/Reset your .{1,60}?(PIN|password) with this code/i.test(bodies));
     const types = new Set((asManager.body ?? []).map((m) => m.message_type));
     assert('the log carries no OTP-type messages at all', !types.has('OTP'),
       [...types].join(', ') || 'empty');
@@ -1027,6 +1031,76 @@ async function main() {
       { token: tokens.inventory });
     await expectStatus('an accountant can', 200, 'GET', '/api/vendors/outstanding/list',
       { token: tokens.accountant });
+  }
+
+  // ── Global search (Ctrl/Cmd+K) ───────────────────────────────────────────
+  // Search reaches across every record type at once, which makes it the single
+  // most likely place for a branch or a role boundary to be lost. These assert
+  // the boundary from BOTH sides: the person who should find a record does, and
+  // the person who should not, does not.
+  section('Global search — scope and permissions');
+  {
+    const search = async (token, q, extra = '') =>
+      (await call('GET', `/api/search?q=${encodeURIComponent(q)}${extra}`, { token })).body?.results ?? [];
+
+    await expectStatus('search needs a session', 401, 'GET', '/api/search?q=INV');
+
+    const ownerHits = await search(tokens.owner, 'INV');
+    assert('an owner finds invoices chain-wide', ownerHits.some((r) => r.type === 'invoice'),
+      `${ownerHits.length} hit(s)`);
+
+    // Branch 2's invoice numbers carry its own prefix, so they make an exact probe.
+    const mgr2Invoices = await search(tokens.manager2, 'INV');
+    const prefix = mgr2Invoices.find((r) => r.type === 'invoice')?.title?.split('/')[0];
+    if (prefix) {
+      const own = await search(tokens.manager2, prefix);
+      assert('a branch manager finds their own branch\'s bills by number',
+        own.some((r) => r.type === 'invoice'), prefix);
+
+      const other = await search(tokens.cashier, prefix);
+      assert('another branch\'s cashier finds none of them',
+        !other.some((r) => r.type === 'invoice'),
+        `${other.filter((r) => r.type === 'invoice').length} leaked`);
+
+      // The branch_id parameter is a filter for an admin, never a way for a branch
+      // user to widen their own scope.
+      const forced = await search(tokens.cashier, prefix, `&branch_id=${ids.branch2}`);
+      assert('and cannot reach them by passing another branch_id',
+        !forced.some((r) => r.type === 'invoice'),
+        `${forced.filter((r) => r.type === 'invoice').length} leaked`);
+    }
+
+    // Result types follow the role matrix: a cashier has no vendor screen, so
+    // vendors must not appear in their results either. The probe is a term the
+    // owner demonstrably DOES get a vendor for, so a pass cannot come from the
+    // query simply matching nothing.
+    const vendorName = (await search(tokens.owner, 'a')).find((r) => r.type === 'vendor')?.title
+      ?? (await call('GET', '/api/vendors?limit=1', { token: tokens.owner })).body?.[0]?.name;
+    if (vendorName) {
+      const probe = vendorName.slice(0, 6);
+      const ownerSees = await search(tokens.owner, probe);
+      assert('an owner finds a vendor by name', ownerSees.some((r) => r.type === 'vendor'), probe);
+      const cashierSees = await search(tokens.cashier, probe);
+      assert('a cashier gets no vendor rows for the same term',
+        !cashierSees.some((r) => r.type === 'vendor'), probe);
+    }
+
+    const acctTypes = new Set((await search(tokens.accountant, 'INV')).map((r) => r.type));
+    assert('an accountant sees no invoices in search results', !acctTypes.has('invoice'),
+      [...acctTypes].join(', ') || 'no hits');
+
+    // A one-character query would match most of the database for no benefit.
+    const tooShort = await call('GET', '/api/search?q=a', { token: tokens.owner });
+    assert('a single character returns nothing rather than everything',
+      (tooShort.body?.results ?? []).length === 0);
+
+    // A wildcard typed by a user is data, not syntax.
+    const wild = await search(tokens.owner, '%%');
+    assert('LIKE wildcards in the query do not match everything', wild.length === 0,
+      `${wild.length} hit(s)`);
+
+    const products = await search(tokens.cashier, 'pipe');
+    assert('products are searchable by name', products.some((r) => r.type === 'product'));
   }
 
   section('Logout');

@@ -47,7 +47,7 @@ function ReturnsScreen() {
       {tab === 'returns' && (
         <Card flush>
           <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-            empty={<EmptyState icon="↩" title="No returns" />}>
+            empty={<EmptyState icon="returns" title="No returns" />}>
             {(rows) => (
               <DataTable rows={rows} footer={`${rows.length} return(s)`}
                 columns={[

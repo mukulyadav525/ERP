@@ -146,3 +146,46 @@ export async function loadBusinessProfile(
   }
   return profile;
 }
+
+// ── The name to use in a message sent before there is a session ─────────────
+/**
+ * OTP and reset messages are sent to someone who is *not* signed in, so there is
+ * no scoped transaction to read settings through, and no branch to resolve
+ * against. They still must not carry a hard-coded product name: the whole point
+ * of the configurable profile is that a shop's customers and staff see the shop's
+ * name. This reads the chain-wide profile through the system scope (the same
+ * mechanism the background workers use, for the same reason — RLS would otherwise
+ * return nothing to a caller with no session) and falls back to the shipped name.
+ *
+ * Cached for a minute so a burst of sign-ins is one query, not one each.
+ */
+let nameCache: { value: string; at: number } | null = null;
+/** The read in flight, shared so a burst of sign-ins makes one query rather than
+ *  one per request — and so the cache is only ever written by the single
+ *  resolution below, never by whichever caller happens to finish awaiting last. */
+let namePending: Promise<string> | null = null;
+
+export function chainDisplayName(): Promise<string> {
+  const cached = nameCache;
+  if (cached && Date.now() - cached.at < 60_000) return Promise.resolve(cached.value);
+  if (namePending) return namePending;
+
+  namePending = (async () => {
+    const { withSystemScope } = await import('../db.js');
+    const rows = await withSystemScope((trx) => sql<{ value: unknown }>`
+      SELECT value FROM admin_settings
+       WHERE setting_key = ${BUSINESS_PROFILE_SETTING} AND branch_id IS NULL
+       LIMIT 1
+    `.execute(trx));
+    return normaliseProfile(rows.rows[0]?.value).name;
+  })()
+    .then((value) => {
+      nameCache = { value, at: Date.now() };
+      return value;
+    })
+    // A settings read must never be the reason a verification code is not sent.
+    .catch(() => DEFAULT_BUSINESS_PROFILE.name)
+    .finally(() => { namePending = null; });
+
+  return namePending;
+}

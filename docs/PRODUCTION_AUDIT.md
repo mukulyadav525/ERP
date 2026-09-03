@@ -143,12 +143,13 @@ db/schema.sql       PASS   applies to an empty database, 74 tables, 69 policies
 db/seed.sql         PASS   ~9,900 invoices
 
 tests/tax-properties.mjs    20/20    ~50,000 generated cases
-apps/api/scripts/smoke-test 254/254  per-role, per-branch, RLS asserted in raw SQL
-tests/regression.mjs        68/68    every finding above, negatives, concurrency
+apps/api/scripts/smoke-test 265/265  per-role, per-branch, RLS asserted in raw SQL
+tests/regression.mjs        75/75    every finding above, negatives, concurrency
 tests/workflows.mjs         68/68    the ten workflows, cross-checked against the DB
 tests/pdf-matrix.mjs        13/13    1 → 50 items, GST/non-GST/estimate, IGST, Hindi, VOID
 tests/pdf-geometry.mjs      13/13    6,098 text runs inside the margins, none overlapping
-tests/uitest.mjs            73/73    real browser, desktop + 390px
+tests/uitest.mjs            76/76    real browser, desktop + 390px
+tests/viewports.mjs         35/35    12 widths x 12 routes x both themes
 ```
 
 Concurrency proved rather than asserted: two simultaneous finalisations of one draft
@@ -189,3 +190,92 @@ The system enforces its rules where they cannot be bypassed: branch isolation an
 immutability in the database, financial arithmetic on the server, approvals as single-use
 grants rather than client-supplied ids. The remaining items are deployment tasks
 (credentials, a WhatsApp provider, a job queue at scale) and one legal question for a CA.
+
+---
+
+## G · Final integration pass
+
+A later pass over the finished application. Everything above still holds; this is
+what it added, and what it found.
+
+### Defects found
+
+**14 · Every bill told the customer it was paid.** The WhatsApp message built on
+the post-sale screen carried a literal `Status: Paid` line. A sale taken wholly on
+credit — the ordinary case for a contractor with an account — went out to that
+customer's phone stating the money had been received. The finalize response now
+returns a `payment_summary` read back from the `invoice_payments` rows it just
+wrote, and the message says *Paid*, *Part paid* or *On credit* with the
+outstanding figure. Covered by seven new regression checks, one of which compares
+the reported figure against the payment rows in the database rather than against
+the response's own arithmetic. *(`routes/billing`, `pages/billing`)*
+
+**15 · The counter screen hid its own scan box on a phone.** The POS layout set
+`grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr)` as an inline
+style. An inline value cannot be overridden by a media query, so the 340px minimum
+applied at every width; at 375px the left column was pushed off the left edge and
+`overflow: hidden` on the card clipped it. The item search — the control the whole
+screen exists for — was partly invisible, and because a parent clipped it rather
+than the page scrolling, no overflow check saw it. Both splits are now classes
+that collapse to one column below 1000px.
+
+That second failure is why `tests/viewports.mjs` measures two things. Page-level
+`scrollWidth > clientWidth` catches an element that pushes the document sideways.
+It does not catch an element pushed *out* of the document and swallowed by a
+clipping ancestor, which is strictly worse: the control is not awkward to reach,
+it is gone. The suite now asserts both, across 320 → 2560px, on twelve routes, in
+both themes.
+
+**16 · A 48px horizontal page scroll on the billing screen at 320px**, from the
+same hard-coded column minimum. Fixed by the same change and now asserted.
+
+### What was added
+
+**Global search** (`GET /api/search`, Ctrl/Cmd+K) over invoices, estimates,
+customers, vendors, products, SKUs, barcodes and phone numbers. Two properties
+matter more than the feature: every query runs inside the caller's RLS-scoped
+transaction, so branch isolation is enforced by the database rather than by a
+`WHERE` clause in the search route; and each result *type* is gated on the
+permission guarding its own screen, so the result list cannot become a read-only
+bypass of the role matrix. A branch user passing another branch's `branch_id` gets
+their own branch's rows, not a 403 and not the other branch's records. Eleven
+smoke-test checks assert this from both sides — the person who should find a
+record does, the person who should not, does not — including that LIKE wildcards
+typed into the box are treated as data rather than as syntax.
+
+**Keyboard-first billing.** Ctrl/Cmd+K opens search, Ctrl/Cmd+N starts a bill,
+Ctrl/Cmd+S saves the current basket as a draft, Escape closes any dialog. Ctrl+S
+is wired to the same function as the button, so there is one code path and one set
+of guards, and it never finalises: nothing that draws an invoice number, moves
+stock or takes money is a keystroke away.
+
+**Barcode scanners work because of what was *not* built.** A USB or Bluetooth
+scanner is a keyboard. The item box holds focus, accepts the code, and treats the
+Enter the scanner sends as "add this item": a single match goes straight into the
+cart, several are left for the cashier to choose from, and a code matching nothing
+is reported with a create-product link carrying the code across, so nobody retypes
+thirteen digits off a label. No SDK, no driver, no scanner mode.
+
+**One icon set.** The interface mixed colour emoji with geometric Unicode glyphs —
+two drawing systems, different baselines, platform-dependent shapes, and emoji
+ignore the theme entirely. All of it is now a single monoline SVG set drawn in
+`currentColor`.
+
+**Branding finished.** OTP and password-reset messages said "Hardware ERP". They
+now use the configured business name, read through the system scope (there is no
+session when a reset is requested) and cached for a minute, falling back to the
+shipped name if the settings read fails — a settings lookup must never be the
+reason a verification code is not sent. Browser titles are `BHAWANI ONE — <page>`.
+
+**Actionable dashboard and useful empty states.** Every tile with a destination
+now links to it, filtered; empty states carry the one action that is relevant and
+no fabricated figures. The deep links they rely on (`?tab=`, `?invoice=`,
+`?customer=`, `?product=`, `?vendor=`, `?quotation=`, `?new=`) were wired at the
+same time, so none of them is a link to nowhere.
+
+### Still open
+
+Everything in section E remains true. In particular: WhatsApp is a share link and
+a queue with a stub transport, not a delivered message — the post-sale screen now
+says so in as many words rather than leaving the cashier to assume the PDF went
+with it. Backups are not configured; that is a deployment task, not a code defect.

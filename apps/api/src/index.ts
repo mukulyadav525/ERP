@@ -20,6 +20,7 @@ import crmRoutes from './routes/crm/index.js';
 import returnsRoutes from './routes/returns/index.js';
 import reportsRoutes from './routes/reports/index.js';
 import adminRoutes from './routes/admin/index.js';
+import searchRoutes from './routes/search/index.js';
 
 const app = Fastify({
   logger: {
@@ -135,6 +136,7 @@ await app.register(crmRoutes,        { prefix: '/api/crm' });
 await app.register(returnsRoutes,    { prefix: '/api/returns' });
 await app.register(reportsRoutes,    { prefix: '/api/reports' });
 await app.register(adminRoutes,      { prefix: '/api/admin' });
+await app.register(searchRoutes,     { prefix: '/api/search' });
 
 // ── Background workers ──────────────────────────────────────────────────────
 // Deliberately simple in-process timers. The requirements call for a job queue

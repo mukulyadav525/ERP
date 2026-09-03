@@ -6,6 +6,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { useAuth } from '../lib/AuthContext';
 import { useI18n } from '../lib/i18n';
+import { Icon, type IconName } from './icons';
 
 // ── Page furniture ──────────────────────────────────────────────────────────
 export function PageHeader({ title, subtitle, actions }: {
@@ -120,18 +121,27 @@ export function Switch({ checked, onChange, disabled, label }: {
   );
 }
 
-export function SearchInput({ value, onChange, placeholder }: {
+export function SearchInput({ value, onChange, placeholder, inputRef, onEnter, autoFocus }: {
   value: string; onChange: (v: string) => void; placeholder?: string;
+  /** Exposed so the caller can keep focus here — a USB/Bluetooth barcode scanner
+   *  is a keyboard, and it types wherever the caret happens to be. */
+  inputRef?: React.RefObject<HTMLInputElement>;
+  /** Fires on Enter, which is also the terminator a scanner sends after a code. */
+  onEnter?: (value: string) => void;
+  autoFocus?: boolean;
 }) {
   const { t } = useI18n();
   return (
     <div className="searchbar">
-      <span className="search-icon" aria-hidden>⌕</span>
+      <span className="search-icon"><Icon name="search" size={15} /></span>
       <input
+        ref={inputRef}
         type="search"
         value={value}
+        autoFocus={autoFocus}
         placeholder={placeholder ?? `${t('search')}…`}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onEnter ? (e) => { if (e.key === 'Enter') { e.preventDefault(); onEnter(value); } } : undefined}
       />
     </div>
   );
@@ -192,10 +202,11 @@ export function StatusBadge({ status }: { status: string | null | undefined }) {
 export function Alert({ tone = 'info', title, children }: {
   tone?: 'info' | 'good' | 'warning' | 'critical'; title?: string; children?: React.ReactNode;
 }) {
-  const icon = tone === 'good' ? '✓' : tone === 'critical' ? '⚠' : tone === 'warning' ? '!' : 'ℹ';
+  const icon: IconName = tone === 'good' ? 'check'
+    : tone === 'critical' || tone === 'warning' ? 'alert' : 'info';
   return (
     <div className={`alert ${tone}`}>
-      <span className="alert-icon" aria-hidden>{icon}</span>
+      <span className="alert-icon"><Icon name={icon} size={16} /></span>
       <div>
         {title && <b>{title}</b>}
         {title && children ? <br /> : null}
@@ -216,13 +227,15 @@ export function LoadingState({ rows = 4 }: { rows?: number }) {
   );
 }
 
-export function EmptyState({ icon = '∅', title, text, action }: {
-  icon?: string; title?: string; text?: string; action?: React.ReactNode;
+export function EmptyState({ icon = 'inbox', title, text, action }: {
+  /** A name from the shared monoline set — never a literal glyph, so empty states
+   *  across the app are drawn at one weight and follow the theme. */
+  icon?: IconName; title?: string; text?: string; action?: React.ReactNode;
 }) {
   const { t } = useI18n();
   return (
     <div className="empty-state">
-      <span className="icon" aria-hidden>{icon}</span>
+      <span className="icon"><Icon name={icon} size={26} strokeWidth={1.5} /></span>
       {title && <div className="title">{title}</div>}
       <div>{text ?? t('noData')}</div>
       {action && <div style={{ marginTop: 14 }}>{action}</div>}
@@ -234,7 +247,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   const message = error instanceof Error ? error.message : 'Could not load this data.';
   return (
     <div className="empty-state">
-      <span className="icon" aria-hidden>⚠</span>
+      <span className="icon"><Icon name="alert" size={26} strokeWidth={1.5} /></span>
       <div className="title">Could not load</div>
       <div style={{ maxWidth: 460, margin: '0 auto' }}>{message}</div>
       {onRetry && <div style={{ marginTop: 14 }}><Button onClick={onRetry}>Try again</Button></div>}
@@ -370,7 +383,7 @@ export function AccessDenied({ permission }: { permission?: string }) {
   return (
     <div className="card">
       <div className="empty-state">
-        <span className="icon" aria-hidden>🔒</span>
+        <span className="icon"><Icon name="lock" size={26} strokeWidth={1.5} /></span>
         <div className="title">You do not have access to this screen</div>
         <div style={{ maxWidth: 460, margin: '0 auto' }}>
           Your role ({roleLabel}) is not permitted to

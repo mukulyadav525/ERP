@@ -1,5 +1,6 @@
 // Section 5 — Quotations & B2B / contractor pricing.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import { apiGet, apiPost, fetcher, formatDate, inr, num, withBranch } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
@@ -36,6 +37,14 @@ function QuotationsScreen() {
 
   const moduleOff = error && String((error as Error).message).includes('switched off');
 
+  // ?quotation=<id> — where a global-search hit lands.
+  const router = useRouter();
+  useEffect(() => {
+    const id = router.query.quotation;
+    if (typeof id !== 'string' || detail?.quotation_id === id) return;
+    apiGet(`/api/quotations/${id}`).then(setDetail).catch(() => { /* stale link */ });
+  }, [router.query.quotation]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   async function act(id: string, action: string, body?: any, message = 'Done') {
     try {
       const res = await apiPost<any>(`/api/quotations/${id}/${action}`, body ?? {});
@@ -49,7 +58,7 @@ function QuotationsScreen() {
       <>
         <PageHeader title={t('navQuotations')} />
         <Card>
-          <EmptyState icon="📋" title="The quotations module is switched off"
+          <EmptyState icon="quotation" title="The quotations module is switched off"
             text="An owner can turn it on under Admin → Settings → Quotations. It ships off in Phase 1 by design." />
         </Card>
       </>
@@ -69,7 +78,7 @@ function QuotationsScreen() {
       {tab === 'quotes' && (
         <Card flush>
           <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-            empty={<EmptyState icon="📋" title="No quotations yet" />}>
+            empty={<EmptyState icon="quotation" title="No quotations yet" />}>
             {(rows) => (
               <DataTable rows={rows} onRowClick={async (r) => {
                 try { setDetail(await apiGet(`/api/quotations/${r.quotation_id}`)); } catch (err) { toast.error(err); }

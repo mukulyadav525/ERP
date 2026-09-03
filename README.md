@@ -11,11 +11,12 @@ requirements document.
 | Suite | What it covers | Checks |
 |---|---|---|
 | `tests/tax-properties.mjs` | GST rounding, base-unit maths, returns, weighted-average cost, over ~50,000 generated cases | 20 |
-| `apps/api/scripts/smoke-test.mjs` | per-role and per-branch API behaviour, RLS in raw SQL | 254 |
-| `tests/regression.mjs` | every defect found in the production audit, plus negative and concurrency cases | 68 |
+| `apps/api/scripts/smoke-test.mjs` | per-role and per-branch API behaviour, RLS in raw SQL, global-search scope | 265 |
+| `tests/regression.mjs` | every defect found in the production audit, plus negative and concurrency cases | 75 |
 | `tests/workflows.mjs` | the ten end-to-end business journeys, each cross-checked against the database | 68 |
 | `tests/pdf-matrix.mjs` + `pdf-geometry.mjs` | 13 document permutations, then an automatic margin/overlap check | 13 + 13 |
-| `tests/uitest.mjs` | a real browser: every page, 390px layout, the draft flow, roles, Hindi, themes, dead controls | 73 |
+| `tests/uitest.mjs` | a real browser: every page, 390px layout, the draft flow, roles, Hindi, themes, dead controls | 76 |
+| `tests/viewports.mjs` | 12 widths (320 → 2560px) × 12 routes × both themes: page overflow, clipped controls, touch targets | 35 |
 
 See `REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping.
 
@@ -70,7 +71,8 @@ erp-project/
 │   ├── workflows.mjs           ← the ten end-to-end business journeys
 │   ├── pdf-matrix.mjs          ← renders every document permutation
 │   ├── pdf-geometry.mjs        ← asserts nothing clips or overlaps
-│   └── uitest.mjs              ← browser checks (Playwright)
+│   ├── uitest.mjs              ← browser checks (Playwright)
+│   └── viewports.mjs           ← responsive sweep, every supported width
 ├── REQUIREMENTS_CHECKLIST.md
 └── docker-compose.yml
 ```
@@ -105,7 +107,8 @@ delivering.
 ```bash
 npm run verify        # typecheck + lint + build + every suite below
 npm test              # tax properties, API, regression, workflows, documents
-npm run test:ui       # browser checks (needs: npx playwright install chromium)
+npm run test:ui         # browser checks (needs: npx playwright install chromium)
+npm run test:responsive # every viewport, both themes, every route
 ```
 
 The suites assert behaviour, not status codes: that a Branch-1 cashier reads zero

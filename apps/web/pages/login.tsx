@@ -105,7 +105,7 @@ export default function LoginPage() {
   return (
     <>
       <Head>
-        <title>Sign in · Bhawani One</title>
+        <title>BHAWANI ONE — Sign in</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
       {GOOGLE_CLIENT_ID && (

@@ -70,7 +70,7 @@ export default function DashboardPage() {
       />
 
       {error ? (
-        <Card><EmptyState icon="⚠" title="Could not load the dashboard" text={(error as Error).message} /></Card>
+        <Card><EmptyState icon="alert" title="Could not load the dashboard" text={(error as Error).message} /></Card>
       ) : isLoading || !stats ? (
         <Card><LoadingState rows={5} /></Card>
       ) : (
@@ -88,9 +88,15 @@ export default function DashboardPage() {
                 ? <Link href="/inventory?low=1">Review reorder list →</Link>
                 : 'Everything above its reorder point'} />
             <StatTile label={t('outstanding')} value={inr(stats.total_outstanding)}
-              hint={`${stats.customers_with_balance} customer(s) with a balance`} />
+              hint={stats.total_outstanding > 0 && can('view_customer_outstanding')
+                ? <Link href="/customers?tab=outstanding">{stats.customers_with_balance} customer(s) owing →</Link>
+                : `${stats.customers_with_balance} customer(s) with a balance`} />
             <StatTile label={t('openTills')} value={num(stats.open_till_sessions, 0)}
-              hint={stats.open_till_sessions > 0 ? 'Counters still to reconcile' : 'All tills closed'} />
+              hint={stats.open_till_sessions > 0
+                ? (can('manage_till')
+                    ? <Link href="/billing?tab=till">Reconcile the drawer →</Link>
+                    : 'Counters still to reconcile')
+                : 'All tills closed'} />
             <StatTile label={t('pendingApprovals')} value={num(stats.pending_expense_approvals, 0)}
               hint={stats.pending_expense_approvals > 0
                 ? <Link href="/expenses?status=PENDING">Review expenses →</Link>
@@ -99,12 +105,16 @@ export default function DashboardPage() {
         </>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', marginBottom: 16 }}>
+      <div className="grid split-main" style={{ marginBottom: 16 }}>
         {can('view_reports') && (
           <Card title="Daily revenue" description={`${activeBranchName} · last 30 days`}>
             {trendByDay.length
               ? <TrendChart data={trendByDay} xKey="period" series={[{ key: 'revenue', label: 'Revenue' }]} />
-              : <EmptyState text="No sales recorded in this period yet." />}
+              : <EmptyState title="No sales in this period"
+                  text="Once bills are finalised here, the daily revenue line fills in."
+                  action={can('create_invoice')
+                    ? <Link href="/billing?new=1" className="btn primary">{t('newBill')}</Link>
+                    : undefined} />}
           </Card>
         )}
         {can('view_reports') && (
@@ -114,7 +124,8 @@ export default function DashboardPage() {
                 <DonutChart data={payments} nameKey="method" valueKey="total" />
                 <ChartLegend items={payments.map((p) => p.method)} />
               </>
-            ) : <EmptyState text="No payments in this period." />}
+            ) : <EmptyState title="No payments yet"
+                  text="The split across cash, UPI, card and credit appears here after the first sale." />}
           </Card>
         )}
       </div>
@@ -123,7 +134,11 @@ export default function DashboardPage() {
         {can('view_billing') && (
           <Card title="Recent bills" flush
                 right={<Link href="/billing" className="btn ghost sm">View all</Link>}>
-            <AsyncSection data={recent} empty={<EmptyState text="No bills yet today." />}>
+            <AsyncSection data={recent} empty={
+              <EmptyState title="No bills yet" text="Start the day by billing a customer."
+                action={can('create_invoice')
+                  ? <Link href="/billing?new=1" className="btn primary">{t('newBill')}</Link>
+                  : undefined} />}>
               {(rows) => (
                 <DataTable
                   rows={rows}
@@ -143,7 +158,7 @@ export default function DashboardPage() {
           <Card title="Needs reordering" flush
                 right={<Link href="/inventory" className="btn ghost sm">Inventory</Link>}>
             <AsyncSection data={lowStock}
-              empty={<EmptyState icon="✓" title="Stock is healthy" text="Nothing is below its reorder point." />}>
+              empty={<EmptyState icon="check" title="Stock is healthy" text="Nothing is below its reorder point." />}>
               {(rows) => (
                 <DataTable
                   rows={rows}
@@ -173,7 +188,7 @@ export default function DashboardPage() {
           <Card title="Top outstanding balances" flush
                 right={<Link href="/customers?tab=outstanding" className="btn ghost sm">All dues</Link>}>
             <AsyncSection data={dues}
-              empty={<EmptyState icon="✓" title="Nothing outstanding" text="No customer is carrying a balance." />}>
+              empty={<EmptyState icon="check" title="Nothing outstanding" text="No customer is carrying a balance." />}>
               {(rows) => (
                 <DataTable
                   rows={rows}

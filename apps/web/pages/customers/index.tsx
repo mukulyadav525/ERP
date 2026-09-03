@@ -1,5 +1,5 @@
 // Section 6 — Customers & Credit Ledger. Identity is chain-wide (Section 0).
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
@@ -46,6 +46,17 @@ function CustomersScreen() {
     catch (err) { toast.error(err); }
   }
 
+  // Deep links: ?customer=<id> is where a global-search hit lands, ?new=1 is the
+  // quick-actions entry. Both are no-ops when the query string does not carry them.
+  useEffect(() => {
+    if (router.query.new === '1' && can('edit_customer')) setNewOpen(true);
+  }, [router.query.new, can]);
+  useEffect(() => {
+    const id = router.query.customer;
+    if (typeof id !== 'string' || detail?.customer_id === id) return;
+    void openDetail({ customer_id: id });
+  }, [router.query.customer]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <>
       <PageHeader title={t('navCustomers')}
@@ -79,7 +90,7 @@ function CustomersScreen() {
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-              empty={<EmptyState icon="👥" title="No customers yet" />}>
+              empty={<EmptyState icon="customers" title="No customers yet" />}>
               {(rows) => (
                 <DataTable rows={rows} onRowClick={(r) => void openDetail(r)} footer={`${rows.length} customer(s)`}
                   columns={[
@@ -115,7 +126,7 @@ function CustomersScreen() {
             } catch (err) { toast.error(err); }
           }}>Send reminders</Button>}>
           <AsyncSection data={outstanding}
-            empty={<EmptyState icon="✓" title="Nothing outstanding" text="No customer is carrying a balance." />}>
+            empty={<EmptyState icon="check" title="Nothing outstanding" text="No customer is carrying a balance." />}>
             {(rows) => (
               <DataTable rows={rows} onRowClick={(r) => void openDetail(r)}
                 columns={[

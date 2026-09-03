@@ -1,5 +1,5 @@
 // Section 4 — Inventory & Procurement.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
@@ -28,7 +28,18 @@ function InventoryScreen() {
   const router = useRouter();
   const { can, activeBranchId } = useAuth();
   const { t } = useI18n();
-  const [tab, setTab] = useState<Tab>(router.query.low ? 'reorder' : 'stock');
+  // Addressable tabs, so a dashboard tile or the quick-actions menu can land the
+  // user on the right one instead of on the default and a hunt.
+  const TABS: Tab[] = ['stock', 'reorder', 'grn', 'transfers', 'audits', 'ledger', 'batches', 'crossbranch'];
+  const wanted: Tab = (() => {
+    const q = router.query;
+    if (q.low) return 'reorder';
+    if (q.new === 'grn') return 'grn';
+    if (typeof q.tab === 'string' && (TABS as string[]).includes(q.tab)) return q.tab as Tab;
+    return 'stock';
+  })();
+  const [tab, setTab] = useState<Tab>(wanted);
+  useEffect(() => { setTab(wanted); }, [wanted]);
 
   const { data: transfers } = useSWR<any[]>(withBranch('/api/inventory/transfers', activeBranchId), fetcher);
   const openIssues = (transfers ?? []).filter((x) => x.status === 'TRANSFER_DISCREPANCY').length;
@@ -112,7 +123,7 @@ function StockTab() {
 
       <Card flush>
         <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-          empty={<EmptyState icon="📦" title="No stock rows" text="Receive goods against a vendor to start tracking stock." />}>
+          empty={<EmptyState icon="catalog" title="No stock rows" text="Receive goods against a vendor to start tracking stock." />}>
           {(rows) => (
             <DataTable rows={rows} footer={`${rows.length} item(s)`}
               columns={[
@@ -201,7 +212,7 @@ function ReorderTab() {
       <Card flush title="Items at or below their reorder point"
         description="Suggested quantity takes each item back to its restock target, grouped by the preferred vendor.">
         <AsyncSection data={data} error={error} isLoading={isLoading}
-          empty={<EmptyState icon="✓" title="Nothing needs reordering" text="Every item is above its reorder point." />}>
+          empty={<EmptyState icon="check" title="Nothing needs reordering" text="Every item is above its reorder point." />}>
           {(rows) => (
             <DataTable rows={rows}
               columns={[
@@ -265,7 +276,7 @@ function GrnTab() {
       <Card flush title="Goods receipts"
         description="Receiving stock is what recalculates the weighted-average cost — it is never typed in by hand.">
         <AsyncSection data={data} error={error} isLoading={isLoading}
-          empty={<EmptyState icon="🚚" title="No goods received yet" />}>
+          empty={<EmptyState icon="inventory" title="No goods received yet" />}>
           {(rows) => (
             <DataTable rows={rows} onRowClick={async (r) => {
               try { setDetail(await apiGet(`/api/inventory/grn/${r.grn_id}`)); } catch (err) { toast.error(err); }
@@ -514,7 +525,7 @@ function TransfersTab() {
       <Card flush title="Inter-branch transfers"
         description="Stock leaves on dispatch and arrives on receipt. A short receipt is held as a discrepancy for the owner to settle — neither side is silently adjusted.">
         <AsyncSection data={data} error={error} isLoading={isLoading}
-          empty={<EmptyState icon="🔁" title="No transfers" />}>
+          empty={<EmptyState icon="returns" title="No transfers" />}>
           {(rows) => (
             <DataTable rows={rows} onRowClick={async (r) => {
               try { setDetail(await apiGet(`/api/inventory/transfers/${r.transfer_id}`)); setReceiveQtys({}); }

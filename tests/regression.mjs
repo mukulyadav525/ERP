@@ -367,6 +367,81 @@ try {
     check('a forged token is a 401', badAuth.status === 401, String(badAuth.status));
   }
 
+  // ══ What the customer is told about their money ═══════════════════════════
+  // The receipt screen and the WhatsApp message both label a sale from
+  // `payment_summary`. That label is a factual claim made to a customer, so it
+  // has to come from the payment rows the server actually wrote — not from a
+  // constant, which is what it used to be: every bill, including one taken
+  // entirely on credit, went out saying "Status: Paid".
+  section('Payment status told to the customer');
+  {
+    const creditCustomer = (await call('POST', '/api/customers', {
+      token: owner.token,
+      body: { name: 'Regression Credit Buyer', phone: `98${Date.now() % 100000000}`,
+              credit_allowed: true, credit_limit: 100000 },
+    })).body;
+
+    const cash = await sell(cashier.token, { qty: 1 });
+    check('a fully settled sale reports PAID',
+      cash.res.body?.payment_summary?.status === 'PAID',
+      JSON.stringify(cash.res.body?.payment_summary));
+    check('and reports nothing outstanding',
+      Number(cash.res.body?.payment_summary?.on_credit ?? -1) === 0,
+      String(cash.res.body?.payment_summary?.on_credit));
+
+    if (creditCustomer?.customer_id) {
+      const onCredit = await sell(cashier.token, {
+        qty: 1, customerId: creditCustomer.customer_id,
+        payments: null,   // replaced below, once the payable is known
+      });
+      // sell() defaults to a full cash payment; redo it explicitly on credit.
+      const draft = await call('POST', '/api/billing/drafts', {
+        token: cashier.token,
+        body: { invoice_type: 'GST', customer_id: creditCustomer.customer_id,
+                lines: [{ product_id: P.product_id, qty_in_sale_unit: 1 }] },
+      });
+      const payable = draft.body.totals.payable;
+      const full = await call('POST', `/api/billing/drafts/${draft.body.invoice_id}/finalize`, {
+        token: cashier.token, body: { payments: [{ method: 'CREDIT', amount: payable }] },
+      });
+      check('a sale taken entirely on credit is NOT reported as paid',
+        full.body?.payment_summary?.status === 'ON_CREDIT',
+        JSON.stringify(full.body?.payment_summary));
+      check('and the outstanding figure equals the payable',
+        Math.abs(Number(full.body?.payment_summary?.on_credit ?? 0) - Number(payable)) < 0.01,
+        `${full.body?.payment_summary?.on_credit} vs ${payable}`);
+
+      const split = await call('POST', '/api/billing/drafts', {
+        token: cashier.token,
+        body: { invoice_type: 'GST', customer_id: creditCustomer.customer_id,
+                lines: [{ product_id: P.product_id, qty_in_sale_unit: 1 }] },
+      });
+      const p2 = Number(split.body.totals.payable);
+      const half = Math.round(p2 * 50) / 100;
+      const part = await call('POST', `/api/billing/drafts/${split.body.invoice_id}/finalize`, {
+        token: cashier.token,
+        body: { payments: [{ method: 'CASH', amount: half }, { method: 'CREDIT', amount: Math.round((p2 - half) * 100) / 100 }] },
+      });
+      check('a part-paid sale is reported as part paid, not paid',
+        part.body?.payment_summary?.status === 'PARTIALLY_PAID',
+        JSON.stringify(part.body?.payment_summary));
+      check('and the two halves add up to the payable',
+        Math.abs(Number(part.body?.payment_summary?.settled ?? 0)
+               + Number(part.body?.payment_summary?.on_credit ?? 0) - p2) < 0.01,
+        `${part.body?.payment_summary?.settled} + ${part.body?.payment_summary?.on_credit} vs ${p2}`);
+
+      // The summary must agree with the database, not merely with itself.
+      const rows = await q(
+        'SELECT method::text AS method, amount FROM invoice_payments WHERE invoice_id = $1',
+        [part.body.invoice_id]);
+      const dbCredit = rows.filter((r) => r.method === 'CREDIT')
+        .reduce((sum, r) => sum + Number(r.amount), 0);
+      check('the reported outstanding matches the payment rows in the database',
+        Math.abs(dbCredit - Number(part.body?.payment_summary?.on_credit ?? 0)) < 0.01,
+        `db ${dbCredit} vs reported ${part.body?.payment_summary?.on_credit}`);
+    }
+  }
+
   // ══ Documents ═════════════════════════════════════════════════════════════
   section('Printed documents (Sections 58-66)');
   {

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Hardware Store ERP — design system
+   BHAWANI ONE — Smart Business Management System · design system
    One stylesheet, one visual language. Every screen composes from the tokens
    and component classes below; no page defines its own colours, spacing scale
    or control styling, which is what keeps the UI consistent as it grows.
@@ -274,6 +274,18 @@ p { margin: 0 0 10px; }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid.cols-auto { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+
+/* Two-column page splits. These are classes rather than inline grid-template
+   values because an inline style cannot be undone by a media query — which is
+   exactly how the counter screen ended up forcing a 340px column onto a 375px
+   phone and pushing its own scan box off the left edge. Above the breakpoint the
+   pixel minimum is what keeps the totals panel readable; below it, there is one
+   column and no minimum at all. */
+.grid.split-main { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+.grid.split-work { grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); }
+@media (max-width: 1000px) {
+  .grid.split-main, .grid.split-work { grid-template-columns: minmax(0, 1fr); }
+}
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row.tight { gap: 6px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -468,7 +480,7 @@ table.data td.nowrap, table.data th.nowrap { white-space: nowrap; }
 .empty-state {
   padding: 44px 20px; text-align: center; color: var(--text-muted); font-size: 13.5px;
 }
-.empty-state .icon { font-size: 28px; display: block; margin-bottom: 10px; opacity: 0.6; }
+.empty-state .icon { display: flex; justify-content: center; margin-bottom: 10px; opacity: 0.55; }
 .empty-state .title { color: var(--text-secondary); font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 
 .skeleton {
@@ -488,7 +500,7 @@ table.data td.nowrap, table.data th.nowrap { white-space: nowrap; }
   display: flex; gap: 10px; padding: 11px 14px; border-radius: var(--radius-sm);
   font-size: 13px; border: 1px solid transparent; line-height: 1.45;
 }
-.alert .alert-icon { flex-shrink: 0; }
+.alert .alert-icon { flex-shrink: 0; display: grid; place-items: center; height: 19px; }
 .alert.info     { background: var(--status-info-soft);     color: var(--status-info);     border-color: color-mix(in srgb, var(--status-info) 22%, transparent); }
 .alert.good     { background: var(--status-good-soft);     color: var(--status-good);     border-color: color-mix(in srgb, var(--status-good) 22%, transparent); }
 .alert.warning  { background: var(--status-warning-soft);  color: var(--status-warning);  border-color: color-mix(in srgb, var(--status-warning) 22%, transparent); }
@@ -567,7 +579,7 @@ table.data td.nowrap, table.data th.nowrap { white-space: nowrap; }
 .searchbar input { padding-left: 32px; }
 .searchbar .search-icon {
   position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
-  color: var(--text-muted); font-size: 13px; pointer-events: none;
+  color: var(--text-muted); pointer-events: none; display: grid; place-items: center;
 }
 
 /* --- Responsive ---------------------------------------------------------- */
@@ -589,6 +601,107 @@ table.data td.nowrap, table.data th.nowrap { white-space: nowrap; }
   .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
   .page-title { font-size: 18px; }
 }
+/* --- Icons --------------------------------------------------------------- */
+/* One monoline SVG set (components/icons.tsx). `currentColor` is what makes an
+   icon follow its surrounding text through a theme change; a fixed fill or an
+   emoji would not. vertical-align keeps it optically centred beside text without
+   nudging the line box. */
+.icon-svg { display: inline-block; vertical-align: -0.15em; flex-shrink: 0; }
+.nav-item .ico { display: grid; place-items: center; }
+.pill.icon-pill { display: inline-grid; place-items: center; width: 34px; padding: 5px 0; }
+
+/* --- Top-bar search trigger ---------------------------------------------- */
+.topbar-search {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px; min-width: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-muted);
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.topbar-search:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.topbar-search-label { flex: 1; text-align: left; }
+.topbar-search kbd, .palette-kbd {
+  font-family: var(--font); font-size: 10.5px; font-weight: 600; line-height: 1;
+  padding: 3px 5px; border-radius: 4px; white-space: nowrap;
+  border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--text-muted);
+}
+
+/* --- Command palette ----------------------------------------------------- */
+.palette-backdrop {
+  position: fixed; inset: 0; z-index: 120;
+  background: rgba(16,20,28,0.45); backdrop-filter: blur(2px);
+  display: flex; justify-content: center;
+  /* Anchored near the top rather than centred: the list grows downwards, so a
+     centred dialog would jump about as results arrive. */
+  padding: clamp(12px, 8vh, 96px) 16px 16px;
+  animation: fade 0.12s ease-out;
+}
+.palette {
+  width: 100%; max-width: 620px; align-self: flex-start;
+  max-height: min(560px, calc(100dvh - 32px));
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+}
+.palette-input {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border); color: var(--text-muted);
+}
+.palette-input input {
+  flex: 1; min-width: 0; border: none; background: none; padding: 0;
+  font-size: 15px; color: var(--text-primary);
+}
+.palette-input input:focus { outline: none; box-shadow: none; }
+.palette-results { overflow-y: auto; padding: 6px; flex: 1; }
+.palette-group {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--text-muted); padding: 8px 10px 5px;
+}
+.palette-row {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 9px 10px; border: none; border-radius: var(--radius-sm);
+  background: none; color: var(--text-primary); cursor: pointer;
+  font-family: inherit; font-size: 13.5px; text-align: left;
+}
+.palette-row.active { background: var(--accent-soft); }
+.palette-ico {
+  width: 28px; height: 28px; flex-shrink: 0; display: grid; place-items: center;
+  border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-secondary);
+}
+.palette-row.active .palette-ico { background: var(--surface-1); color: var(--accent); }
+.palette-main { min-width: 0; flex: 1; }
+.palette-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.palette-type {
+  display: inline-block; margin-right: 7px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.palette-sub {
+  display: block; font-size: 12px; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.palette-amount { font-weight: 650; font-size: 13px; white-space: nowrap; }
+.palette-msg {
+  display: flex; align-items: center; gap: 8px;
+  padding: 22px 12px; color: var(--text-muted); font-size: 13px; justify-content: center; text-align: center;
+}
+.palette-foot {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 9px 14px; border-top: 1px solid var(--border); background: var(--surface-2);
+  font-size: 11.5px; color: var(--text-muted);
+}
+.palette-foot .palette-kbd { margin-right: 3px; }
+@media (max-width: 620px) {
+  /* On a phone the palette is the screen: full width, and the footer hint that
+     talks about arrow keys stops earning its space. */
+  .palette-backdrop { padding: 0; }
+  .palette { max-width: none; height: 100dvh; max-height: none; border-radius: 0; border: none; }
+  .palette-foot { display: none; }
+  .topbar-search-label, .topbar-search kbd { display: none; }
+  .topbar-search { width: 32px; padding: 0; justify-content: center; }
+}
+
 @media print {
   .sidebar, .topbar, .page-actions, .toast-host { display: none !important; }
   .content { padding: 0; }

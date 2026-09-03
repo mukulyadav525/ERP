@@ -7,6 +7,8 @@
 // database checks branch scope underneath that.
 // ============================================================================
 
+import type { IconName } from '../components/icons';
+
 export type UserRole =
   | 'OWNER_ADMIN' | 'BRANCH_MANAGER' | 'CASHIER' | 'INVENTORY_STAFF' | 'ACCOUNTANT';
 
@@ -99,30 +101,32 @@ export const ROLE_META: Record<UserRole, { label: string; labelHi: string; color
   ACCOUNTANT:      { label: 'Accountant',      labelHi: 'लेखाकार',         color: '#e11d48' },
 };
 
-export interface NavItem { href: string; labelKey: string; permission: string; icon: string; }
+/** `icon` names a member of the shared monoline set in components/icons.tsx —
+ *  never a literal glyph, so the whole navigation is drawn by one renderer. */
+export interface NavItem { href: string; labelKey: string; permission: string; icon: IconName; }
 export interface NavSection { sectionKey: string; items: NavItem[]; }
 
 export const NAV_CONFIG: NavSection[] = [
   { sectionKey: 'navOverview', items: [
-    { href: '/',        labelKey: 'navDashboard', permission: 'view_dashboard', icon: '◧' },
-    { href: '/reports', labelKey: 'navAnalytics', permission: 'view_reports',   icon: '◔' },
+    { href: '/',        labelKey: 'navDashboard', permission: 'view_dashboard', icon: 'dashboard' },
+    { href: '/reports', labelKey: 'navAnalytics', permission: 'view_reports',   icon: 'analytics' },
   ]},
   { sectionKey: 'navOperations', items: [
-    { href: '/billing',    labelKey: 'navBilling',    permission: 'view_billing',    icon: '🧾' },
-    { href: '/catalog',    labelKey: 'navCatalog',    permission: 'view_catalog',    icon: '📦' },
-    { href: '/inventory',  labelKey: 'navInventory',  permission: 'view_inventory',  icon: '🏭' },
-    { href: '/quotations', labelKey: 'navQuotations', permission: 'view_quotations', icon: '📋' },
-    { href: '/returns',    labelKey: 'navReturns',    permission: 'view_returns',    icon: '↩' },
+    { href: '/billing',    labelKey: 'navBilling',    permission: 'view_billing',    icon: 'billing' },
+    { href: '/catalog',    labelKey: 'navCatalog',    permission: 'view_catalog',    icon: 'catalog' },
+    { href: '/inventory',  labelKey: 'navInventory',  permission: 'view_inventory',  icon: 'inventory' },
+    { href: '/quotations', labelKey: 'navQuotations', permission: 'view_quotations', icon: 'quotation' },
+    { href: '/returns',    labelKey: 'navReturns',    permission: 'view_returns',    icon: 'returns' },
   ]},
   { sectionKey: 'navRelationships', items: [
-    { href: '/customers', labelKey: 'navCustomers', permission: 'view_customers', icon: '👥' },
-    { href: '/vendors',   labelKey: 'navVendors',   permission: 'view_vendors',   icon: '🏪' },
+    { href: '/customers', labelKey: 'navCustomers', permission: 'view_customers', icon: 'customers' },
+    { href: '/vendors',   labelKey: 'navVendors',   permission: 'view_vendors',   icon: 'vendors' },
   ]},
   { sectionKey: 'navBackOffice', items: [
-    { href: '/expenses', labelKey: 'navExpenses', permission: 'view_expenses', icon: '💰' },
-    { href: '/hr',       labelKey: 'navHR',       permission: 'view_hr',       icon: '👤' },
+    { href: '/expenses', labelKey: 'navExpenses', permission: 'view_expenses', icon: 'expenses' },
+    { href: '/hr',       labelKey: 'navHR',       permission: 'view_hr',       icon: 'staff' },
   ]},
   { sectionKey: 'navSystem', items: [
-    { href: '/admin', labelKey: 'navAdmin', permission: 'view_admin', icon: '⚙' },
+    { href: '/admin', labelKey: 'navAdmin', permission: 'view_admin', icon: 'settings' },
   ]},
 ];

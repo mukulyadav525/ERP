@@ -1,5 +1,6 @@
 // Section 2 — Catalog & Product Master.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import { apiGet, apiPost, apiPut, downloadCsv, fetcher, inr, num } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
@@ -31,6 +32,20 @@ function CatalogScreen() {
   const [categoryId, setCategoryId] = useState('');
   const [detail, setDetail] = useState<any | null>(null);
   const [editor, setEditor] = useState<null | 'new' | 'price'>(null);
+  const router = useRouter();
+  // Deep links: ?new=1 opens the add form (the quick-actions menu), and ?barcode=
+  // carries a code the till scanned and could not find, so the cashier is not
+  // asked to read thirteen digits off a label and retype them.
+  const scannedBarcode = typeof router.query.barcode === 'string' ? router.query.barcode : '';
+  useEffect(() => {
+    if (router.query.new === '1' && can('edit_catalog')) setEditor('new');
+  }, [router.query.new, can]);
+  // ?product=<id> is where a global-search hit lands.
+  useEffect(() => {
+    const id = router.query.product;
+    if (typeof id !== 'string' || detail?.product_id === id) return;
+    apiGet(`/api/catalog/products/${id}`).then(setDetail).catch(() => { /* a stale link is not an error worth shouting about */ });
+  }, [router.query.product]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const productPath = `/api/catalog/products?limit=200${search ? `&q=${encodeURIComponent(search)}` : ''}${categoryId ? `&category_id=${categoryId}` : ''}`;
   const { data: products, error, isLoading, mutate } = useSWR<any[]>(productPath, fetcher);
@@ -77,7 +92,7 @@ function CatalogScreen() {
           </div>
           <Card flush>
             <AsyncSection data={products} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-              empty={<EmptyState icon="📦" title="No products found" text="Try a different search, or add a product." />}>
+              empty={<EmptyState icon="catalog" title="No products found" text="Try a different search, or add a product." />}>
               {(rows) => (
                 <DataTable rows={rows} onRowClick={(r) => void openDetail(r)}
                   footer={`${rows.length} product(s)`}
@@ -188,7 +203,7 @@ function CatalogScreen() {
 
       <ProductDetail product={detail} onClose={() => setDetail(null)}
         onPriceChanged={() => { void mutate(); setDetail(null); }} />
-      <NewProductModal open={editor === 'new'} onClose={() => setEditor(null)}
+      <NewProductModal open={editor === 'new'} initialBarcode={scannedBarcode} onClose={() => setEditor(null)}
         categories={categories ?? []} brands={brands ?? []}
         onCreated={() => { setEditor(null); void mutate(); }} />
     </>
@@ -294,16 +309,21 @@ function ProductDetail({ product, onClose, onPriceChanged }: {
   );
 }
 
-function NewProductModal({ open, onClose, categories, brands, onCreated }: {
+function NewProductModal({ open, onClose, categories, brands, onCreated, initialBarcode = '' }: {
   open: boolean; onClose: () => void; categories: any[]; brands: any[]; onCreated: () => void;
+  initialBarcode?: string;
 }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
     sku: '', name: '', category_id: '', brand_id: '', base_unit: 'PIECE', hsn_code: '',
-    selling_price: '', mrp: '', reference_purchase_price: '',
+    selling_price: '', mrp: '', reference_purchase_price: '', barcode: '',
     default_price_type: 'TAX_INCLUSIVE', batch_tracked: false, serial_tracked: false,
   });
+  // Prefilled when the form was opened from a scan that found nothing.
+  useEffect(() => {
+    if (open && initialBarcode) setForm((f) => (f.barcode ? f : { ...f, barcode: initialBarcode }));
+  }, [open, initialBarcode]);
   const { data: hsnRates } = useSWR<any[]>(open ? '/api/catalog/hsn-rates' : null, fetcher);
 
   async function submit(e: React.FormEvent) {
@@ -312,6 +332,7 @@ function NewProductModal({ open, onClose, categories, brands, onCreated }: {
     try {
       await apiPost('/api/catalog/products', {
         ...form,
+        barcodes: form.barcode.trim() ? [form.barcode.trim()] : undefined,
         category_id: form.category_id || undefined,
         brand_id: form.brand_id || undefined,
         selling_price: Number(form.selling_price),
@@ -336,6 +357,10 @@ function NewProductModal({ open, onClose, categories, brands, onCreated }: {
           <Field label="Name" required><input required value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
         </div>
+        <Field label="Barcode" hint="Optional. Scan it into this box, or leave blank and add one later.">
+          <input value={form.barcode} inputMode="numeric"
+            onChange={(e) => setForm({ ...form, barcode: e.target.value })} />
+        </Field>
         <div className="grid cols-2">
           <Field label="Category"><select value={form.category_id}
             onChange={(e) => setForm({ ...form, category_id: e.target.value })}>

@@ -78,7 +78,7 @@ function ExpensesScreen() {
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-              empty={<EmptyState icon="💰" title="No expenses recorded" />}>
+              empty={<EmptyState icon="expenses" title="No expenses recorded" />}>
               {(rows) => (
                 <DataTable rows={rows} footer={`${rows.length} entr(ies)`}
                   columns={[

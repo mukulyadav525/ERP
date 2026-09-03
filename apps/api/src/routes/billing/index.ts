@@ -654,11 +654,29 @@ export default async function billingRoutes(app: FastifyInstance) {
                payable: totals.payable, from_draft: Boolean(opts.draftId) },
              });
 
+    // What the customer actually settled, read back from the rows that were just
+    // written rather than recomputed from the request. The receipt screen and the
+    // WhatsApp message both label the sale from this, so a bill left on credit is
+    // never announced to the customer as paid.
+    const posted = (await sql<{ method: string; amount: string }>`
+      SELECT method::text AS method, amount FROM invoice_payments WHERE invoice_id = ${invoice.invoice_id}
+    `.execute(trx)).rows;
+    const creditAmount = round2(posted.filter((p) => p.method === 'CREDIT')
+      .reduce((sum, p) => sum + Number(p.amount), 0));
+    const settledAmount = round2(posted.filter((p) => p.method !== 'CREDIT')
+      .reduce((sum, p) => sum + Number(p.amount), 0));
+
     return {
       ...invoice,
       totals,
       points_redeemed: pointsRedeemed,
       stock_conflicts: conflicts,
+      payment_summary: {
+        methods: [...new Set(posted.map((p) => p.method))],
+        settled: settledAmount,
+        on_credit: creditAmount,
+        status: creditAmount <= 0 ? 'PAID' : settledAmount > 0 ? 'PARTIALLY_PAID' : 'ON_CREDIT',
+      },
       warning: conflicts.length
         ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.'
         : null,

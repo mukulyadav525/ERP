@@ -20,6 +20,7 @@
     "test:regression": "node tests/regression.mjs",
     "test:pdf": "node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
     "test:ui": "node tests/uitest.mjs",
+    "test:responsive": "node tests/viewports.mjs",
     "verify": "npm run typecheck && npm run lint && npm run build && npm test",
     "test:workflows": "node tests/workflows.mjs"
   },

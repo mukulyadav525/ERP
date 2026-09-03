@@ -32,6 +32,7 @@ import {
 import { ALL_ROLES, ROLE_META } from '../../lib/rbac.js';
 import { audit } from '../../lib/audit.js';
 import { queueAuthMessage } from '../../lib/whatsapp.js';
+import { chainDisplayName } from '../../lib/pdf/business-profile.js';
 
 const googleClient = new OAuth2Client(env.googleClientId);
 
@@ -171,10 +172,13 @@ export default async function authRoutes(app: FastifyInstance) {
     if (issued) {
       // Queued rather than sent inline, so a slow gateway cannot hold the request
       // open — but into the sealed auth outbox, not the staff-readable message log.
+      // The business name comes from the configured profile, so a chain that has
+      // set its own name does not send codes branded as something else.
+      const brand = await chainDisplayName();
       await queueAuthMessage({
         to_phone: phone,
         purpose: 'OTP',
-        body: `Your Hardware ERP verification code is ${otp}. It expires in ${env.otpExpiryMinutes} minutes. Do not share it with anyone.` });
+        body: `Your ${brand} verification code is ${otp}. It expires in ${env.otpExpiryMinutes} minutes. Do not share it with anyone.` });
     }
 
     // The same response either way — an attacker cannot use this to find out
@@ -263,13 +267,14 @@ export default async function authRoutes(app: FastifyInstance) {
     const row = res.rows[0];
 
     if (row?.issued && row.phone) {
+      const brand = await chainDisplayName();
       await queueAuthMessage({
         to_phone: row.phone,
         to_email: row.email,
         purpose: kind === 'PIN' ? 'PIN_RESET' : 'PASSWORD_RESET',
         body: kind === 'PIN'
-          ? `Reset your Hardware ERP PIN with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.`
-          : `Reset your Hardware ERP password with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.` });
+          ? `Reset your ${brand} PIN with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.`
+          : `Reset your ${brand} password with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.` });
     }
 
     return {

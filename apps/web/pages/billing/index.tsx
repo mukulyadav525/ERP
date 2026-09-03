@@ -10,7 +10,9 @@
 //  • split payment must reconcile to the bill before the button enables (3.2)
 //  • an offline sale is queued locally and replayed with a client_txn_id (3.5)
 // ============================================================================
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
   apiGet, apiPost, apiPut, apiDelete, downloadFile, printFile, whatsappShareUrl,
@@ -74,11 +76,25 @@ export default function BillingPage() {
   );
 }
 
+const BILLING_TABS = ['pos', 'invoices', 'till', 'conflicts'] as const;
+type BillingTab = typeof BILLING_TABS[number];
+
 function BillingScreen() {
   const { user, can, activeBranchId } = useAuth();
   const { t } = useI18n();
   const toast = useToast();
-  const [tab, setTab] = useState<'pos' | 'invoices' | 'till' | 'conflicts'>('pos');
+  const router = useRouter();
+  // The tab is addressable so a dashboard tile, a search result or a bookmark can
+  // land on the right one. An unrecognised value falls back to the counter rather
+  // than rendering nothing, and ?invoice= (a search hit) implies the history tab.
+  const initialTab: BillingTab = (() => {
+    const q = router.query;
+    if (typeof q.tab === 'string' && (BILLING_TABS as readonly string[]).includes(q.tab)) return q.tab as BillingTab;
+    if (typeof q.invoice === 'string') return 'invoices';
+    return 'pos';
+  })();
+  const [tab, setTab] = useState<BillingTab>(initialTab);
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
   const [offlineCount, setOfflineCount] = useState(0);
 
   useEffect(() => {
@@ -106,7 +122,7 @@ function BillingScreen() {
       )}
       <Tabs
         active={tab}
-        onChange={(k) => setTab(k as any)}
+        onChange={(k) => setTab(k as BillingTab)}
         tabs={[
           { key: 'pos', label: t('newBill') },
           { key: 'invoices', label: t('invoices') },
@@ -124,12 +140,19 @@ function BillingScreen() {
 
 // ── POS ─────────────────────────────────────────────────────────────────────
 function PosTab() {
-  const { activeBranchId, user } = useAuth();
+  const { activeBranchId, user, can } = useAuth();
   const { t } = useI18n();
   const toast = useToast();
 
   const [query, setQuery] = useState('');
   const search = useDebounced(query, 250);
+  // A USB or Bluetooth barcode scanner is a keyboard: it types the code wherever
+  // the caret is and sends Enter. Keeping this input focused is therefore the
+  // whole of "scanner support" — no SDK, no driver, no special mode. The ref also
+  // lets the cart return focus here after each add, so a cashier can scan a queue
+  // of items without touching the mouse.
+  const scanRef = useRef<HTMLInputElement>(null);
+  const [unknownCode, setUnknownCode] = useState<string | null>(null);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [customer, setCustomer] = useState<any | null>(null);
   const [customerQuery, setCustomerQuery] = useState('');
@@ -199,6 +222,24 @@ function PosTab() {
     });
   }, [totals.grand]);
 
+  /**
+   * Enter in the item box — which is also what a scanner sends after a code.
+   *
+   * One match is added straight to the cart, because that is what scanning means.
+   * Several matches are left on screen for the cashier to choose from. No match,
+   * for something that looks like a scanned code rather than a typed word, is
+   * reported as a missing product with a way to create it — silently doing
+   * nothing is how an item ends up left off a bill.
+   */
+  function onScan(value: string) {
+    const code = value.trim();
+    if (!code) return;
+    const matches = products ?? [];
+    if (matches.length === 1) { addToCart(matches[0]); return; }
+    if (matches.length === 0 && /^[0-9A-Za-z-]{6,}$/.test(code)) { setUnknownCode(code); return; }
+    setUnknownCode(null);
+  }
+
   function addToCart(p: Product) {
     const gst = Number(p.gst_rate_pct ?? 0);
     const rate = Number(p.selling_price ?? 0);
@@ -222,6 +263,9 @@ function PosTab() {
       }];
     });
     setQuery('');
+    setUnknownCode(null);
+    // Straight back to the scan box, ready for the next item.
+    scanRef.current?.focus();
   }
 
   function updateLine(key: string, patch: Partial<CartLine>) {
@@ -302,6 +346,23 @@ function PosTab() {
 
   /** Back to the cart. The draft stays on the server so nothing is retyped. */
   function backToEdit() { setReviewing(false); }
+
+  // Ctrl/Cmd+S saves the basket as a draft — the same action as the button, so
+  // there is one code path and one set of guards. It does NOT finalise: nothing
+  // that draws an invoice number, moves stock or takes money is ever a keystroke
+  // away. Suppressed while a request is in flight, which is also what stops a
+  // held key from queueing several saves.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 's') return;
+      e.preventDefault();
+      if (busy || reviewing || !cart.length) return;
+      void openReview();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // openReview closes over cart/draft; listing those keeps the handler current.
+  }, [busy, reviewing, cart, draft]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   async function discardDraft() {
     if (!draft?.invoice_id) { clearCart(); return; }
@@ -463,11 +524,29 @@ function PosTab() {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1.15fr) minmax(340px, 0.85fr)' }}>
+      <div className="grid split-work">
         {/* ── Left: catalogue search + cart ───────────────────────────────── */}
         <div className="stack">
-          <Card title="Find an item" description="Search by name, SKU or barcode — spelling does not have to be exact">
-            <SearchInput value={query} onChange={setQuery} placeholder="e.g. cpvc elbow, wire, 8901234500014" />
+          <Card title="Find an item" description="Search by name, SKU or barcode — or just scan. Spelling does not have to be exact.">
+            <SearchInput value={query} onChange={(v) => { setQuery(v); if (unknownCode) setUnknownCode(null); }}
+              inputRef={scanRef} onEnter={onScan} autoFocus
+              placeholder="Scan a barcode, or type e.g. cpvc elbow, wire, 8901234500014" />
+            {unknownCode && (
+              <div style={{ marginTop: 10 }}>
+                <Alert tone="warning" title="No product matches that code">
+                  Nothing in the catalog carries <span className="mono">{unknownCode}</span>.
+                  {can('edit_catalog')
+                    ? ' Add it to the catalog, or check the code and scan again.'
+                    : ' Check the code, or ask someone who can edit the catalog to add it.'}
+                  {can('edit_catalog') && (
+                    <div style={{ marginTop: 10 }}>
+                      <Link href={`/catalog?new=1&barcode=${encodeURIComponent(unknownCode)}`}
+                            className="btn sm">Create product</Link>
+                    </div>
+                  )}
+                </Alert>
+              </div>
+            )}
             <div style={{ marginTop: 12, maxHeight: 240, overflowY: 'auto' }}>
               {(products ?? []).slice(0, 12).map((p) => {
                 const avail = Number(p.available_qty ?? 0);
@@ -505,7 +584,7 @@ function PosTab() {
               </div>
             )}>
             {cart.length === 0 ? (
-              <EmptyState icon="🛒" title="Cart is empty" text="Search above and tap an item to add it." />
+              <EmptyState icon="billing" title="Cart is empty" text="Search above and tap an item to add it." />
             ) : (
               <div className="table-wrap">
                 <table className="data">
@@ -715,21 +794,39 @@ function PosTab() {
             const businessName = settings?.business_profile?.name || 'BHAWANI ONE';
             const custName = lastInvoice._customer?.name;
             const phone = lastInvoice._customer?.phone;
+            // The payment line is the SERVER's summary of the rows it just wrote.
+            // A bill settled partly or wholly on credit must never go out to the
+            // customer labelled "Paid" — that is a factual claim about money.
+            const summary = lastInvoice.payment_summary;
+            const statusLine = summary?.status === 'ON_CREDIT'
+              ? `Status: On credit — ${inr(summary.on_credit, { decimals: true })} outstanding`
+              : summary?.status === 'PARTIALLY_PAID'
+                ? `Status: Part paid — ${inr(summary.settled, { decimals: true })} received, ${inr(summary.on_credit, { decimals: true })} outstanding`
+                : 'Status: Paid';
             const message = [
               businessName,
               `Invoice: ${lastInvoice.invoice_number}`,
               `Date: ${formatDateTime(lastInvoice.invoice_date ?? lastInvoice.created_at)}`,
               custName ? `Customer: ${custName}` : null,
               `Amount: ${inr(lastInvoice.grand_total, { decimals: true })}`,
-              'Status: Paid',
+              statusLine,
               '',
               'Thank you for your business.',
             ].filter(Boolean).join('\n');
             const url = whatsappShareUrl(phone, message);
             return url ? (
-              <Button className="block" onClick={() => window.open(url, '_blank', 'noopener')}>
-                Share on WhatsApp
-              </Button>
+              <div className="stack" style={{ gap: 6 }}>
+                <Button className="block" onClick={() => window.open(url, '_blank', 'noopener')}>
+                  Open WhatsApp with the bill details
+                </Button>
+                {/* Said plainly, because the difference matters: this opens
+                    WhatsApp with a written message. It does not attach the PDF and
+                    it does not send anything — the cashier still presses send. */}
+                <p className="muted small" style={{ margin: 0 }}>
+                  Opens WhatsApp with the message ready to send. The PDF is not attached —
+                  download it first if the customer wants the document itself.
+                </p>
+              </div>
             ) : (
               <p className="muted small">
                 {custName
@@ -886,7 +983,7 @@ function ReviewScreen({
         </Alert>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 0.85fr)' }}>
+      <div className="grid split-work">
         <div className="stack">
           <Card
             title={isGst ? 'Tax invoice preview' : 'Cash memo preview'}
@@ -1017,6 +1114,15 @@ function InvoicesTab() {
     catch (err) { toast.error(err); }
   }
 
+  // ?invoice=<id> — where a global-search hit lands. A stale or out-of-scope id
+  // simply leaves the list showing; RLS has already decided what is reachable.
+  const router = useRouter();
+  useEffect(() => {
+    const id = router.query.invoice;
+    if (typeof id !== 'string' || selected?.invoice_id === id) return;
+    void openInvoice({ invoice_id: id });
+  }, [router.query.invoice]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   async function voidInvoice() {
     if (!selected) return;
     setVoiding(true);
@@ -1034,7 +1140,7 @@ function InvoicesTab() {
       </div>
       <Card flush>
         <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-          empty={<EmptyState icon="🧾" title="No invoices" text="Bills you create will appear here." />}>
+          empty={<EmptyState icon="billing" title="No invoices" text="Bills you create will appear here." />}>
           {(rows) => (
             <DataTable rows={rows} onRowClick={(r) => void openInvoice(r)}
               footer={`${rows.length} invoice(s)`}
@@ -1301,7 +1407,7 @@ function ConflictsTab() {
     <Card flush title="Sales that arrived against insufficient stock"
       description="A sale already made at the counter is never voided automatically — it is surfaced here for a person to decide.">
       <AsyncSection data={data} error={error} isLoading={isLoading}
-        empty={<EmptyState icon="✓" title="Nothing to resolve" text="No offline sale has conflicted with stock." />}>
+        empty={<EmptyState icon="check" title="Nothing to resolve" text="No offline sale has conflicted with stock." />}>
         {(rows) => (
           <DataTable rows={rows}
             columns={[

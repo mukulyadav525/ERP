@@ -1,5 +1,6 @@
 // Section 8 — Vendor / Procurement Management.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import { apiGet, apiPost, downloadCsv, fetcher, formatDate, inr, num } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
@@ -36,6 +37,14 @@ function VendorsScreen() {
   const { data: payables, mutate: mutatePayables } = useSWR<any[]>('/api/vendors/outstanding/list', fetcher);
 
   const totalPayable = (payables ?? []).reduce((s, v) => s + Number(v.balance_owed), 0);
+
+  // ?vendor=<id> — where a global-search hit lands.
+  const router = useRouter();
+  useEffect(() => {
+    const id = router.query.vendor;
+    if (typeof id !== 'string' || detail?.vendor_id === id) return;
+    apiGet(`/api/vendors/${id}`).then(setDetail).catch(() => { /* stale link */ });
+  }, [router.query.vendor]);   // eslint-disable-line react-hooks/exhaustive-deps
   const overdue = (payables ?? []).filter((v) => v.is_overdue);
 
   async function recordPayment() {
@@ -71,7 +80,7 @@ function VendorsScreen() {
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-              empty={<EmptyState icon="🏪" title="No vendors" />}>
+              empty={<EmptyState icon="vendors" title="No vendors" />}>
               {(rows) => (
                 <DataTable rows={rows} onRowClick={async (r) => {
                   try { setDetail(await apiGet(`/api/vendors/${r.vendor_id}`)); } catch (err) { toast.error(err); }
@@ -95,7 +104,7 @@ function VendorsScreen() {
 
       {tab === 'payables' && (
         <Card flush title="Outstanding payables">
-          <AsyncSection data={payables} empty={<EmptyState icon="✓" title="Nothing owed" />}>
+          <AsyncSection data={payables} empty={<EmptyState icon="check" title="Nothing owed" />}>
             {(rows) => (
               <DataTable rows={rows}
                 columns={[

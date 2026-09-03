@@ -60,7 +60,7 @@ function StaffTab() {
       </div>
       <Card flush>
         <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
-          empty={<EmptyState icon="👤" title="No staff yet" />}>
+          empty={<EmptyState icon="staff" title="No staff yet" />}>
           {(rows) => (
             <DataTable rows={rows} footer={`${rows.length} staff member(s)`}
               columns={[

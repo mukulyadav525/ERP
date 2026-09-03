@@ -8,6 +8,8 @@ import { useI18n } from '../lib/i18n';
 import { NAV_CONFIG } from '../lib/rbac';
 import { fetcher } from '../lib/api';
 import { BranchFilter } from './ui';
+import { Icon } from './icons';
+import CommandPalette from './CommandPalette';
 
 type Theme = 'light' | 'dark' | 'system';
 const THEME_KEY = 'erp_theme';
@@ -48,7 +50,15 @@ function usePageTitle(): string {
   const { t } = useI18n();
   const item = NAV_CONFIG.flatMap((s) => s.items)
     .find((i) => i.href === router.pathname || (i.href !== '/' && router.pathname.startsWith(i.href)));
-  return item ? t(item.labelKey) : 'Bhawani One';
+  return item ? t(item.labelKey) : 'Dashboard';
+}
+
+/** ⌘ on a Mac, Ctrl everywhere else — shown, not guessed at, so the hint on the
+ *  search button matches the key that actually works. Falls back to Ctrl during
+ *  server rendering, then corrects itself on the client. */
+function modKeyLabel(): string {
+  if (typeof navigator === 'undefined') return 'Ctrl ';
+  return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl ';
 }
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -57,7 +67,31 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const { t, lang, setLang } = useI18n();
   const [theme, setTheme] = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const title = usePageTitle();
+
+  // Global shortcuts. Deliberately few, and deliberately not the ones the browser
+  // already owns: Ctrl/Cmd+K opens search (no browser meaning), Ctrl/Cmd+N opens a
+  // new bill. Anything typed into a field is left alone — a cashier keying a
+  // customer's name must never trip a navigation.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing = Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT' || el.isContentEditable));
+      const key = e.key.toLowerCase();
+      if (key === 'k') { e.preventDefault(); setPaletteOpen((v) => !v); return; }
+      // A new bill from inside a text field would discard what is being typed.
+      if (key === 'n' && !typing && can('create_invoice')) {
+        e.preventDefault();
+        void router.push('/billing?new=1');
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [can, router]);
 
   // Attention counts on the sidebar — the numbers a manager would otherwise have
   // to go looking for. Owner-only, since the endpoint is Owner-only.
@@ -80,7 +114,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Head>
-        <title>{`${title} · Bhawani One`}</title>
+        <title>{`BHAWANI ONE — ${title}`}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="theme-color" content="#131722" />
       </Head>
@@ -111,7 +145,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                     const count = counts[item.href] ?? 0;
                     return (
                       <Link key={item.href} href={item.href} className={`nav-item${active ? ' active' : ''}`}>
-                        <span className="ico" aria-hidden>{item.icon}</span>
+                        <span className="ico"><Icon name={item.icon} size={17} /></span>
                         <span>{t(item.labelKey)}</span>
                         {count > 0 && <span className="count">{count}</span>}
                       </Link>
@@ -136,13 +170,14 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                       title={t('language')}>
                 {lang === 'en' ? 'हिन्दी' : 'English'}
               </button>
-              <button className="pill" title={t('theme')}
+              <button className="pill icon-pill" aria-label={t('theme')} title={t('theme')}
                       onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}>
-                {theme === 'dark' ? '☾' : theme === 'light' ? '☀' : '◐'}
+                <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'monitor'} size={15}
+                      title={theme === 'dark' ? 'Dark theme' : theme === 'light' ? 'Light theme' : 'Follow system theme'} />
               </button>
             </div>
             <button className="nav-item" onClick={() => void logout()} style={{ width: '100%' }}>
-              <span className="ico" aria-hidden>⇥</span>
+              <span className="ico"><Icon name="signout" size={17} /></span>
               <span>{t('signOut')}</span>
             </button>
           </div>
@@ -150,14 +185,23 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="main">
           <header className="topbar">
-            <button className="icon-btn menu-toggle" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu">☰</button>
+            <button className="icon-btn menu-toggle" onClick={() => setMenuOpen((v) => !v)}
+                    aria-label="Menu" aria-expanded={menuOpen}><Icon name="menu" size={17} /></button>
             <h1>{title}</h1>
             <div className="spacer" />
+            <button className="topbar-search" onClick={() => setPaletteOpen(true)}
+                    aria-label="Search bills, customers and products">
+              <Icon name="search" size={15} />
+              <span className="topbar-search-label">Search…</span>
+              <kbd>{modKeyLabel()}K</kbd>
+            </button>
             <BranchFilter />
           </header>
           <main className="content">{children}</main>
         </div>
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </>
   );
 }
