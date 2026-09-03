@@ -13,16 +13,23 @@ type Theme = 'light' | 'dark' | 'system';
 const THEME_KEY = 'erp_theme';
 
 function useTheme(): [Theme, (t: Theme) => void] {
-  const [theme, setThemeState] = useState<Theme>('system');
+  // Light is the hard default: a visitor with no saved preference sees light
+  // mode, full stop, regardless of their OS/browser setting. "system" is only
+  // ever reached by an explicit user choice, never as the unset default — see
+  // the matching no-FOUC script in _document.tsx, which pins the same default
+  // before React even hydrates.
+  const [theme, setThemeState] = useState<Theme>('light');
   useEffect(() => {
-    let saved: Theme = 'system';
-    try { saved = (localStorage.getItem(THEME_KEY) as Theme) || 'system'; } catch { /* ignore */ }
-    setThemeState(saved);
-    apply(saved);
+    let saved: Theme | null = null;
+    try { saved = localStorage.getItem(THEME_KEY) as Theme | null; } catch { /* ignore */ }
+    const effective: Theme = saved === 'dark' || saved === 'light' || saved === 'system' ? saved : 'light';
+    setThemeState(effective);
+    apply(effective);
   }, []);
   function apply(t: Theme) {
     // "system" means removing the attribute entirely, so the prefers-color-scheme
-    // media query takes over rather than the app pinning a guess.
+    // media query takes over rather than the app pinning a guess. This only
+    // happens once the user has explicitly chosen it — never as a default.
     if (t === 'system') document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', t);
   }

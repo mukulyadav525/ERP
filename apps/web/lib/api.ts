@@ -123,6 +123,48 @@ export async function downloadFile(path: string, filename: string): Promise<void
   URL.revokeObjectURL(url);
 }
 
+/** Opens an authenticated PDF in a new tab so the browser's own viewer handles
+ *  preview and print — a plain <a href> can't carry the bearer token, same as
+ *  downloadFile above. Used for "Print" actions rather than triggering a blind
+ *  window.print(), so the cashier sees the document before committing paper. */
+export async function printFile(path: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+  });
+  if (res.status === 401) { clearStoredSession(); onUnauthorized?.(); throw new ApiError(401, 'Your session has ended.'); }
+  if (!res.ok) {
+    let message = 'Could not open that document.';
+    try { message = (await res.json()).error ?? message; } catch { /* keep default */ }
+    throw new ApiError(res.status, message);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const win = window.open(url, '_blank');
+  // Some browsers block window.open from an async callback; falling back to a
+  // download keeps the action useful rather than silently doing nothing.
+  if (!win) { const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.click(); }
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+/**
+ * Builds a wa.me link that opens WhatsApp (web or app) with a pre-filled
+ * message — the safe fallback the spec calls for when the WhatsApp Business
+ * API isn't configured with live credentials. This never sends anything on
+ * its own: it only opens WhatsApp for the user to press send themselves, and
+ * it carries no PDF attachment (wa.me cannot attach files) — the message
+ * points the recipient at what was actually finalized, nothing is claimed
+ * beyond that.
+ */
+export function whatsappShareUrl(phone: string | null | undefined, message: string): string | null {
+  if (!phone) return null;
+  const digits = phone.replace(/[^\d]/g, '');
+  if (digits.length < 8) return null;
+  // Indian mobile numbers are stored as 10 digits without a country code;
+  // wa.me needs the full international number.
+  const withCountry = digits.length === 10 ? `91${digits}` : digits;
+  return `https://wa.me/${withCountry}?text=${encodeURIComponent(message)}`;
+}
+
 /** Turns rows into a CSV download, used by every export button. */
 export function downloadCsv(rows: Record<string, unknown>[], filename: string): void {
   if (!rows.length) return;

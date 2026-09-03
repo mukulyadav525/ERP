@@ -237,6 +237,36 @@ try {
     await ctx.close();
   }
 
+  // ── Light mode is the hard default ──────────────────────────────────────────
+  // A visitor with no saved theme preference must see light mode, even when
+  // their OS/browser is set to dark — this was the actual bug: the app used to
+  // default to 'system', so a dark-OS visitor got a dark app on their very
+  // first visit with no chance to choose. This is a brand-new incognito-style
+  // context (no localStorage) with the OS colour scheme forced to dark, which
+  // is exactly the case that used to fail.
+  section('Light mode is the default for a first-time visitor (hard requirement)');
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, colorScheme: 'dark' });
+    const page = await ctx.newPage();
+    await page.goto(`${WEB}/login`, { waitUntil: 'networkidle' });
+    const attr = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    check('a first-time visitor on a dark-OS browser still gets data-theme="light"', attr === 'light', `got ${attr}`);
+    // The design system's light background is #f4f5f7 / rgb(244, 245, 247); the
+    // dark one is #0d0f13 / rgb(13, 15, 19) — this asserts the paint, not just
+    // the attribute, so a CSS regression that ignores the attribute is caught too.
+    check('the painted background is the light-mode colour, not the dark one',
+      bg === 'rgb(244, 245, 247)', bg);
+
+    // Once the visitor explicitly picks dark, a refresh must keep it — light
+    // mode is the default, not something forced on every load.
+    await page.evaluate(() => localStorage.setItem('erp_theme', 'dark'));
+    await page.reload({ waitUntil: 'networkidle' });
+    const attrAfterChoice = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+    check('an explicit dark choice survives a refresh', attrAfterChoice === 'dark', `got ${attrAfterChoice}`);
+    await ctx.close();
+  }
+
   // ── Themes ────────────────────────────────────────────────────────────────
   section('Light and dark');
   {

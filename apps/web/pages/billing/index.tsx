@@ -13,7 +13,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import useSWR from 'swr';
 import {
-  apiGet, apiPost, apiPut, apiDelete, downloadFile, fetcher, inr, num, withBranch, formatDateTime,
+  apiGet, apiPost, apiPut, apiDelete, downloadFile, printFile, whatsappShareUrl,
+  fetcher, inr, num, withBranch, formatDateTime,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
@@ -337,7 +338,9 @@ function PosTab() {
         payments: payments.filter((pp) => Number(pp.amount) > 0)
           .map((pp) => ({ method: pp.method, amount: Number(pp.amount), ref_no: pp.ref_no || undefined })),
       });
-      setLastInvoice(invoice);
+      // Snapshotted here because clearCart() below nulls the customer state —
+      // the post-sale actions (WhatsApp) need the name/phone a moment longer.
+      setLastInvoice({ ...invoice, _customer: customer });
       clearCart();
       void refreshTills();
       toast.success(`Bill ${invoice.invoice_number} created`, inr(invoice.grand_total, { decimals: true }));
@@ -378,7 +381,7 @@ function PosTab() {
     setBusy(true);
     try {
       const invoice = await apiPost<any>('/api/billing/invoices', body);
-      setLastInvoice(invoice);
+      setLastInvoice({ ...invoice, _customer: customer });
       clearCart();
       void refreshTills();
       toast.success(`Bill ${invoice.invoice_number} created`, inr(invoice.grand_total, { decimals: true }));
@@ -686,14 +689,20 @@ function PosTab() {
                 onClose={() => { setPinModal(null); setOverridePin(''); }}
                 onVerify={verifyPin} />
 
-      {/* Post-sale receipt actions */}
+      {/* Post-sale receipt actions (Section 16 / WhatsApp bill sharing). Every
+          figure here — number, date, amount — comes from `lastInvoice`, the
+          server's own finalize response, never from the cart that was just
+          cleared. */}
       <Modal open={Boolean(lastInvoice)} onClose={() => setLastInvoice(null)} title="Sale complete"
         footer={<>
           <Button onClick={() => setLastInvoice(null)}>Done</Button>
+          <Button onClick={() => void printFile(`/api/billing/invoices/${lastInvoice.invoice_id}/pdf`)}>
+            Print
+          </Button>
           <Button variant="primary"
             onClick={() => void downloadFile(`/api/billing/invoices/${lastInvoice.invoice_id}/pdf`,
               `Invoice-${lastInvoice.invoice_number}.pdf`)}>
-            Download invoice PDF
+            Download PDF
           </Button>
         </>}>
         <div className="stack">
@@ -702,6 +711,33 @@ function PosTab() {
             {lastInvoice?.points_redeemed > 0 && ` ${lastInvoice.points_redeemed} points redeemed.`}
           </Alert>
           {lastInvoice?.warning && <Alert tone="warning">{lastInvoice.warning}</Alert>}
+          {lastInvoice && (() => {
+            const businessName = settings?.business_profile?.name || 'BHAWANI ONE';
+            const custName = lastInvoice._customer?.name;
+            const phone = lastInvoice._customer?.phone;
+            const message = [
+              businessName,
+              `Invoice: ${lastInvoice.invoice_number}`,
+              `Date: ${formatDateTime(lastInvoice.invoice_date ?? lastInvoice.created_at)}`,
+              custName ? `Customer: ${custName}` : null,
+              `Amount: ${inr(lastInvoice.grand_total, { decimals: true })}`,
+              'Status: Paid',
+              '',
+              'Thank you for your business.',
+            ].filter(Boolean).join('\n');
+            const url = whatsappShareUrl(phone, message);
+            return url ? (
+              <Button className="block" onClick={() => window.open(url, '_blank', 'noopener')}>
+                Share on WhatsApp
+              </Button>
+            ) : (
+              <p className="muted small">
+                {custName
+                  ? 'This customer has no phone number on file, so a WhatsApp share link cannot be built.'
+                  : 'Add a customer with a phone number to share the bill on WhatsApp.'}
+              </p>
+            );
+          })()}
         </div>
       </Modal>
     </>
