@@ -55,7 +55,25 @@ export default async function catalogRoutes(app: FastifyInstance) {
             SELECT gst_rate_pct FROM hsn_tax_rates
              WHERE hsn_code = p.hsn_code AND effective_to IS NULL LIMIT 1
         ) htr ON TRUE
-        LEFT JOIN branch_stock bs ON bs.product_id = p.product_id AND bs.branch_id = ${branchId}
+        -- A null branchId is the Owner/Admin "All branches" view, and it has to SUM
+        -- across branches. The previous form pinned the join to the branch column
+        -- directly, so a null compared as "= NULL" -- never true -- and every product
+        -- LEFT JOINed to nothing and reported 0: a shop that looked entirely out of
+        -- stock. Every other stock query here already reads a null branch as "no
+        -- filter" (inventory/index.ts:105, search/index.ts:188, and :508 below).
+        LEFT JOIN LATERAL (
+            SELECT sum(s.base_unit_qty)  AS base_unit_qty,
+                   sum(s.reserved_qty)   AS reserved_qty,
+                   sum(s.reorder_min)    AS reorder_min,
+                   -- Value-weighted, not avg(): branches hold different quantities at
+                   -- different costs, and a mean of means would misstate the margin.
+                   CASE WHEN sum(s.base_unit_qty) > 0
+                        THEN sum(s.base_unit_qty * s.weighted_avg_cost) / sum(s.base_unit_qty)
+                        ELSE max(s.weighted_avg_cost) END AS weighted_avg_cost
+              FROM branch_stock s
+             WHERE s.product_id = p.product_id
+               ${branchId ? sql`AND s.branch_id = ${branchId}` : sql``}
+        ) bs ON TRUE
        WHERE (${q.include_inactive === 'true'} OR p.is_active)
          ${q.category_id ? sql`AND p.category_id = ${uuid(q.category_id, 'category_id')}` : sql``}
          ${q.brand_id ? sql`AND p.brand_id = ${uuid(q.brand_id, 'brand_id')}` : sql``}
@@ -73,7 +91,11 @@ export default async function catalogRoutes(app: FastifyInstance) {
   // Barcode scan (3.7 / 3.9) — exact match, returns the sale unit the barcode is for.
   app.get('/barcode/:code', guarded('view_catalog', async ({ session, db: trx, req }) => {
     const { code } = req.params as { code: string };
-    const branchId = session.branch_id;
+    const q = (req.query ?? {}) as Record<string, string | undefined>;
+    // Same rule as /products above: an Owner/Admin scanning with no branch selected
+    // is asking chain-wide. Reading session.branch_id directly made that a null and
+    // reported every scanned item as out of stock.
+    const branchId = resolveBranchScope(session, optionalUuid(q.branch_id, 'branch_id'));
     const rows = await sql<any>`
       SELECT p.product_id, p.name, p.sku, p.base_unit, p.hsn_code, p.default_price_type,
              pb.product_unit_id, COALESCE(pu.unit_label, p.base_unit::text) AS unit_label,
@@ -87,7 +109,13 @@ export default async function catalogRoutes(app: FastifyInstance) {
                             WHERE product_id = p.product_id AND effective_to IS NULL LIMIT 1) pp ON TRUE
         LEFT JOIN LATERAL (SELECT gst_rate_pct FROM hsn_tax_rates
                             WHERE hsn_code = p.hsn_code AND effective_to IS NULL LIMIT 1) htr ON TRUE
-        LEFT JOIN branch_stock bs ON bs.product_id = p.product_id AND bs.branch_id = ${branchId}
+        LEFT JOIN LATERAL (
+            SELECT sum(s.base_unit_qty) AS base_unit_qty,
+                   sum(s.reserved_qty)  AS reserved_qty
+              FROM branch_stock s
+             WHERE s.product_id = p.product_id
+               ${branchId ? sql`AND s.branch_id = ${branchId}` : sql``}
+        ) bs ON TRUE
        WHERE pb.barcode = ${str(code, 'barcode', { max: 64 })} AND p.is_active
        LIMIT 1
     `.execute(trx);

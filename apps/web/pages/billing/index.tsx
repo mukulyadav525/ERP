@@ -746,16 +746,27 @@ function PosTab() {
             </div>
           </Card>
 
+          {/* An Owner/Admin viewing "All branches" has no branch scope, and the API
+              correctly refuses the write (writeBranch, api/src/lib/http.ts). Saying
+              so here — before the cart is built — is the difference between a
+              one-click fix and retyping the bill, which is what used to happen: the
+              only signal was a 400 toast fired after Review was pressed. */}
+          {!activeBranchId && (
+            <Alert tone="warning" title={t('pickBranchToBill')}>
+              {t('pickBranchToBillWhy')}
+            </Alert>
+          )}
+
           {/* Review is the primary path (Section 62): prepare, check with the
               customer, then finalise. Finishing straight from the cart stays
               available for the fast counter sale where there is nothing to review. */}
           <Button variant="primary" size="lg" className="block" busy={busy}
-            disabled={!cart.length}
+            disabled={!cart.length || !activeBranchId}
             onClick={() => void openReview()}>
             {t('reviewBill')} · {inr(totals.grand)}
           </Button>
           <Button size="lg" className="block" busy={busy}
-            disabled={!cart.length || Math.abs(balance) > 0.01}
+            disabled={!cart.length || !activeBranchId || Math.abs(balance) > 0.01}
             onClick={() => void completeSale()}>
             {t('completeSale')} · {inr(totals.grand)}
           </Button>

@@ -75,6 +75,14 @@ export const STRINGS: Dict = {
   total:     { en: 'Total',     hi: 'कुल' },
   branch:    { en: 'Branch',    hi: 'शाखा' },
   allBranches: { en: 'All branches', hi: 'सभी शाखाएँ' },
+  pickBranchToBill: {
+    en: 'Pick a branch to bill from',
+    hi: 'बिल बनाने के लिए शाखा चुनें',
+  },
+  pickBranchToBillWhy: {
+    en: 'An invoice is raised at one branch — it draws that branch\u2019s stock and takes the next number in that branch\u2019s series. Choose a branch above to start billing.',
+    hi: 'बिल एक ही शाखा से बनता है — वही शाखा का स्टॉक घटता है और उसी शाखा की क्रम-संख्या मिलती है। बिलिंग शुरू करने के लिए ऊपर शाखा चुनें।',
+  },
   signOut:   { en: 'Sign out',  hi: 'साइन आउट' },
   language:  { en: 'Language',  hi: 'भाषा' },
   theme:     { en: 'Theme',     hi: 'थीम' },
