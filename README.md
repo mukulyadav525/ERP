@@ -11,23 +11,25 @@ requirements document.
 | Suite | What it covers | Checks |
 |---|---|---|
 | `tests/tax-properties.mjs` | GST rounding, base-unit maths, returns, weighted-average cost, over ~50,000 generated cases | 20 |
-| `apps/api/scripts/smoke-test.mjs` | per-role and per-branch API behaviour, RLS in raw SQL, global-search scope | 265 |
-| `tests/regression.mjs` | every defect found in the production audit, plus negative and concurrency cases | 75 |
-| `tests/workflows.mjs` | the ten end-to-end business journeys, each cross-checked against the database | 68 |
-| `tests/pdf-matrix.mjs` + `pdf-geometry.mjs` | 13 document permutations, then an automatic margin/overlap check | 13 + 13 |
-| `tests/uitest.mjs` | a real browser: every page, 390px layout, the draft flow, roles, Hindi, themes, dead controls | 76 |
-| `tests/viewports.mjs` | 12 widths (320 → 2560px) × 12 routes × both themes: page overflow, clipped controls, touch targets | 35 |
+| `apps/api/scripts/smoke-test.mjs` | per-role and per-branch API behaviour, RLS in raw SQL, global-search scope | 274 |
+| `tests/regression.mjs` | every defect found in the production audits, plus negative and concurrency cases | 76 |
+| `tests/workflows.mjs` | the end-to-end business journeys, each cross-checked against the database | 71 |
+| `tests/final-pass.mjs` | branch context, units (100 G / KG / packs), numbering, invoice immutability, IGST, receipts, purchases with GST, transfers, estimates, reports, error messages, backup honesty | 121 |
+| `tests/working-day.mjs` | a whole business day — till to close — as the Owner at one branch and as branch staff at another, every step reconciled | 140 |
+| `tests/pdf-matrix.mjs` + `pdf-geometry.mjs` | 13 document permutations, then an automatic margin/overlap check | 13 + geometry |
+| `tests/uitest.mjs` | a real browser: every page, 390px layout, keyboard-only billing, search focus, offline sale and sync, roles, Hindi, themes, dead controls | 90 |
+| `tests/viewports.mjs` | 12 widths (320 → 2560px) × the routes × both themes: overflow, clipped controls, touch targets | 35 |
 
-See `REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping.
+See `docs/REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping, `docs/PRODUCTION_AUDIT.md` for the defects found and fixed, and `docs/OPERATIONS.md` for running it.
 
 ## Stack
 
 | Layer | Choice | Why |
 |---|---|---|
 | Database | **PostgreSQL 16** | Row-level security, triggers, generated columns, `EXCLUDE` constraints — the schema leans on all of them. Branch isolation is enforced *here*, not in application code. |
-| Backend | **Node.js + TypeScript + Fastify** | One language across the stack, JSON-schema validation on every route, good performance at this concurrency. |
+| Backend | **Node.js + TypeScript + Fastify 5** | One language across the stack, JSON-schema validation on every route, good performance at this concurrency. |
 | DB access | **Kysely** (typed SQL builder, not an ORM) | Compile-time query safety without fighting the Postgres features this schema depends on. No raw string interpolation anywhere. |
-| Frontend | **Next.js (Pages Router) + SWR + Recharts** | Web-first with offline billing, one shared design system, Hindi/English, light/dark. |
+| Frontend | **Next.js 15 (Pages Router) + SWR + Recharts** | Web-first with offline billing, one shared design system, Hindi/English, light/dark. |
 | Offline | Local queue + `client_txn_id` idempotency | Billing keeps working through an outage; conflicts resolve by `server_received_at`, never by silently overselling. |
 
 ## Security model
@@ -60,20 +62,24 @@ erp-project/
 │   │   ├── src/lib/pdf/        ← the document system: theme, renderer, business profile
 │   │   ├── src/routes/         ← one folder per requirements section
 │   │   ├── assets/fonts/       ← Lohit Devanagari, for Hindi documents (OFL)
-│   │   └── scripts/smoke-test.mjs
+│   │   └── scripts/              ← smoke-test, backup, restore-test, create-owner
 │   └── web/                    ← Next.js
 │       ├── styles/globals.css  ← the design tokens
 │       ├── components/ui.tsx   ← the shared component library
-│       └── pages/              ← 13 screens
+│       ├── pages/              ← 13 screens
+│       └── public/docs/        ← the owner and counter-staff guides
 ├── tests/
 │   ├── tax-properties.mjs      ← property tests for the tax engine
 │   ├── regression.mjs          ← the audit's findings, locked down
-│   ├── workflows.mjs           ← the ten end-to-end business journeys
+│   ├── workflows.mjs           ← the end-to-end business journeys
+│   ├── final-pass.mjs          ← the final pass's features, checked against the database
+│   ├── working-day.mjs         ← a full business day, reconciled step by step
 │   ├── pdf-matrix.mjs          ← renders every document permutation
 │   ├── pdf-geometry.mjs        ← asserts nothing clips or overlaps
 │   ├── uitest.mjs              ← browser checks (Playwright)
 │   └── viewports.mjs           ← responsive sweep, every supported width
-├── REQUIREMENTS_CHECKLIST.md
+├── docs/OPERATIONS.md          ← install, backups, restore test, disaster recovery
+├── docs/REQUIREMENTS_CHECKLIST.md, docs/PRODUCTION_AUDIT.md
 └── docker-compose.yml
 ```
 
@@ -95,19 +101,24 @@ npm install
 npm run dev                              # API on :4000, web on :3000
 ```
 
+For a **production** installation (no demo data) follow `docs/OPERATIONS.md`: apply the
+schema, then `npm run create-owner`, then set up branches, the business profile, GST
+rates and the catalog from the Admin and Catalog screens.
+
 `.env.example` documents every variable. At minimum set `DATABASE_URL` (the **`erp_app`**
 connection the API uses — not the owner), `MIGRATION_DATABASE_URL` (the owner role, used
 only to apply the two `.sql` files), and `SESSION_SECRET`. `GOOGLE_OAUTH_CLIENT_ID` and the
 WhatsApp credentials are optional: leave them blank and Google sign-in is disabled while
-email+password and phone+PIN still work, and the message queue drains locally instead of
-delivering.
+email+password and phone+PIN still work. WhatsApp sharing then works through "Share on
+WhatsApp" links a person sends; queued messages are closed as `NOT_CONFIGURED` and never
+reported as delivered.
 
 ## Verifying
 
 ```bash
 npm run verify        # typecheck + lint + build + every suite below
-npm test              # tax properties, API, regression, workflows, documents
-npm run test:ui         # browser checks (needs: npx playwright install chromium)
+npm test              # tax properties, API, regression, workflows, final pass, working day, documents
+npm run test:ui         # browser checks (npx playwright install chromium, or CHROMIUM_PATH=<Chrome>)
 npm run test:responsive # every viewport, both themes, every route
 ```
 
@@ -147,9 +158,12 @@ Development only — rotate before any real deployment.
 ## Before production
 
 - Rotate every seeded credential and the `erp_app` password.
-- Point `GOOGLE_OAUTH_CLIENT_ID` at a real OAuth client; the WhatsApp sender in
-  `apps/api/src/lib/whatsapp.ts` is a queue with a stub transport — plug in the
-  Business API provider.
+- Point `GOOGLE_OAUTH_CLIENT_ID` at a real OAuth client if Google sign-in is wanted; set
+  the WhatsApp Business API credentials only if queued reminders should be delivered.
+- Schedule `npm run backup` daily and `npm run backup:restore-test` monthly, and copy the
+  backups off the machine (`docs/OPERATIONS.md`). Admin → Compliance shows the status.
+- There are no incremental migration files: `db/schema.sql` builds a new database.
+  Upgrading an existing production database to a future schema needs a written migration.
 - Confirm with a CA whether inter-branch transfers are intrastate or interstate for
   your GSTIN structure (flagged in the requirements doc, §15). The system supports
   both; which applies is a legal question.

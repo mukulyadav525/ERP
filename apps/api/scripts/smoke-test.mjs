@@ -257,7 +257,7 @@ async function main() {
   const created = await expectStatus('owner can create a product', 200, 'POST', '/api/catalog/products',
     { token: tokens.owner, body: { sku: `SMOKE-${Date.now()}`, name: 'Smoke Test Widget', base_unit: 'PIECE',
                                    hsn_code: '7318', selling_price: 100, mrp: 120,
-                                   units: [{ unit_label: 'BOX_10', multiplier_to_base: 10 }] } });
+                                   units: [{ unit_code: 'BOX', multiplier_to_base: 10 }] } });
   ids.newProduct = created?.product_id;
 
   // ── Billing (Section 3) ──────────────────────────────────────────────────
@@ -446,7 +446,8 @@ async function main() {
         body: { grn_id: ids.grn, reason: 'Damaged in transit',
                 lines: [{ grn_line_id: grnDetail?.lines?.[0]?.grn_line_id, qty_base_unit: 10 }] },
       });
-    assert('the debit note has its own number series', /^DN\//.test(dn?.debit_note_number ?? ''), dn?.debit_note_number);
+    // Own series, and the branch code in it: every *_number is unique chain-wide.
+    assert('the debit note has its own number series', /^DN-[A-Z0-9]+\//.test(dn?.debit_note_number ?? ''), dn?.debit_note_number);
     await expectStatus('returning more than was received is refused', 400, 'POST', '/api/inventory/purchase-returns', {
       token: tokens.inventory,
       body: { grn_id: ids.grn, reason: 'Too much',
@@ -538,7 +539,7 @@ async function main() {
                 lines: [{ invoice_line_id: line.line_id, qty_base_unit: 1, condition: 'RESELLABLE' }] },
       });
       assert('a GST return issues a credit note (12.1.1)', Boolean(ret?.credit_note_number), ret?.credit_note_number);
-      assert('the credit note has its own number series', /^CN\//.test(ret?.credit_note_number ?? ''));
+      assert('the credit note has its own number series', /^CN-[A-Z0-9]+\//.test(ret?.credit_note_number ?? ''), ret?.credit_note_number);
       assert('refund hierarchy fields are reported (11.2.1)',
         ret && 'points_earned_reversed' in ret && 'points_redeemed_restored' in ret && 'cash_refund_amount' in ret);
 
@@ -556,7 +557,10 @@ async function main() {
   // ── Quotations ───────────────────────────────────────────────────────────
   section('Quotations (Section 5)');
   const quotes = await expectStatus('GET quotations', 200, 'GET', '/api/quotations?limit=10', { token: tokens.manager1 });
-  await expectStatus('a cashier cannot see quotations', 403, 'GET', '/api/quotations', { token: tokens.cashier });
+  // Estimates are a counter task (spec §21): a cashier may raise and read them,
+  // but approving one (the price agreement, and any stock hold) stays a manager's.
+  await expectStatus('a cashier can see estimates', 200, 'GET', '/api/quotations', { token: tokens.cashier });
+  await expectStatus('an inventory clerk cannot', 403, 'GET', '/api/quotations', { token: tokens.inventory });
   if (ids.customer && ids.plainProduct) {
     const q = await expectStatus('create a quotation', 200, 'POST', '/api/quotations', {
       token: tokens.manager1,
@@ -569,10 +573,15 @@ async function main() {
       { token: tokens.manager1, body: { reserve_stock: true, hold_days: 3 } });
     const detail2 = await call('GET', `/api/quotations/${ids.quotation}`, { token: tokens.manager1 });
     assert('the quotation now holds stock', detail2.body?.stock_reserved === true);
-    await expectStatus('convert it to an invoice', 200, 'POST', `/api/quotations/${ids.quotation}/convert`,
+    // Converting opens a DRAFT bill — nothing is billed, numbered or moved yet.
+    const conv = await expectStatus('convert it to a draft bill', 200, 'POST', `/api/quotations/${ids.quotation}/convert`,
       { token: tokens.manager1 });
-    await expectStatus('it cannot be converted twice', 400, 'POST', `/api/quotations/${ids.quotation}/convert`,
-      { token: tokens.manager1 });
+    assert('conversion opens a draft, not a finalised invoice', conv?.draft?.status === 'DRAFT' && !conv?.draft?.invoice_number,
+      conv?.draft?.status);
+    const again = await expectStatus('converting again returns the same draft', 200, 'POST',
+      `/api/quotations/${ids.quotation}/convert`, { token: tokens.manager1 });
+    assert('…so a double click cannot open two bills', again?.draft_invoice_id === conv?.draft_invoice_id);
+    ids.quoteDraft = conv?.draft_invoice_id;
   }
   await expectStatus('GET challans', 200, 'GET', '/api/quotations/challans', { token: tokens.manager1 });
 
@@ -921,7 +930,10 @@ async function main() {
     const draft = (await call('GET', '/api/quotations?status=DRAFT&limit=1', { token: tokens.manager1 })).body?.[0];
     if (draft) {
       const r = await call('POST', `/api/quotations/${draft.quotation_id}/convert`, { token: tokens.manager1 });
-      assert('a draft quotation cannot be converted straight to an invoice', r.status === 400, `got ${r.status}`);
+      // It becomes a DRAFT bill that still has to pass review, payment and the
+      // discount ceiling — it is never converted straight into a tax invoice.
+      assert('a quotation is never converted straight to a finalised invoice',
+        r.status === 400 || (r.status === 200 && r.body?.draft?.status === 'DRAFT' && !r.body?.draft?.invoice_number), `got ${r.status}`);
     }
   }
 

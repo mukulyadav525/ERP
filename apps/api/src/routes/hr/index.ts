@@ -15,6 +15,7 @@ import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';
 import { audit } from '../../lib/audit.js';
+import { businessToday } from '../../lib/dates.js';
 
 export default async function hrRoutes(app: FastifyInstance) {
   app.get('/employees', guarded('view_hr', async ({ session, db: trx, req }) => {
@@ -63,7 +64,7 @@ export default async function hrRoutes(app: FastifyInstance) {
     const employee = (await sql<any>`
       INSERT INTO employees (user_id, branch_id, designation, joined_at)
       VALUES (${user.user_id}, ${branchId}, ${optionalStr(body.designation, 'Designation', { max: 100 }) ?? role},
-              ${optionalStr(body.joined_at, 'Joining date', { max: 20 }) ?? new Date().toISOString().slice(0, 10)}::date)
+              ${optionalStr(body.joined_at, 'Joining date', { max: 20 }) ?? businessToday()}::date)
       RETURNING *
     `.execute(trx)).rows[0];
 

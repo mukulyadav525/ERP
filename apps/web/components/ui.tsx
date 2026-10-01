@@ -94,16 +94,36 @@ export function Button({ variant = 'default', size, busy, children, ...rest }: {
 export function Field({ label, hint, error, children, required }: {
   label?: string; hint?: string; error?: string | null; children: React.ReactNode; required?: boolean;
 }) {
+  // The label is tied to its control, so a screen reader announces "Due date"
+  // rather than "edit text", and clicking the label focuses the input. Only a
+  // single native control is wired automatically; a composite child (a combobox,
+  // a row of inputs) names itself.
+  const autoId = useId();
+  const only = React.Children.count(children) === 1 && React.isValidElement(children)
+    ? (children as React.ReactElement<any>) : null;
+  const native = only && typeof only.type === 'string' && ['input', 'select', 'textarea'].includes(only.type);
+  const controlId: string = (native && only?.props.id) || autoId;
+  const noteId = `${controlId}-note`;
+  const note = error || hint;
+  const control = native && only
+    ? React.cloneElement(only, {
+        id: controlId,
+        'aria-describedby': note ? noteId : only.props['aria-describedby'],
+        'aria-invalid': error ? true : only.props['aria-invalid'],
+        'aria-required': required || only.props['aria-required'],
+      })
+    : children;
   return (
     <div className="field">
       {label && (
-        <label>
+        <label htmlFor={native ? controlId : undefined}>
           {label}
-          {required && <span style={{ color: 'var(--status-critical)' }}> *</span>}
+          {required && <span style={{ color: 'var(--status-critical)' }} aria-hidden="true"> *</span>}
         </label>
       )}
-      {children}
-      {error ? <span className="error-text">{error}</span> : hint ? <span className="hint">{hint}</span> : null}
+      {control}
+      {error ? <span className="error-text" id={noteId} role="alert">{error}</span>
+        : hint ? <span className="hint" id={noteId}>{hint}</span> : null}
     </div>
   );
 }
@@ -280,15 +300,25 @@ export interface Column<T> {
   render: (row: T) => React.ReactNode;
 }
 
-export function DataTable<T>({ columns, rows, onRowClick, footer, emptyText }: {
+export function DataTable<T>({ columns, rows, onRowClick, footer, emptyText, rowKey, stackOnMobile = true }: {
   columns: Column<T>[]; rows: T[];
   onRowClick?: (row: T) => void; footer?: React.ReactNode; emptyText?: string;
+  /** A stable key per row; falls back to common id fields, then the index. */
+  rowKey?: (row: T) => string;
+  /** Below 640px each row becomes a labelled block instead of a sideways-scrolling table. */
+  stackOnMobile?: boolean;
 }) {
   if (!rows.length) return <EmptyState text={emptyText} />;
+  const keyOf = (row: T, i: number): string => {
+    if (rowKey) return rowKey(row);
+    const r = row as any;
+    return String(r.id ?? r.invoice_id ?? r.product_id ?? r.customer_id ?? r.vendor_id ?? r.grn_id
+      ?? r.entry_id ?? r.payment_id ?? r.return_id ?? r.quotation_id ?? r.expense_id ?? r.transfer_id ?? i);
+  };
   return (
     <>
       <div className="table-wrap">
-        <table className="data">
+        <table className={`data${stackOnMobile ? ' stack-sm' : ''}`}>
           <thead>
             <tr>
               {columns.map((c) => (
@@ -301,10 +331,13 @@ export function DataTable<T>({ columns, rows, onRowClick, footer, emptyText }: {
           </thead>
           <tbody>
             {rows.map((row, i) => (
-              <tr key={(row as any).id ?? i} className={onRowClick ? 'clickable' : ''}
+              <tr key={keyOf(row, i)} className={onRowClick ? 'clickable' : ''}
+                  tabIndex={onRowClick ? 0 : undefined}
+                  onKeyDown={onRowClick ? (e) => { if (e.key === 'Enter') onRowClick(row); } : undefined}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}>
                 {columns.map((c) => (
-                  <td key={c.key} className={`${c.align === 'right' ? 'num' : ''} ${c.nowrap ? 'nowrap' : ''}`}>
+                  <td key={c.key} data-label={c.header || undefined}
+                      className={`${c.align === 'right' ? 'num' : ''} ${c.nowrap ? 'nowrap' : ''}`}>
                     {c.render(row)}
                   </td>
                 ))}
@@ -324,25 +357,52 @@ export function Modal({ open, onClose, title, children, footer, wide }: {
   children: React.ReactNode; footer?: React.ReactNode; wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  // Read through a ref: parents usually pass an inline arrow, and re-running the
+  // effect on every render would steal focus back to the first field while the
+  // person is typing in another one.
+  const closeRef = useRef(onClose); closeRef.current = onClose;
 
-  // Escape closes, and the body stops scrolling behind the dialog — both are the
-  // kind of thing that is obviously missing the moment it is missing.
+  // Escape closes, Tab stays inside the dialog, the page behind does not scroll,
+  // and focus returns to whatever opened the dialog when it closes.
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const opener = document.activeElement as HTMLElement | null;
+    const focusable = () => Array.from(ref.current?.querySelectorAll<HTMLElement>(
+      'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    ) ?? []).filter((el) => el.offsetParent !== null);
+    const onKey = (e: KeyboardEvent) => {
+      // With one dialog opened from another, only the top one (last in the
+      // document) answers: Escape closes it alone, and Tab stays inside it.
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      if (dialogs.length && dialogs[dialogs.length - 1] !== ref.current) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeRef.current(); return; }
+      if (e.key !== 'Tab') return;
+      const els = focusable();
+      if (!els.length) return;
+      const first = els[0], last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
     document.addEventListener('keydown', onKey);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    ref.current?.querySelector<HTMLElement>('input, select, textarea, button')?.focus();
-    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
-  }, [open, onClose]);
+    const body = ref.current?.querySelector('.modal-body');
+    (body?.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea:not([disabled])')
+      ?? ref.current?.querySelector<HTMLElement>('button'))?.focus();
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+      opener?.focus?.();
+    };
+  }, [open]);
 
   if (!open) return null;
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} ref={ref}>
+      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
         <div className="modal-head">
-          <h3 style={{ flex: 1 }}>{title}</h3>
+          <h3 id={titleId} style={{ flex: 1 }}>{title}</h3>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
         </div>
         <div className="modal-body">{children}</div>
@@ -413,34 +473,99 @@ export function RequirePermission({ permission, children }: {
  * renders their branch name as plain text.
  */
 export function BranchFilter() {
-  const { user, branches, activeBranchId, setActiveBranchId } = useAuth();
+  const { user, branches, activeBranchId, setActiveBranchId, canSwitchBranch } = useAuth();
   const { t } = useI18n();
 
   if (!user) return null;
-  if (user.role !== 'OWNER_ADMIN') {
-    // The branch name arrives with the login response, so this is populated on the
-    // first paint. If it somehow is not, show nothing rather than the word
-    // "Branch", which reads like a real branch called Branch.
-    const name = user.branch_name ?? branches.find((b) => b.branch_id === user.branch_id)?.name;
+  const isOwner = user.role === 'OWNER_ADMIN';
+  if (!isOwner && !canSwitchBranch) {
+    // One branch, nothing to choose: show where they are working, as plain text.
+    const name = branches.find((b) => b.branch_id === activeBranchId)?.name ?? user.branch_name;
     if (!name) return null;
     return (
-      <span className="badge neutral" title="Your account is scoped to this branch">
-        ⌂ {name}
+      <span className="badge neutral" title="Your account works at this branch">
+        <Icon name="branch" size={13} /> {name}
       </span>
     );
   }
+  // A select rather than a row of pills: it fits a phone's top bar however many
+  // branches there are, and it is one keyboard stop instead of one per branch.
   return (
-    <div className="pill-row">
-      <button className={`pill ${activeBranchId === null ? 'active' : ''}`} onClick={() => setActiveBranchId(null)}>
-        {t('allBranches')}
-      </button>
-      {branches.map((b) => (
-        <button key={b.branch_id}
-          className={`pill ${activeBranchId === b.branch_id ? 'active' : ''}`}
-          onClick={() => setActiveBranchId(b.branch_id)}>
-          {b.name}
-        </button>
-      ))}
+    <select className="branch-select" aria-label="Branch" value={activeBranchId ?? ''}
+      onChange={(e) => setActiveBranchId(e.target.value || null)}>
+      {isOwner && <option value="">{t('allBranches')}</option>}
+      {branches.map((b) => <option key={b.branch_id} value={b.branch_id}>{b.name}</option>)}
+    </select>
+  );
+}
+
+/**
+ * Wraps anything that records a physical transaction (a bill, a goods receipt, a
+ * payment). "All branches" is a way of LOOKING at the chain, not a place a sale
+ * happens, so an owner on "All branches" is asked to pick one first — in plain
+ * words, before anything is typed, rather than with an error after submitting.
+ */
+export function BranchGate({ children, what = 'this transaction' }: { children: React.ReactNode; what?: string }) {
+  const { needsBranchForTransaction, branches, setActiveBranchId } = useAuth();
+  if (!needsBranchForTransaction) return <>{children}</>;
+  return (
+    <div className="branch-gate stack" role="group" aria-label="Select a branch">
+      <div>
+        <b>Please select a branch for {what}.</b>
+        <div className="muted small">You are viewing all branches. A sale, receipt or purchase always happens at one branch.</div>
+      </div>
+      <select aria-label="Branch for this transaction" defaultValue=""
+        onChange={(e) => e.target.value && setActiveBranchId(e.target.value)} style={{ maxWidth: 320 }}>
+        <option value="" disabled>Choose a branch…</option>
+        {branches.map((b) => <option key={b.branch_id} value={b.branch_id}>{b.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// ── Period picker (dashboard, reports) ──────────────────────────────────────
+export type PeriodValue = { period: string; from?: string; to?: string };
+export const PERIOD_OPTIONS = [
+  { value: 'today', label: 'Today' }, { value: 'yesterday', label: 'Yesterday' },
+  { value: 'this_week', label: 'This week' }, { value: 'this_month', label: 'This month' },
+  { value: 'last_month', label: 'Last month' }, { value: 'last_30_days', label: 'Last 30 days' },
+  { value: 'last_90_days', label: 'Last 90 days' }, { value: 'this_fy', label: 'This financial year' },
+  { value: 'custom', label: 'Custom range…' },
+];
+/** The query string for a period, for any report endpoint. */
+export function periodQuery(p: PeriodValue): string {
+  if (p.period === 'custom' && p.from && p.to) return `from=${p.from}&to=${p.to}`;
+  return `period=${p.period === 'custom' ? 'last_30_days' : p.period}`;
+}
+export function PeriodPicker({ value, onChange }: { value: PeriodValue; onChange: (v: PeriodValue) => void }) {
+  return (
+    <div className="period-picker">
+      <select aria-label="Period" value={value.period} style={{ width: 'auto' }}
+        onChange={(e) => onChange({ ...value, period: e.target.value })}>
+        {PERIOD_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+      {value.period === 'custom' && (
+        <>
+          <input type="date" aria-label="From" value={value.from ?? ''} max={value.to}
+            onChange={(e) => onChange({ ...value, from: e.target.value })} />
+          <span className="muted small">to</span>
+          <input type="date" aria-label="To" value={value.to ?? ''} min={value.from}
+            onChange={(e) => onChange({ ...value, to: e.target.value })} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** "Showing N · Load more" for lists fetched a page at a time. */
+export function Pager({ shown, pageSize, onMore, busy }: {
+  shown: number; pageSize: number; onMore: () => void; busy?: boolean;
+}) {
+  const maybeMore = shown > 0 && shown % pageSize === 0;
+  return (
+    <div className="pager">
+      <span>{shown} shown</span>
+      {maybeMore && <Button size="sm" onClick={onMore} busy={busy}>Load more</Button>}
     </div>
   );
 }

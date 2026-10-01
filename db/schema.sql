@@ -39,13 +39,20 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;     -- [FIX] was missing: idx_products_n
 
 CREATE TABLE branches (
     branch_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Short, unique code that goes into every document number the branch issues
+    -- (INV-AND/2026-27/00001). Document numbers are unique chain-wide, so two
+    -- branches must never draw from series that print the same text.
+    code            TEXT NOT NULL UNIQUE,
     name            TEXT NOT NULL,
     address         TEXT,
-    state_code      TEXT NOT NULL,              -- for interstate/intrastate GST logic (15)
+    state           TEXT,                        -- e.g. 'Maharashtra', printed on documents
+    state_code      TEXT NOT NULL,              -- 2-digit GST state code ('27'); drives intra/interstate GST (15)
     gstin           TEXT,                        -- if branches share one GSTIN, this repeats; confirm with CA (15)
     phone           TEXT,
+    email           TEXT,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_branch_code CHECK (code ~ '^[A-Z0-9]{2,6}$')
 );
 
 CREATE TYPE user_role AS ENUM (
@@ -74,6 +81,20 @@ CREATE TABLE users (
     CONSTRAINT chk_users_language CHECK (language_pref IN ('en','hi')),
     -- A branch user MUST have a branch; only OWNER_ADMIN may be chain-wide (Section 0).
     CONSTRAINT chk_users_branch_scope CHECK (role = 'OWNER_ADMIN' OR branch_id IS NOT NULL)
+);
+
+-- Section 0 — a branch employee may be authorised for more than one branch (a
+-- relief manager, an accountant covering two shops). users.branch_id stays the
+-- HOME branch; rows here grant the additional ones. A request always runs against
+-- exactly ONE active branch, chosen per request and verified against this list by
+-- the API before the RLS GUC is set — so every branch policy below is unchanged
+-- and a user still never sees two branches' rows in the same transaction.
+CREATE TABLE user_branch_access (
+    user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    granted_by      UUID REFERENCES users(user_id),
+    granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, branch_id)
 );
 
 -- [FIX] Sessions live in the database, not an in-memory Map. The server stores only a
@@ -230,46 +251,130 @@ CREATE UNIQUE INDEX ux_admin_settings_key_branch
 CREATE TABLE categories (
     category_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     parent_category_id UUID REFERENCES categories(category_id),
-    name            TEXT NOT NULL
+    name            TEXT NOT NULL,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Case-insensitive, so "Plumbing" and "plumbing " cannot both exist under one parent.
+CREATE UNIQUE INDEX ux_categories_name ON categories (
+    COALESCE(parent_category_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(btrim(name)));
 
 CREATE TABLE brands (
     brand_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            TEXT NOT NULL UNIQUE
+    name            TEXT NOT NULL,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_brands_name ON brands (lower(btrim(name)));
+
+-- 2.2.1 — the units master. Units are DATA, not an enum, so a shop can add
+-- "BAG", "COIL" or "250G" without a code change.
+--
+-- `dimension` + `to_dimension_base` is what makes conversions explicit rather
+-- than special-cased: every MASS unit states how many grams it is (G = 1,
+-- 100G = 100, KG = 1000), every LENGTH unit how many millimetres, every VOLUME
+-- unit how many millilitres, every COUNT unit how many pieces. Two units of the
+-- same dimension therefore convert by simple division — 100G against a KG base
+-- is 100 / 1000 = 0.1 — and nothing about "100 G" is hard-coded anywhere.
+--
+-- PACK units (BOX, PACK, REEL, SET, TIN, ...) have no fixed size: a box of screws
+-- holds 100, a box of bolts 50. Their size is PRODUCT-specific and is stated on
+-- product_units.multiplier_to_base instead.
+CREATE TABLE units (
+    unit_code           TEXT PRIMARY KEY,               -- 'KG', 'G', '100G', 'BOX'
+    name                TEXT NOT NULL,                  -- 'Kilogram'
+    print_label         TEXT NOT NULL,                  -- what an invoice prints: 'KG', 'G', '100 G'
+    dimension           TEXT NOT NULL,
+    to_dimension_base   NUMERIC(18,6),                  -- grams / mm / ml / pieces per ONE of this unit
+    allows_fraction     BOOLEAN NOT NULL DEFAULT FALSE, -- 1.5 m of pipe yes; 1.5 boxes no
+    is_system           BOOLEAN NOT NULL DEFAULT FALSE, -- shipped units cannot be deleted or re-dimensioned
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_unit_code CHECK (unit_code ~ '^[A-Z0-9_]{1,20}$'),
+    CONSTRAINT chk_unit_dimension CHECK (dimension IN ('COUNT','MASS','LENGTH','VOLUME','AREA','PACK')),
+    -- A measured unit must say how big it is; a pack unit must not (its size is per product).
+    CONSTRAINT chk_unit_factor CHECK (
+        (dimension = 'PACK' AND to_dimension_base IS NULL)
+        OR (dimension <> 'PACK' AND to_dimension_base > 0))
 );
 
-CREATE TYPE base_unit_type AS ENUM ('PIECE', 'METRE', 'KG', 'LITRE');  -- 2.2.1
+-- The shipped units. Reference data the application cannot run without, so it
+-- lives with the schema rather than in the demo seed; a shop adds its own on top.
+INSERT INTO units (unit_code, name, print_label, dimension, to_dimension_base, allows_fraction, is_system) VALUES
+ ('PIECE',  'Piece',            'PCS',    'COUNT',  1,       FALSE, TRUE),
+ ('PCS',    'Pieces',           'PCS',    'COUNT',  1,       FALSE, TRUE),
+ ('PAIR',   'Pair',             'PAIR',   'COUNT',  2,       FALSE, TRUE),
+ ('DOZEN',  'Dozen',            'DOZ',    'COUNT',  12,      FALSE, TRUE),
+ ('G',      'Gram',             'G',      'MASS',   1,       TRUE,  TRUE),
+ ('100G',   '100 grams',        '100 G',  'MASS',   100,     TRUE,  TRUE),
+ ('250G',   '250 grams',        '250 G',  'MASS',   250,     TRUE,  TRUE),
+ ('500G',   '500 grams',        '500 G',  'MASS',   500,     TRUE,  TRUE),
+ ('KG',     'Kilogram',         'KG',     'MASS',   1000,    TRUE,  TRUE),
+ ('MM',     'Millimetre',       'MM',     'LENGTH', 1,       TRUE,  TRUE),
+ ('CM',     'Centimetre',       'CM',     'LENGTH', 10,      TRUE,  TRUE),
+ ('INCH',   'Inch',             'IN',     'LENGTH', 25.4,    TRUE,  TRUE),
+ ('FT',     'Foot',             'FT',     'LENGTH', 304.8,   TRUE,  TRUE),
+ ('METRE',  'Metre',            'M',      'LENGTH', 1000,    TRUE,  TRUE),
+ ('ML',     'Millilitre',       'ML',     'VOLUME', 1,       TRUE,  TRUE),
+ ('LITRE',  'Litre',            'L',      'VOLUME', 1000,    TRUE,  TRUE),
+ ('SQFT',   'Square foot',      'SQ FT',  'AREA',   1,       TRUE,  TRUE),
+ ('SQM',    'Square metre',     'SQ M',   'AREA',   10.7639, TRUE,  TRUE),
+ ('BOX',    'Box',              'BOX',    'PACK',   NULL,    FALSE, TRUE),
+ ('PACK',   'Pack',             'PACK',   'PACK',   NULL,    FALSE, TRUE),
+ ('SET',    'Set',              'SET',    'PACK',   NULL,    FALSE, TRUE),
+ ('CARTON', 'Carton',           'CTN',    'PACK',   NULL,    FALSE, TRUE),
+ ('BAG',    'Bag',              'BAG',    'PACK',   NULL,    FALSE, TRUE),
+ ('ROLL',   'Roll',             'ROLL',   'PACK',   NULL,    FALSE, TRUE),
+ ('REEL',   'Reel / coil',      'REEL',   'PACK',   NULL,    FALSE, TRUE),
+ ('BUNDLE', 'Bundle',           'BDL',    'PACK',   NULL,    FALSE, TRUE),
+ ('TIN',    'Tin / can',        'TIN',    'PACK',   NULL,    FALSE, TRUE),
+ ('BUCKET', 'Bucket',           'BKT',    'PACK',   NULL,    FALSE, TRUE),
+ ('LENGTH', 'Length (pipe/rod)','LENGTH', 'PACK',   NULL,    FALSE, TRUE);
+
 CREATE TYPE price_type AS ENUM ('TAX_INCLUSIVE', 'TAX_EXCLUSIVE');     -- 2.8
 
+-- Money columns are NUMERIC(14,2). The per-BASE-unit rates below are (14,4):
+-- a product stocked by the gram and sold by 100 g costs ₹0.125 a gram, which two
+-- decimals cannot hold without mispricing every line built from it.
 CREATE TABLE products (
     product_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     sku                 TEXT NOT NULL UNIQUE,
     name                TEXT NOT NULL,
+    description         TEXT,
     category_id         UUID REFERENCES categories(category_id),
     brand_id            UUID REFERENCES brands(brand_id),
-    base_unit           base_unit_type NOT NULL,          -- 2.2.1: MANDATORY, all pricing/tax math evaluates against this
+    base_unit           TEXT NOT NULL REFERENCES units(unit_code),  -- 2.2.1: stock, cost and price are all per base unit
     hsn_code            TEXT NOT NULL,
     default_price_type  price_type NOT NULL DEFAULT 'TAX_INCLUSIVE',  -- 2.8
-    reference_purchase_price NUMERIC(14,2),               -- admin-entered ESTIMATE only, not the real cost (2.6 DATA-FIX)
+    reference_purchase_price NUMERIC(14,4),               -- admin-entered ESTIMATE only, not the real cost (2.6 DATA-FIX)
+    -- Default reorder level in base units. A branch may set its own on
+    -- branch_stock.reorder_min; this is what applies where it has not.
+    reorder_level       NUMERIC(14,4),
     image_url           TEXT,
     spec                JSONB,                             -- voltage/wattage, pipe schedule, paint sheen, etc. (2.1)
     batch_tracked        BOOLEAN NOT NULL DEFAULT FALSE,    -- 4.2 — on for paint/adhesive/chemical/battery categories
     serial_tracked        BOOLEAN NOT NULL DEFAULT FALSE,    -- 12.2 — on for serialized electronics/power tools
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_products_reorder CHECK (reorder_level IS NULL OR reorder_level >= 0)
 );
 
--- 2.2: higher sale units expressed strictly as a multiple of base_unit. Never an independent price.
+-- 2.2: every sale unit is a stated multiple of the base unit. Never an independent price:
+-- 5 × 100G against a KG base is 5 × 0.1 = 0.5 KG of stock and 0.5 × the KG rate.
 CREATE TABLE product_units (
     product_unit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id      UUID NOT NULL REFERENCES products(product_id),
-    unit_label      TEXT NOT NULL,                 -- 'BOX', 'REEL', 'PIECE', 'TIN_1L', ...
-    multiplier_to_base NUMERIC(14,4) NOT NULL,      -- e.g. 100 (1 box = 100 pieces), 90 (1 reel = 90 metres)
+    unit_label      TEXT NOT NULL REFERENCES units(unit_code),   -- 'BOX', 'REEL', '100G', 'PIECE'
+    multiplier_to_base NUMERIC(14,6) NOT NULL,      -- base units in ONE of this unit: BOX of screws 100, 100G on KG 0.1
     is_default_sale_unit BOOLEAN NOT NULL DEFAULT FALSE,
-    UNIQUE (product_id, unit_label)
+    UNIQUE (product_id, unit_label),
+    CONSTRAINT chk_product_unit_multiplier CHECK (multiplier_to_base > 0)
 );
+-- At most one default sale unit per product, or "the unit the counter opens on" is ambiguous.
+CREATE UNIQUE INDEX ux_product_units_default ON product_units(product_id) WHERE is_default_sale_unit;
 
-CREATE TABLE product_barcodes (      -- optional, multiple per product (2.1)
+CREATE TABLE product_barcodes (      -- optional, multiple per product (2.1); a code identifies exactly one product
     barcode_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id      UUID NOT NULL REFERENCES products(product_id),
     product_unit_id UUID REFERENCES product_units(product_unit_id),
@@ -306,8 +411,9 @@ CREATE TABLE product_prices (
     price_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id      UUID NOT NULL REFERENCES products(product_id),
     branch_id       UUID REFERENCES branches(branch_id),   -- NULL unless "allow branch price override" is on
-    mrp             NUMERIC(14,2) NOT NULL,
-    selling_price   NUMERIC(14,2) NOT NULL,
+    mrp             NUMERIC(14,4) NOT NULL,                -- per BASE unit, like every rate
+    selling_price   NUMERIC(14,4) NOT NULL,
+    CONSTRAINT chk_product_prices_values CHECK (selling_price >= 0 AND mrp >= selling_price),
     effective_from  TIMESTAMPTZ NOT NULL DEFAULT now(),
     effective_to    TIMESTAMPTZ,                            -- NULL = open-ended (unbounded upper range)
     created_by      UUID REFERENCES users(user_id),
@@ -427,7 +533,8 @@ CREATE TABLE stock_serials (         -- 4.9 / 12.2, only for serial_tracked prod
 -- Immutable movement log — the single source of truth for how branch_stock got to its current number (4.1).
 CREATE TYPE stock_movement_type AS ENUM (
     'PURCHASE', 'SALE', 'SALE_RETURN', 'TRANSFER_OUT', 'TRANSFER_IN',
-    'PURCHASE_RETURN', 'WRITE_OFF', 'COUNT_ADJUSTMENT', 'RESERVATION', 'RESERVATION_RELEASE'
+    'PURCHASE_RETURN', 'WRITE_OFF', 'COUNT_ADJUSTMENT', 'RESERVATION', 'RESERVATION_RELEASE',
+    'OPENING_STOCK', 'ADJUSTMENT'
 );
 
 CREATE TABLE stock_ledger (
@@ -446,19 +553,34 @@ CREATE TABLE stock_ledger (
 
 CREATE TABLE vendors (                -- 8
     vendor_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            TEXT NOT NULL,
+    name            TEXT NOT NULL,                 -- trading name as it appears on their invoices
+    contact_person  TEXT,
     gstin           TEXT,
     phone           TEXT,
+    email           TEXT,
     address         TEXT,
+    state           TEXT,
+    state_code      TEXT,                          -- 2-digit GST code; decides CGST+SGST vs IGST on purchases
     payment_terms_days SMALLINT,
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE
+    -- Where the shop pays them. Informational: payments are recorded, not made, here.
+    bank_name       TEXT,
+    bank_account_no TEXT,
+    bank_ifsc       TEXT,
+    upi_id          TEXT,
+    notes           TEXT,
+    -- The payable brought forward when the vendor was set up. It is POSTED to
+    -- vendor_ledger as an OPENING_BALANCE entry, so the ledger stays the single
+    -- source of truth for what is owed; this column only records what was entered.
+    opening_balance NUMERIC(14,2) NOT NULL DEFAULT 0,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE vendor_product_map (     -- 4.9 vendor-item mapping, multiple vendors per item
     vendor_id       UUID NOT NULL REFERENCES vendors(vendor_id),
     product_id      UUID NOT NULL REFERENCES products(product_id),
     vendor_sku      TEXT,
-    last_purchase_rate NUMERIC(14,2),
+    last_purchase_rate NUMERIC(14,4),              -- per base unit, ex-GST, net of discount
     is_preferred    BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (vendor_id, product_id)
 );
@@ -471,6 +593,8 @@ CREATE TABLE purchase_orders (        -- 4.5
     vendor_id       UUID NOT NULL REFERENCES vendors(vendor_id),
     po_number       TEXT NOT NULL UNIQUE,
     status          po_status NOT NULL DEFAULT 'DRAFT',
+    expected_date   DATE,
+    notes           TEXT,
     created_by      UUID REFERENCES users(user_id),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -479,31 +603,59 @@ CREATE TABLE purchase_order_lines (
     po_line_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     po_id           UUID NOT NULL REFERENCES purchase_orders(po_id),
     product_id      UUID NOT NULL REFERENCES products(product_id),
-    qty_base_unit   NUMERIC(14,4) NOT NULL,
-    rate            NUMERIC(14,2) NOT NULL
+    qty_base_unit   NUMERIC(14,4) NOT NULL CHECK (qty_base_unit > 0),
+    rate            NUMERIC(14,4) NOT NULL CHECK (rate >= 0)   -- per base unit, ex-GST
 );
 
+-- A goods receipt is also the purchase entry: it carries the supplier's own bill
+-- number and date, and its totals (with GST) are what goes to the payables ledger.
 CREATE TABLE grn (                    -- Goods Receipt Note (4.5)
     grn_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     po_id           UUID REFERENCES purchase_orders(po_id),   -- nullable: GRN can happen without a PO
     branch_id       UUID NOT NULL REFERENCES branches(branch_id),
     vendor_id       UUID NOT NULL REFERENCES vendors(vendor_id),
     grn_number      TEXT NOT NULL UNIQUE,
+    vendor_invoice_no   TEXT,                      -- the supplier's bill number (what ITC is claimed against)
+    vendor_invoice_date DATE,
+    notes           TEXT,
+    interstate      BOOLEAN NOT NULL DEFAULT FALSE,
+    gross_total     NUMERIC(14,2) NOT NULL DEFAULT 0,   -- before discount
+    discount_total  NUMERIC(14,2) NOT NULL DEFAULT 0,
+    taxable_total   NUMERIC(14,2) NOT NULL DEFAULT 0,
+    cgst_total      NUMERIC(14,2) NOT NULL DEFAULT 0,
+    sgst_total      NUMERIC(14,2) NOT NULL DEFAULT 0,
+    igst_total      NUMERIC(14,2) NOT NULL DEFAULT 0,
+    round_off       NUMERIC(14,2) NOT NULL DEFAULT 0,
+    grand_total     NUMERIC(14,2) NOT NULL DEFAULT 0,   -- what is owed to the vendor for this receipt
+    client_txn_id   UUID UNIQUE,                        -- a double-clicked "Save" cannot receive the goods twice
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by      UUID REFERENCES users(user_id)
 );
+-- One supplier bill is received once per branch; a second entry of the same bill is a duplicate purchase.
+CREATE UNIQUE INDEX ux_grn_vendor_invoice ON grn (branch_id, vendor_id, lower(vendor_invoice_no))
+    WHERE vendor_invoice_no IS NOT NULL;
 
 CREATE TABLE grn_lines (
     grn_line_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     grn_id          UUID NOT NULL REFERENCES grn(grn_id),
+    po_line_id      UUID REFERENCES purchase_order_lines(po_line_id),   -- partial receipts add up against this
     product_id      UUID NOT NULL REFERENCES products(product_id),
-    qty_base_unit   NUMERIC(14,4) NOT NULL,
-    rate            NUMERIC(14,2) NOT NULL,        -- this GRN rate feeds the weighted-average formula (4.8.1)
+    product_unit_id UUID REFERENCES product_units(product_unit_id),     -- the unit it was bought in (BOX, BAG)
+    qty_in_unit     NUMERIC(14,4),                   -- quantity in that unit, as on the supplier's bill
+    qty_base_unit   NUMERIC(14,4) NOT NULL CHECK (qty_base_unit > 0),
+    rate            NUMERIC(14,4) NOT NULL CHECK (rate >= 0),   -- price per BASE unit, ex-GST, before discount
+    discount_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+    gst_rate_pct    NUMERIC(5,2) NOT NULL DEFAULT 0,
+    taxable_value   NUMERIC(14,2) NOT NULL DEFAULT 0,
+    cgst_amount     NUMERIC(14,2) NOT NULL DEFAULT 0,
+    sgst_amount     NUMERIC(14,2) NOT NULL DEFAULT 0,
+    igst_amount     NUMERIC(14,2) NOT NULL DEFAULT 0,
+    line_total      NUMERIC(14,2) GENERATED ALWAYS AS (taxable_value + cgst_amount + sgst_amount + igst_amount) STORED,
     batch_id        UUID REFERENCES stock_batches(batch_id)
 );
--- Application-layer trigger/service on INSERT into grn_lines:
---   branch_stock.weighted_avg_cost := ((old_qty * old_cost) + (grn_qty * grn_rate)) / (old_qty + grn_qty)
---   branch_stock.base_unit_qty += grn_qty ; INSERT stock_ledger row (movement_type='PURCHASE')
+-- The landed cost that feeds the weighted average (4.8.1) is taxable_value / qty_base_unit:
+-- net of the supplier's discount, excluding GST (which is claimed back as ITC).
+CREATE INDEX idx_grn_lines_po_line ON grn_lines(po_line_id) WHERE po_line_id IS NOT NULL;
 
 -- Purchase return / Vendor Debit Note workflow (4.5.1 DATA-FIX) — separate numbered series from sales credit notes.
 CREATE TABLE vendor_debit_notes (
@@ -513,7 +665,9 @@ CREATE TABLE vendor_debit_notes (
     vendor_id       UUID NOT NULL REFERENCES vendors(vendor_id),
     branch_id       UUID NOT NULL REFERENCES branches(branch_id),
     reason          TEXT NOT NULL,
-    total_amount    NUMERIC(14,2) NOT NULL,
+    taxable_total   NUMERIC(14,2) NOT NULL DEFAULT 0,
+    tax_total       NUMERIC(14,2) NOT NULL DEFAULT 0,
+    total_amount    NUMERIC(14,2) NOT NULL,         -- taxable + tax: what comes off the payable
     created_by      UUID REFERENCES users(user_id),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -522,11 +676,13 @@ CREATE TABLE vendor_debit_note_lines (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     debit_note_id   UUID NOT NULL REFERENCES vendor_debit_notes(debit_note_id),
     grn_line_id     UUID NOT NULL REFERENCES grn_lines(grn_line_id),
-    qty_base_unit   NUMERIC(14,4) NOT NULL,
-    rate            NUMERIC(14,2) NOT NULL
+    qty_base_unit   NUMERIC(14,4) NOT NULL CHECK (qty_base_unit > 0),
+    rate            NUMERIC(14,4) NOT NULL,
+    taxable_value   NUMERIC(14,2) NOT NULL DEFAULT 0,
+    tax_amount      NUMERIC(14,2) NOT NULL DEFAULT 0
 );
 
-CREATE TYPE vendor_ledger_entry_type AS ENUM ('GRN_PAYABLE', 'PAYMENT_MADE', 'DEBIT_NOTE');
+CREATE TYPE vendor_ledger_entry_type AS ENUM ('GRN_PAYABLE', 'PAYMENT_MADE', 'DEBIT_NOTE', 'OPENING_BALANCE', 'ADJUSTMENT');
 
 CREATE TABLE vendor_ledger (          -- 8, outstanding-payable ledger, mirror of customer credit ledger
     entry_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -540,20 +696,49 @@ CREATE TABLE vendor_ledger (          -- 8, outstanding-payable ledger, mirror o
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Money paid to a vendor, with how and against what. The ledger entry is the
+-- balance; this row is the voucher behind it (method, bank reference, the bill it
+-- settles), which is what an accountant reconciles a bank statement against.
+CREATE TABLE vendor_payments (
+    payment_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    payment_number  TEXT NOT NULL UNIQUE,
+    vendor_id       UUID NOT NULL REFERENCES vendors(vendor_id),
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    grn_id          UUID REFERENCES grn(grn_id),              -- optional: the bill this settles
+    amount          NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+    method          TEXT NOT NULL,
+    reference       TEXT,                                     -- UTR / cheque no / UPI ref
+    notes           TEXT,
+    paid_on         DATE NOT NULL DEFAULT CURRENT_DATE,
+    client_txn_id   UUID UNIQUE,                              -- a double-submit records one payment, not two
+    created_by      UUID REFERENCES users(user_id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_vendor_payment_method CHECK (method IN ('CASH','UPI','CARD','BANK_TRANSFER','CHEQUE'))
+);
+CREATE INDEX idx_vendor_payments_vendor ON vendor_payments(vendor_id, created_at DESC);
+
 -- Inter-branch transfer with explicit TRANSFER_DISCREPANCY state (4.4.1 ENG-FIX)
-CREATE TYPE transfer_status AS ENUM ('REQUESTED', 'DISPATCHED', 'RECEIVED', 'TRANSFER_DISCREPANCY', 'CLOSED');
+CREATE TYPE transfer_status AS ENUM ('REQUESTED', 'DISPATCHED', 'RECEIVED', 'TRANSFER_DISCREPANCY', 'CLOSED', 'CANCELLED');
 
 CREATE TABLE stock_transfers (
     transfer_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transfer_number TEXT UNIQUE,                    -- drawn from the SENDING branch's TRANSFER series
     from_branch_id  UUID NOT NULL REFERENCES branches(branch_id),
     to_branch_id    UUID NOT NULL REFERENCES branches(branch_id),
     status          transfer_status NOT NULL DEFAULT 'REQUESTED',
     transfer_doc_type TEXT NOT NULL DEFAULT 'INTRASTATE',  -- 'INTRASTATE' | 'INTERSTATE' — CA to confirm treatment (15)
     driver_ref      TEXT,
+    notes           TEXT,
     requested_by    UUID REFERENCES users(user_id),
+    dispatched_by   UUID REFERENCES users(user_id),
+    received_by     UUID REFERENCES users(user_id),
+    cancelled_by    UUID REFERENCES users(user_id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     dispatched_at   TIMESTAMPTZ,
     received_at     TIMESTAMPTZ,
-    closed_at       TIMESTAMPTZ
+    closed_at       TIMESTAMPTZ,
+    cancelled_at    TIMESTAMPTZ,
+    CONSTRAINT chk_transfer_branches CHECK (from_branch_id <> to_branch_id)
 );
 
 CREATE TABLE stock_transfer_lines (
@@ -603,6 +788,25 @@ CREATE TABLE stock_writeoffs (        -- 4.7
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 4.1 — every manual change to stock is a document with a reason, never a silent
+-- UPDATE of branch_stock: opening stock for a new product, stock found on a shelf,
+-- a counting correction, goods used by the shop itself.
+CREATE TABLE stock_adjustments (
+    adjustment_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    adjustment_number TEXT NOT NULL UNIQUE,
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    product_id      UUID NOT NULL REFERENCES products(product_id),
+    qty_change      NUMERIC(14,4) NOT NULL CHECK (qty_change <> 0),  -- signed, base units
+    unit_cost       NUMERIC(14,4),                   -- required for stock coming IN, so it is valued
+    reason_code     TEXT NOT NULL,
+    notes           TEXT,
+    created_by      UUID REFERENCES users(user_id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_stock_adjustment_reason CHECK (reason_code IN
+        ('OPENING_STOCK','FOUND','COUNT_CORRECTION','DAMAGED','LOST','EXPIRED','INTERNAL_USE','OTHER'))
+);
+CREATE INDEX idx_stock_adjustments_branch ON stock_adjustments(branch_id, created_at DESC);
+
 -- ============================================================================
 -- SECTION 6 — CUSTOMERS & CREDIT LEDGER (chain-wide identity, Section 0)
 -- ============================================================================
@@ -622,12 +826,20 @@ CREATE TABLE customers (
     company_name    TEXT,
     address         TEXT,
     state           TEXT,
-    state_code      TEXT,
+    state_code      TEXT,                            -- 2-digit GST code; becomes the place of supply on their bills
+    whatsapp        TEXT,                            -- when it differs from the calling number
+    notes           TEXT,
     customer_type   customer_type NOT NULL DEFAULT 'RETAIL',
     credit_allowed  BOOLEAN NOT NULL DEFAULT FALSE,
-    credit_limit    NUMERIC(14,2) NOT NULL DEFAULT 0,
+    credit_limit    NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (credit_limit >= 0),
+    -- The balance brought forward when the customer was set up. It is POSTED to the
+    -- credit ledger as an OPENING_BALANCE entry — the ledger is the only balance;
+    -- this column only records what was entered and when.
+    opening_balance NUMERIC(14,2) NOT NULL DEFAULT 0,
     loyalty_points_balance INTEGER NOT NULL DEFAULT 0,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE customer_merge_log (     -- Section 0 manual merge tool
@@ -638,7 +850,8 @@ CREATE TABLE customer_merge_log (     -- Section 0 manual merge tool
     merged_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TYPE credit_ledger_entry_type AS ENUM ('SALE_ON_CREDIT', 'PAYMENT_RECEIVED', 'REFUND_ADJUSTMENT');
+CREATE TYPE credit_ledger_entry_type AS ENUM (
+    'SALE_ON_CREDIT', 'PAYMENT_RECEIVED', 'REFUND_ADJUSTMENT', 'OPENING_BALANCE', 'ADJUSTMENT');
 
 CREATE TABLE customer_credit_ledger (  -- 6.1, 6.3
     entry_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -673,19 +886,29 @@ CREATE TABLE quotations (
     customer_id     UUID NOT NULL REFERENCES customers(customer_id),
     status          quotation_status NOT NULL DEFAULT 'DRAFT',
     price_type      price_type NOT NULL DEFAULT 'TAX_EXCLUSIVE',   -- 2.8: quotations default exclusive
+    with_gst        BOOLEAN NOT NULL DEFAULT TRUE,                  -- an estimate may be quoted without GST
+    place_of_supply_state_code TEXT,
+    valid_until     DATE,                                           -- the validity printed on the estimate
+    notes           TEXT,
+    terms           TEXT,
     stock_reserved  BOOLEAN NOT NULL DEFAULT FALSE,                 -- 5.1: only true if setting is ON and approved
     reservation_hold_until TIMESTAMPTZ,
-    converted_invoice_id UUID,                       -- set once converted to a real invoice
+    converted_invoice_id UUID,                       -- set once the bill made from it is FINALISED
     created_by      UUID REFERENCES users(user_id),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE quotation_lines (
     line_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     quotation_id    UUID NOT NULL REFERENCES quotations(quotation_id),
     product_id      UUID NOT NULL REFERENCES products(product_id),
-    qty_base_unit   NUMERIC(14,4) NOT NULL,
-    rate            NUMERIC(14,2) NOT NULL
+    product_unit_id UUID REFERENCES product_units(product_unit_id),  -- the unit quoted in (BOX, 100G, ...)
+    qty_in_sale_unit NUMERIC(14,4),                   -- as quoted; NULL on rows from before units were quoted
+    qty_base_unit   NUMERIC(14,4) NOT NULL CHECK (qty_base_unit > 0),
+    rate            NUMERIC(14,4) NOT NULL CHECK (rate >= 0),   -- per BASE unit
+    discount_amount NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),
+    sort_order      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE delivery_challans (      -- Section 5, delivery ahead of final billing
@@ -726,8 +949,11 @@ CREATE TABLE till_sessions (          -- 3.3.1: counter + cashier + shift scope
 -- SUM(all events)" query would double-count it if anyone ever logged an OPENING_FLOAT event. Fixed by making
 -- till_sessions.opening_float the single source of truth for the float; till_events only ever records what
 -- happens AFTER the shift starts.
+-- CASH_RECEIPT: a customer settling their account in cash at the counter. It is
+-- money INTO the drawer that is not a sale, and leaving it out made every shift
+-- that collected dues read "over" at close.
 CREATE TYPE till_event_type AS ENUM (
-    'CASH_SALE', 'CASH_DROP', 'PETTY_EXPENSE_PAYOUT', 'CLOSING_COUNT'
+    'CASH_SALE', 'CASH_DROP', 'PETTY_EXPENSE_PAYOUT', 'CLOSING_COUNT', 'CASH_RECEIPT'
 );  -- 3.3.1 DATA-FIX
 
 CREATE TABLE till_events (
@@ -742,10 +968,13 @@ CREATE TABLE till_events (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- Expected Drawer Cash = till_sessions.opening_float
---                        + SUM(till_events.amount WHERE event_type = 'CASH_SALE')
+--                        + SUM(till_events.amount WHERE event_type = 'CASH_SALE')     (refunds post negative)
+--                        + SUM(till_events.amount WHERE event_type = 'CASH_RECEIPT')
 --                        - SUM(till_events.amount WHERE event_type = 'CASH_DROP')
 --                        - SUM(till_events.amount WHERE event_type = 'PETTY_EXPENSE_PAYOUT')
 -- (3.3.1) — opening_float appears exactly once, from the session row, never from till_events.
+-- One OPEN session per counter per branch, enforced here rather than by a racy read.
+CREATE UNIQUE INDEX ux_till_sessions_open_counter ON till_sessions(branch_id, counter_id) WHERE status = 'OPEN';
 
 -- [FIX] Gapless, per-branch, per-series document numbering (3.6) implemented as data, not as a
 -- Postgres sequence. A real sequence is explicitly WRONG here: sequences are non-transactional, so a
@@ -793,9 +1022,20 @@ CREATE TABLE invoices (
     is_offline_conflict BOOLEAN NOT NULL DEFAULT FALSE,  -- STOCK_CONFLICT flag (3.5.1 ENG-FIX)
     conflict_resolved_by UUID REFERENCES users(user_id),
     created_by      UUID REFERENCES users(user_id),
-    -- Free text the cashier can put on the bill (delivery instruction, site name,
-    -- vehicle number). Editable while DRAFT, frozen once FINAL like everything else.
+    -- Free text the cashier can put on the bill (delivery instruction, site name).
+    -- Editable while DRAFT, frozen once FINAL like everything else.
     notes           TEXT,
+    -- The document fields a GST tax invoice carries alongside the items (Section 19).
+    -- All optional; all frozen at finalisation with the rest of the bill.
+    due_date        DATE,
+    order_no        TEXT,                               -- buyer's order / PO reference
+    challan_no      TEXT,
+    challan_date    DATE,
+    vehicle_no      TEXT,
+    place_of_delivery TEXT,
+    -- The estimate this bill was made from. The estimate is marked converted only
+    -- when THIS invoice is finalised, so a discarded draft leaves it convertible.
+    source_quotation_id UUID REFERENCES quotations(quotation_id),
     -- A draft is edited repeatedly before it becomes a commercial document, so it
     -- needs a "last touched" that is separate from when it was first opened.
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -806,12 +1046,15 @@ CREATE TABLE invoices (
 CREATE TABLE invoice_lines (
     line_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_id      UUID NOT NULL REFERENCES invoices(invoice_id),
+    -- The order the lines were rung up in. line_id is a random UUID, so ordering
+    -- by it shuffled the items on every printed bill.
+    line_no         SMALLINT NOT NULL DEFAULT 0,
     product_id      UUID NOT NULL REFERENCES products(product_id),
     product_unit_id UUID REFERENCES product_units(product_unit_id),  -- which sale unit the cashier picked (2.2.1)
-    qty_in_sale_unit NUMERIC(14,4) NOT NULL,
-    base_unit_qty   NUMERIC(14,4) NOT NULL,           -- converted qty, what stock_ledger/tax actually use (2.2.1)
+    qty_in_sale_unit NUMERIC(14,4) NOT NULL CHECK (qty_in_sale_unit > 0),
+    base_unit_qty   NUMERIC(14,4) NOT NULL CHECK (base_unit_qty > 0),  -- converted qty, what stock_ledger/tax actually use (2.2.1)
     price_type      price_type NOT NULL,               -- inclusive/exclusive, locked at scan time (3.10)
-    rate_locked_at_scan NUMERIC(14,2) NOT NULL,        -- catalog price snapshot when added to cart (3.10 DATA-FIX)
+    rate_locked_at_scan NUMERIC(14,4) NOT NULL CHECK (rate_locked_at_scan >= 0),  -- per BASE unit, snapshot at scan (3.10)
     discount_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
     taxable_value   NUMERIC(14,2) NOT NULL,
     cgst_amount     NUMERIC(14,2) NOT NULL DEFAULT 0,   -- rounded half-up at LINE level (3.1.1)
@@ -833,15 +1076,36 @@ ALTER TABLE stock_serials ADD CONSTRAINT fk_serial_invoice_line
     FOREIGN KEY (invoice_line_id) REFERENCES invoice_lines(line_id);
 -- To find the serial(s) sold on a given line: SELECT * FROM stock_serials WHERE invoice_line_id = ?
 
-CREATE TYPE payment_method AS ENUM ('CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS');
+CREATE TYPE payment_method AS ENUM ('CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS', 'BANK_TRANSFER');
 
 CREATE TABLE invoice_payments (       -- 3.2 split payment
     payment_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_id      UUID NOT NULL REFERENCES invoices(invoice_id),
     method          payment_method NOT NULL,
-    amount          NUMERIC(14,2) NOT NULL,
-    ref_no          TEXT                                -- UPI txn id / card auth code
+    amount          NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+    ref_no          TEXT                                -- UPI txn id / card auth code / bank UTR
 );
+CREATE INDEX idx_invoice_payments_invoice ON invoice_payments(invoice_id);
+
+-- 6.3 — money a customer pays against their ACCOUNT (not at the moment of a
+-- sale). The credit-ledger entry is the balance; this is the receipt behind it:
+-- its own number, how it was paid, and — for cash — the drawer it went into.
+CREATE TABLE customer_payments (
+    payment_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    receipt_number  TEXT NOT NULL UNIQUE,
+    customer_id     UUID NOT NULL REFERENCES customers(customer_id),
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    amount          NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+    method          TEXT NOT NULL,
+    reference       TEXT,
+    notes           TEXT,
+    till_session_id UUID REFERENCES till_sessions(session_id),
+    client_txn_id   UUID UNIQUE,                     -- a double-tapped "Record payment" records it once
+    created_by      UUID REFERENCES users(user_id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_customer_payment_method CHECK (method IN ('CASH','UPI','CARD','BANK_TRANSFER','CHEQUE'))
+);
+CREATE INDEX idx_customer_payments_customer ON customer_payments(customer_id, created_at DESC);
 
 CREATE TABLE paint_tint_records (     -- 2.3
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1008,12 +1272,14 @@ CREATE TABLE whatsapp_message_log (   -- 1 req#4, 6.2, 11.1, 14 admin digest
     to_phone        TEXT NOT NULL,
     message_type    TEXT NOT NULL,                      -- 'INVOICE_PDF' | 'DUE_REMINDER' | 'BIRTHDAY' | 'ADMIN_DIGEST' | ...
     body            TEXT,
-    status          TEXT NOT NULL DEFAULT 'QUEUED',      -- 'QUEUED' | 'SENT' | 'FAILED' | 'FALLBACK_SMS'
+    -- NOT_CONFIGURED: no WhatsApp Business credentials, so nothing was sent. It is
+    -- never recorded as SENT — the system does not claim a delivery it did not make.
+    status          TEXT NOT NULL DEFAULT 'QUEUED',      -- 'QUEUED' | 'SENT' | 'FAILED' | 'FALLBACK_SMS' | 'NOT_CONFIGURED'
     attempts        SMALLINT NOT NULL DEFAULT 0,
     last_error      TEXT,
     queued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     sent_at         TIMESTAMPTZ,
-    CONSTRAINT chk_wa_status CHECK (status IN ('QUEUED','SENDING','SENT','FAILED','FALLBACK_SMS'))
+    CONSTRAINT chk_wa_status CHECK (status IN ('QUEUED','SENDING','SENT','FAILED','FALLBACK_SMS','NOT_CONFIGURED'))
 );
 CREATE INDEX idx_whatsapp_queue ON whatsapp_message_log(status, queued_at);
 
@@ -1039,13 +1305,21 @@ CREATE TABLE expenses (
     branch_id       UUID NOT NULL REFERENCES branches(branch_id),
     category_id     UUID NOT NULL REFERENCES expense_categories(category_id),
     amount          NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+    -- The day the money was spent, which is what the books and the monthly
+    -- comparison are about — not the moment someone got round to typing it in.
+    expense_date    DATE NOT NULL DEFAULT CURRENT_DATE,
+    payment_method  TEXT NOT NULL DEFAULT 'CASH',
+    payee           TEXT,                              -- who was paid (landlord, electrician, transporter)
+    reference       TEXT,                              -- bill / receipt / UTR number
     description     TEXT,
     receipt_url     TEXT,
     paid_from_till_session_id UUID REFERENCES till_sessions(session_id), -- 3.3.1 PETTY_EXPENSE_PAYOUT link
     status          expense_status NOT NULL DEFAULT 'PENDING',
     approved_by     UUID REFERENCES users(user_id),
+    reject_reason   TEXT,
     created_by      UUID REFERENCES users(user_id),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_expense_payment_method CHECK (payment_method IN ('CASH','UPI','CARD','BANK_TRANSFER','CHEQUE'))
 );
 -- To find the till_event (if any) that paid a given expense as PETTY_EXPENSE_PAYOUT:
 --   SELECT * FROM till_events WHERE ref_table = 'expenses' AND ref_id = <expense_id>;
@@ -1127,12 +1401,20 @@ CREATE TABLE training_journals (
 -- SECTION 15 — COMPLIANCE & BACKUP
 -- ============================================================================
 
+-- Written ONLY by the backup and restore-test scripts (apps/api/scripts), which
+-- run pg_dump / pg_restore and record what they actually did. No endpoint can
+-- claim a backup or a restore test that did not happen.
 CREATE TABLE backups (
     backup_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     taken_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    storage_ref     TEXT NOT NULL,
+    storage_ref     TEXT NOT NULL,                       -- where the dump file is
     status          TEXT NOT NULL DEFAULT 'COMPLETED',
-    restore_tested_at TIMESTAMPTZ                        -- documented DR test (15)
+    size_bytes      BIGINT,
+    checksum_sha256 TEXT,                                -- of the dump file, verified before recording
+    table_count     INTEGER,                             -- tables listed by pg_restore --list
+    restore_tested_at TIMESTAMPTZ,                       -- documented DR test (15)
+    restore_test_notes TEXT,                             -- what the restore test checked, and found
+    CONSTRAINT chk_backup_status CHECK (status IN ('COMPLETED', 'FAILED'))
 );
 
 -- ============================================================================
@@ -1160,6 +1442,24 @@ CREATE INDEX idx_employees_branch ON employees(branch_id);
 CREATE INDEX idx_product_prices_current ON product_prices(product_id) WHERE effective_to IS NULL;
 CREATE INDEX idx_stock_conflicts_open ON stock_conflicts(branch_id, status);
 CREATE INDEX idx_users_branch_role ON users(branch_id, role);
+CREATE INDEX idx_invoices_customer ON invoices(customer_id, server_received_at DESC) WHERE customer_id IS NOT NULL;
+CREATE INDEX idx_invoices_status_date ON invoices(status, server_received_at DESC);
+CREATE INDEX idx_invoices_number_trgm ON invoices USING gin (invoice_number gin_trgm_ops);
+CREATE INDEX idx_invoice_payments_ref ON invoice_payments(ref_no) WHERE ref_no IS NOT NULL;
+CREATE INDEX idx_customers_name_trgm ON customers USING gin (name gin_trgm_ops);
+CREATE INDEX idx_vendors_name_trgm ON vendors USING gin (name gin_trgm_ops);
+CREATE INDEX idx_products_category ON products(category_id);
+CREATE INDEX idx_products_brand ON products(brand_id);
+CREATE INDEX idx_product_barcodes_product ON product_barcodes(product_id);
+CREATE INDEX idx_product_units_product ON product_units(product_id);
+CREATE INDEX idx_quotations_customer ON quotations(customer_id, created_at DESC);
+CREATE INDEX idx_grn_vendor ON grn(vendor_id, received_at DESC);
+CREATE INDEX idx_vendor_ledger_vendor ON vendor_ledger(vendor_id, created_at);
+CREATE INDEX idx_sales_return_lines_line ON sales_return_lines(invoice_line_id);
+CREATE INDEX idx_credit_notes_invoice ON credit_notes(invoice_id);
+CREATE INDEX idx_loyalty_customer ON loyalty_transactions(customer_id, created_at DESC);
+CREATE INDEX idx_audit_log_created ON audit_log(created_at DESC);
+CREATE INDEX idx_expenses_date ON expenses(branch_id, expense_date DESC);
 
 -- ============================================================================
 -- GAPLESS DOCUMENT NUMBERING (3.6, 4.5.1, 12.1.1)
@@ -1176,15 +1476,25 @@ CREATE OR REPLACE FUNCTION erp_fiscal_year(p_at TIMESTAMPTZ DEFAULT now()) RETUR
     END
 $$;
 
+-- The prefix of a NEW series row carries the branch code (INV-AND, CN-THA). Every
+-- *_number column is UNIQUE chain-wide, so two branches drawing plain 'CN' would
+-- both print CN/2026-27/00001 and the second credit note would be refused — and
+-- the same would happen to every series on the first day of each fiscal year.
 CREATE OR REPLACE FUNCTION next_document_number(
     p_branch_id UUID, p_series TEXT, p_fiscal_year TEXT, p_prefix TEXT
 ) RETURNS TEXT AS $$
 DECLARE
     v_next  BIGINT;
     v_prefix TEXT;
+    v_code  TEXT;
 BEGIN
+    SELECT code INTO v_code FROM branches WHERE branch_id = p_branch_id;
+    IF v_code IS NULL THEN
+        RAISE EXCEPTION 'Unknown branch % for document numbering', p_branch_id;
+    END IF;
+
     INSERT INTO document_sequences (branch_id, series, fiscal_year, prefix, last_number)
-    VALUES (p_branch_id, p_series, p_fiscal_year, p_prefix, 0)
+    VALUES (p_branch_id, p_series, p_fiscal_year, p_prefix || '-' || v_code, 0)
     ON CONFLICT (branch_id, series, fiscal_year) DO NOTHING;
 
     UPDATE document_sequences
@@ -1195,6 +1505,73 @@ BEGIN
     RETURN v_prefix || '/' || p_fiscal_year || '/' || LPAD(v_next::TEXT, 5, '0');
 END;
 $$ LANGUAGE plpgsql;
+
+-- ----------------------------------------------------------------------------
+-- What is still owed on each supplier bill, oldest first (FIFO).
+--
+-- A payment made against a named bill settles that bill. A payment made "on
+-- account" settles the opening balance first and then the OLDEST open bills —
+-- the way a supplier's statement reads. Without this, a vendor paid in full on
+-- account would still show every bill as unpaid and every account as overdue.
+-- SECURITY INVOKER: row-level security applies as for any other read.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION erp_vendor_bill_dues(p_vendor_id UUID DEFAULT NULL)
+RETURNS TABLE (grn_id UUID, vendor_id UUID, received_at TIMESTAMPTZ, net_amount NUMERIC,
+               paid_direct NUMERIC, paid_on_account NUMERIC, amount_due NUMERIC)
+LANGUAGE sql STABLE AS $$
+    WITH bills AS (
+        SELECT g.grn_id, g.vendor_id, g.received_at,
+               g.grand_total - COALESCE((SELECT SUM(dn.total_amount) FROM vendor_debit_notes dn
+                                          WHERE dn.grn_id = g.grn_id), 0) AS net_amount,
+               COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp WHERE vp.grn_id = g.grn_id), 0) AS paid_direct
+          FROM grn g
+         WHERE p_vendor_id IS NULL OR g.vendor_id = p_vendor_id
+    ), pool AS (
+        SELECT v.vendor_id,
+               GREATEST(COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp
+                                   WHERE vp.vendor_id = v.vendor_id AND vp.grn_id IS NULL), 0)
+                        - GREATEST(v.opening_balance, 0), 0) AS on_account
+          FROM vendors v
+         WHERE p_vendor_id IS NULL OR v.vendor_id = p_vendor_id
+    ), open_bills AS (
+        SELECT b.*, GREATEST(b.net_amount - b.paid_direct, 0) AS open_amount,
+               COALESCE(SUM(GREATEST(b.net_amount - b.paid_direct, 0))
+                        OVER (PARTITION BY b.vendor_id ORDER BY b.received_at, b.grn_id
+                              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS open_before
+          FROM bills b
+    )
+    SELECT o.grn_id, o.vendor_id, o.received_at, round(o.net_amount, 2), round(o.paid_direct, 2),
+           round(LEAST(GREATEST(p.on_account - o.open_before, 0), o.open_amount), 2),
+           round(o.open_amount - LEAST(GREATEST(p.on_account - o.open_before, 0), o.open_amount), 2)
+      FROM open_bills o JOIN pool p ON p.vendor_id = o.vendor_id
+$$;
+
+-- ----------------------------------------------------------------------------
+-- A customer's balance and the date of the OLDEST charge still unpaid, with
+-- payments applied to the oldest charges first. "Days outstanding" is measured
+-- from that date — not from the first credit sale the customer ever had.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION erp_customer_dues(p_customer_id UUID DEFAULT NULL)
+RETURNS TABLE (customer_id UUID, balance NUMERIC, oldest_unpaid_at TIMESTAMPTZ, last_activity TIMESTAMPTZ)
+LANGUAGE sql STABLE AS $$
+    WITH bal AS (
+        SELECT l.customer_id, SUM(l.amount) AS balance, MAX(l.created_at) AS last_activity
+          FROM customer_credit_ledger l
+         WHERE p_customer_id IS NULL OR l.customer_id = p_customer_id
+         GROUP BY l.customer_id
+    ), charges AS (
+        SELECT l.customer_id, l.created_at,
+               COALESCE(SUM(l.amount) OVER (PARTITION BY l.customer_id ORDER BY l.created_at DESC, l.entry_id DESC
+                                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS newer_charges
+          FROM customer_credit_ledger l
+         WHERE l.amount > 0 AND (p_customer_id IS NULL OR l.customer_id = p_customer_id)
+    )
+    SELECT b.customer_id, round(b.balance, 2),
+           (SELECT MIN(c.created_at) FROM charges c
+             WHERE c.customer_id = b.customer_id AND c.newer_charges < b.balance - 0.005),
+           b.last_activity
+      FROM bal b
+$$;
 
 -- ============================================================================
 -- ROW-LEVEL SECURITY (Section 0 — "a branch user's session is filtered to
@@ -1289,6 +1666,14 @@ ALTER TABLE training_journals ENABLE ROW LEVEL SECURITY;
 CREATE POLICY training_journals_rls ON training_journals USING (erp_authenticated()) WITH CHECK (erp_authenticated());
 ALTER TABLE backups ENABLE ROW LEVEL SECURITY;
 CREATE POLICY backups_rls ON backups USING (erp_authenticated()) WITH CHECK (erp_authenticated());
+ALTER TABLE units ENABLE ROW LEVEL SECURITY;
+CREATE POLICY units_rls ON units USING (erp_authenticated()) WITH CHECK (erp_authenticated());
+-- A user may read their own branch grants (the API resolves the active branch
+-- from them); only an Owner can grant or revoke.
+ALTER TABLE user_branch_access ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_branch_access_rls ON user_branch_access
+    USING (erp_is_admin() OR user_id = erp_user_id())
+    WITH CHECK (erp_is_admin());
 ALTER TABLE paint_tint_records ENABLE ROW LEVEL SECURITY;
 CREATE POLICY paint_tint_records_rls ON paint_tint_records
     USING (EXISTS (SELECT 1 FROM invoice_lines il WHERE il.line_id = paint_tint_records.invoice_line_id))
@@ -1333,6 +1718,12 @@ ALTER TABLE stock_conflicts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY stock_conflicts_rls ON stock_conflicts USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
 ALTER TABLE document_sequences ENABLE ROW LEVEL SECURITY;
 CREATE POLICY document_sequences_rls ON document_sequences USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
+ALTER TABLE customer_payments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY customer_payments_rls ON customer_payments USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
+ALTER TABLE vendor_payments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY vendor_payments_rls ON vendor_payments USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
+ALTER TABLE stock_adjustments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY stock_adjustments_rls ON stock_adjustments USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
 
 -- Branch-local data where a NULL branch_id legitimately means "chain-wide row".
 -- Vendors are chain-wide master data, so their payable balance is as well: a
@@ -1505,6 +1896,13 @@ BEGIN
                                ip_address, user_agent, expires_at)
     VALUES (p_user.user_id, p_token_hash, p_device_id, p_user.branch_id, p_method,
             p_ip, p_user_agent, v_expires);
+
+    -- Section 43 — a successful sign-in is a security event the owner can see in
+    -- the audit log. Failed attempts are in login_attempts (keyed on the typed
+    -- identifier, so they exist even for accounts that do not).
+    INSERT INTO audit_log (user_id, branch_id, action, entity_type, entity_id, new_value)
+    VALUES (p_user.user_id, p_user.branch_id, 'LOGIN', 'users', p_user.user_id,
+            jsonb_build_object('method', p_method, 'ip', host(p_ip)));
 
     RETURN QUERY SELECT 'OK'::TEXT, p_user.user_id, p_user.role::TEXT, p_user.branch_id,
         p_user.full_name, p_user.email, p_user.phone, p_user.language_pref,
@@ -1764,6 +2162,24 @@ BEGIN
      WHERE s.token_hash = p_token_hash
        AND s.revoked_at IS NULL AND s.expires_at > now() AND u.is_active;
 END;
+$$;
+
+-- The branches a user may act at: an Owner every active branch; anyone else their
+-- home branch plus any granted in user_branch_access. The API calls this before it
+-- honours a requested active branch, so a branch id in a request header is a
+-- REQUEST that the database has to agree to, never a fact the client asserts.
+CREATE OR REPLACE FUNCTION auth_user_branches(p_user_id UUID)
+RETURNS TABLE (branch_id UUID, name TEXT, code TEXT, is_home BOOLEAN)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT b.branch_id, b.name, b.code, (b.branch_id IS NOT DISTINCT FROM u.branch_id) AS is_home
+      FROM users u
+      JOIN branches b ON b.is_active
+       AND (u.role = 'OWNER_ADMIN'
+            OR b.branch_id = u.branch_id
+            OR EXISTS (SELECT 1 FROM user_branch_access a
+                        WHERE a.user_id = u.user_id AND a.branch_id = b.branch_id))
+     WHERE u.user_id = p_user_id AND u.is_active
+     ORDER BY (b.branch_id IS NOT DISTINCT FROM u.branch_id) DESC, b.name
 $$;
 
 CREATE OR REPLACE FUNCTION auth_logout(p_token_hash TEXT)
@@ -2185,6 +2601,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO erp_app;
 
 -- Deletes are never legitimate on the immutable audit/compliance trail (7.3, 15).
 REVOKE DELETE, UPDATE ON audit_log, stock_ledger, login_attempts FROM erp_app;
+REVOKE INSERT, UPDATE, DELETE ON backups FROM erp_app;
+-- Money vouchers are corrected by a reversing entry, never edited or removed.
+REVOKE UPDATE, DELETE ON customer_payments, vendor_payments, stock_adjustments FROM erp_app;
 -- The app role must not be able to reach auth message bodies by any route.
 REVOKE ALL ON auth_message_outbox FROM erp_app;
 REVOKE ALL ON override_approvals FROM erp_app;
@@ -2216,6 +2635,7 @@ BEGIN
     -- statement, which only the draft path can do (the invoices trigger below has
     -- already vetted it).
     IF v_status IS NULL OR v_status = 'DRAFT' THEN
+        IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
         RETURN OLD;
     END IF;
 
@@ -2232,18 +2652,76 @@ END;
 -- into the thing that waves the delete through.
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
-DROP TRIGGER IF EXISTS trg_invoice_lines_draft_only ON invoice_lines;
+-- Lines and payments of a finalised bill can be neither deleted NOR edited.
 CREATE TRIGGER trg_invoice_lines_draft_only
-    BEFORE DELETE ON invoice_lines
+    BEFORE UPDATE OR DELETE ON invoice_lines
     FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
 
-DROP TRIGGER IF EXISTS trg_invoice_payments_draft_only ON invoice_payments;
 CREATE TRIGGER trg_invoice_payments_draft_only
-    BEFORE DELETE ON invoice_payments
+    BEFORE UPDATE OR DELETE ON invoice_payments
     FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
 
-DROP TRIGGER IF EXISTS trg_invoices_draft_only ON invoices;
 CREATE TRIGGER trg_invoices_draft_only
     BEFORE DELETE ON invoices
     FOR EACH ROW EXECUTE FUNCTION erp_only_drafts_are_mutable();
+
+-- Section 22 — "after finalisation, do NOT silently overwrite financial history".
+-- A FINAL invoice's commercial content is frozen at the database, where no route,
+-- script or second service using the app role can get round it. What may still
+-- change is operational metadata: FINAL -> VOID (the void workflow, which posts
+-- its own reversals), the offline-conflict flags, and the e-invoice IRN. A
+-- customer merge may re-point customer_id, and only when the merge path has set
+-- its transaction-local flag. Everything else is a correction, and corrections
+-- go through a return, a credit note or a void.
+CREATE OR REPLACE FUNCTION erp_protect_final_invoice() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.status = 'DRAFT' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status
+       AND NOT (OLD.status = 'FINAL' AND NEW.status = 'VOID') THEN
+        RAISE EXCEPTION 'Invoice % is % and its status cannot change to %.',
+            OLD.invoice_number, OLD.status, NEW.status USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF (NEW.invoice_number, NEW.branch_id, NEW.invoice_type, NEW.subtotal, NEW.discount_total,
+        NEW.cgst_total, NEW.sgst_total, NEW.igst_total, NEW.grand_total, NEW.round_off,
+        NEW.place_of_supply_state_code, NEW.server_received_at, NEW.device_created_at,
+        NEW.till_session_id, NEW.created_by, NEW.notes, NEW.due_date, NEW.order_no,
+        NEW.challan_no, NEW.challan_date, NEW.vehicle_no, NEW.place_of_delivery,
+        NEW.sold_by_employee_id, NEW.client_txn_id, NEW.source_quotation_id)
+       IS DISTINCT FROM
+       (OLD.invoice_number, OLD.branch_id, OLD.invoice_type, OLD.subtotal, OLD.discount_total,
+        OLD.cgst_total, OLD.sgst_total, OLD.igst_total, OLD.grand_total, OLD.round_off,
+        OLD.place_of_supply_state_code, OLD.server_received_at, OLD.device_created_at,
+        OLD.till_session_id, OLD.created_by, OLD.notes, OLD.due_date, OLD.order_no,
+        OLD.challan_no, OLD.challan_date, OLD.vehicle_no, OLD.place_of_delivery,
+        OLD.sold_by_employee_id, OLD.client_txn_id, OLD.source_quotation_id) THEN
+        RAISE EXCEPTION 'Invoice % is % and cannot be altered. Use a void, a sales return or a credit note instead.',
+            OLD.invoice_number, OLD.status USING ERRCODE = 'restrict_violation';
+    END IF;
+    IF NEW.customer_id IS DISTINCT FROM OLD.customer_id
+       AND COALESCE(current_setting('erp.customer_merge', true), '') <> 'on' THEN
+        RAISE EXCEPTION 'Invoice % is % and its customer cannot be changed.',
+            OLD.invoice_number, OLD.status USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_invoices_protect_final
+    BEFORE UPDATE ON invoices
+    FOR EACH ROW EXECUTE FUNCTION erp_protect_final_invoice();
+
+-- ── Business day boundaries ───────────────────────────────────────────────────
+-- "Today's sales", the fiscal year a number is drawn from, and every date filter
+-- in a report are all questions about the SHOP's calendar. Pinning the database's
+-- timezone makes CURRENT_DATE and ::date mean an Indian business day regardless of
+-- where the server runs. The API also sets it per connection (BUSINESS_TIMEZONE),
+-- so a managed database that refuses ALTER DATABASE is still correct.
+DO $$
+BEGIN
+    EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), 'Asia/Kolkata');
+EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Could not set the database timezone; the API sets it per connection instead.';
+END $$;
 

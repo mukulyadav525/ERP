@@ -1,4 +1,9 @@
-import { Pool } from 'pg';
+import pg, { Pool } from 'pg';
+
+// A DATE column is a calendar day, not an instant. node-postgres turns it into a
+// JS Date at local midnight, which then serialises as the PREVIOUS day in any
+// timezone west of the server's. Keep it as the 'YYYY-MM-DD' Postgres sent.
+pg.types.setTypeParser(1082, (value: string) => value);
 import { Kysely, PostgresDialect, sql, Transaction } from 'kysely';
 import type { DB } from './db.types.js';
 import { env } from './env.js';
@@ -13,6 +18,10 @@ const pool = new Pool({
   max: Number(process.env.PG_POOL_MAX ?? 20),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
+  // "Today", CURRENT_DATE and every ::date in a report are questions about the
+  // shop's calendar, not the server's. Set per connection so it holds even on a
+  // managed database where ALTER DATABASE ... SET timezone is not permitted.
+  options: `-c timezone=${env.businessTimezone}`,
 });
 
 pool.on('error', (err) => {

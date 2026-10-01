@@ -2,6 +2,10 @@ const withPWA = require('next-pwa')({
   dest: 'public',
   register: true,
   skipWaiting: true,
+  // next-pwa reloads the whole page when the connection returns by default. On the
+  // counter that would throw away a bill being typed. Sales queued offline upload
+  // in place instead (the billing screen listens for 'online' and drains its queue).
+  reloadOnOnline: false,
   disable: process.env.NODE_ENV === 'development',
 });
 

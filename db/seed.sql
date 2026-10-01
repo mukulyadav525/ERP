@@ -27,10 +27,13 @@
 BEGIN;
 
 -- ---------------------------------------------------------------- Branches --
-INSERT INTO branches (branch_id, name, address, state_code, gstin, phone, is_active) VALUES
- ('11111111-1111-1111-1111-111111111111','Andheri West','Shop 4, SV Road, Andheri West, Mumbai','MH','27AAAAA0000A1Z5','9820000001',true),
- ('22222222-2222-2222-2222-222222222222','Thane Station Road','12 Station Road, Thane West','MH','27AAAAA0000A1Z5','9820000002',true),
- ('33333333-3333-3333-3333-333333333333','Pune Kothrud','88 Kothrud Main Road, Pune','MH','27AAAAA0000A1Z5','9820000003',true)
+-- state_code is the 2-digit GST state code (27 = Maharashtra), which is what a tax
+-- invoice prints and what decides CGST+SGST against IGST. `code` goes into every
+-- document number the branch issues, so each branch's series is distinct.
+INSERT INTO branches (branch_id, code, name, address, state, state_code, gstin, phone, is_active) VALUES
+ ('11111111-1111-1111-1111-111111111111','AND','Andheri West','Shop 4, SV Road, Andheri West, Mumbai 400058','Maharashtra','27','27AAAAA0000A1Z5','9820000001',true),
+ ('22222222-2222-2222-2222-222222222222','THA','Thane Station Road','12 Station Road, Thane West 400601','Maharashtra','27','27AAAAA0000A1Z5','9820000002',true),
+ ('33333333-3333-3333-3333-333333333333','PUN','Pune Kothrud','88 Kothrud Main Road, Pune 411038','Maharashtra','27','27AAAAA0000A1Z5','9820000003',true)
 ON CONFLICT DO NOTHING;
 
 -- ------------------------------------------------------------------- Users --
@@ -161,7 +164,10 @@ INSERT INTO hsn_tax_rates (hsn_code, gst_rate_pct, effective_from, effective_to)
  ('6910', 18, '2024-01-01', NULL),
  ('8301', 18, '2024-01-01', NULL),
  ('7318', 18, '2024-01-01', '2025-04-01'),
- ('7318', 12, '2025-04-01', NULL)
+ ('7318', 12, '2025-04-01', NULL),
+ ('3214', 18, '2024-01-01', NULL),   -- wall putty / fillers
+ ('3206', 18, '2024-01-01', NULL),   -- colouring matter (stainer powder)
+ ('7317', 18, '2024-01-01', NULL)    -- nails
 ON CONFLICT DO NOTHING;
 -- ---------- Products (25 across categories) ----------
 INSERT INTO products (product_id, sku, name, category_id, brand_id, base_unit, hsn_code, default_price_type, reference_purchase_price, batch_tracked, serial_tracked) VALUES
@@ -170,10 +176,10 @@ INSERT INTO products (product_id, sku, name, category_id, brand_id, base_unit, h
  ('10000000-0000-0000-0000-000000000003','PLB-ELBOW-15','CPVC Elbow 15mm','c0000000-0000-0000-0000-000000000001','b0000000-0000-0000-0000-000000000001','PIECE','3917','TAX_INCLUSIVE',12,false,false),
  ('10000000-0000-0000-0000-000000000004','PLB-TAP-STD','Jaquar Basin Tap Standard','c0000000-0000-0000-0000-000000000007','b0000000-0000-0000-0000-000000000006','PIECE','6910','TAX_INCLUSIVE',650,false,false),
  ('10000000-0000-0000-0000-000000000005','PLB-WC-SEAT','Jaquar WC Seat Cover','c0000000-0000-0000-0000-000000000007','b0000000-0000-0000-0000-000000000006','PIECE','6910','TAX_INCLUSIVE',900,false,false),
- ('10000000-0000-0000-0000-000000000006','PNT-EMU-1L','Asian Paints Emulsion 1L White','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','LITRE','3208','TAX_INCLUSIVE',220,true,false),
+ ('10000000-0000-0000-0000-000000000006','PNT-EMU-1L','Asian Paints Emulsion 1L White','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','PIECE','3208','TAX_INCLUSIVE',220,true,false),
  ('10000000-0000-0000-0000-000000000007','PNT-EMU-4L','Asian Paints Emulsion 4L White','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','LITRE','3208','TAX_INCLUSIVE',210,true,false),
- ('10000000-0000-0000-0000-000000000008','PNT-ENAMEL-1L','Asian Paints Enamel 1L Blue','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','LITRE','3208','TAX_INCLUSIVE',260,true,false),
- ('10000000-0000-0000-0000-000000000009','PNT-PRIMER-1L','Asian Paints Wall Primer 1L','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','LITRE','3208','TAX_INCLUSIVE',180,true,false),
+ ('10000000-0000-0000-0000-000000000008','PNT-ENAMEL-1L','Asian Paints Enamel 1L Blue','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','PIECE','3208','TAX_INCLUSIVE',260,true,false),
+ ('10000000-0000-0000-0000-000000000009','PNT-PRIMER-1L','Asian Paints Wall Primer 1L','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000002','PIECE','3208','TAX_INCLUSIVE',180,true,false),
  ('10000000-0000-0000-0000-000000000010','ELC-WIRE-1.5','Havells 1.5sqmm Wire (per metre)','c0000000-0000-0000-0000-000000000003','b0000000-0000-0000-0000-000000000003','METRE','8536','TAX_INCLUSIVE',9,false,false),
  ('10000000-0000-0000-0000-000000000011','ELC-WIRE-2.5','Havells 2.5sqmm Wire (per metre)','c0000000-0000-0000-0000-000000000003','b0000000-0000-0000-0000-000000000003','METRE','8536','TAX_INCLUSIVE',14,false,false),
  ('10000000-0000-0000-0000-000000000012','ELC-SWITCH-6A','Havells Modular Switch 6A','c0000000-0000-0000-0000-000000000003','b0000000-0000-0000-0000-000000000003','PIECE','8536','TAX_INCLUSIVE',35,false,false),
@@ -189,23 +195,37 @@ INSERT INTO products (product_id, sku, name, category_id, brand_id, base_unit, h
  ('10000000-0000-0000-0000-000000000022','HW-BOLT-M8','Bolt M8x50 Galvanised','c0000000-0000-0000-0000-000000000006','b0000000-0000-0000-0000-000000000007','PIECE','7318','TAX_INCLUSIVE',3,false,false),
  ('10000000-0000-0000-0000-000000000023','HW-HINGE-4IN','Door Hinge 4 inch SS','c0000000-0000-0000-0000-000000000006','b0000000-0000-0000-0000-000000000007','PIECE','7318','TAX_INCLUSIVE',35,false,false),
  ('10000000-0000-0000-0000-000000000024','HW-PADLOCK-50','Padlock 50mm Brass','c0000000-0000-0000-0000-000000000006','b0000000-0000-0000-0000-000000000007','PIECE','8301','TAX_INCLUSIVE',150,false,false),
- ('10000000-0000-0000-0000-000000000025','SAN-FLUSH-TANK','Jaquar Flush Tank 10L','c0000000-0000-0000-0000-000000000007','b0000000-0000-0000-0000-000000000006','PIECE','6910','TAX_INCLUSIVE',1450,false,false)
+ ('10000000-0000-0000-0000-000000000025','SAN-FLUSH-TANK','Jaquar Flush Tank 10L','c0000000-0000-0000-0000-000000000007','b0000000-0000-0000-0000-000000000006','PIECE','6910','TAX_INCLUSIVE',1450,false,false),
+ -- Loose goods, weighed out at the counter. Section 11: 100 g is not a special
+ -- case anywhere — it is a sale unit whose size the units master states.
+ --   putty:   stocked by the KG, sold as 100 G / 250 G / 500 G / KG  (100 G = 0.1 KG)
+ --   stainer: stocked by the GRAM, sold as 100 G / 250 G / 500 G / KG (100 G = 100 G)
+ --   nails:   stocked by the KG, sold as 250 G / 500 G / KG
+ ('10000000-0000-0000-0000-000000000026','PNT-PUTTY-LOOSE','Birla White Wall Putty (loose)','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000007','KG','3214','TAX_INCLUSIVE',26,false,false),
+ ('10000000-0000-0000-0000-000000000027','PNT-STAINER-PWD','Universal Stainer Powder (loose)','c0000000-0000-0000-0000-000000000002','b0000000-0000-0000-0000-000000000007','G','3206','TAX_INCLUSIVE',0.24,false,false),
+ ('10000000-0000-0000-0000-000000000028','HW-NAIL-2IN','Wire Nails 2 inch (loose)','c0000000-0000-0000-0000-000000000006','b0000000-0000-0000-0000-000000000007','KG','7317','TAX_INCLUSIVE',82,false,false)
+ON CONFLICT DO NOTHING;
+UPDATE products SET description = 'Sold loose by weight from the sack. Price is per kilogram.', reorder_level = 25
+ WHERE product_id = '10000000-0000-0000-0000-000000000026';
+UPDATE products SET description = 'Tinting powder weighed out per order. Stocked and priced by the gram.', reorder_level = 2000
+ WHERE product_id = '10000000-0000-0000-0000-000000000027';
+UPDATE products SET description = 'Loose nails sold by weight.', reorder_level = 10
+ WHERE product_id = '10000000-0000-0000-0000-000000000028';
+
+
+-- Every product can always be sold in its own base unit (multiplier 1). That row is
+-- the default sale unit unless a product states otherwise below.
+INSERT INTO product_units (product_id, unit_label, multiplier_to_base, is_default_sale_unit)
+SELECT product_id, base_unit, 1, product_id NOT IN ('10000000-0000-0000-0000-000000000027',
+                                                     '10000000-0000-0000-0000-000000000007') FROM products
 ON CONFLICT DO NOTHING;
 
-
--- default sale units (PIECE/METRE/LITRE = base unit itself, multiplier 1)
-INSERT INTO product_units (product_id, unit_label, multiplier_to_base, is_default_sale_unit)
-SELECT product_id, base_unit::text, 1, true FROM products
-ON CONFLICT DO NOTHING;
--- box unit for the screw product
-INSERT INTO product_units (product_id, unit_label, multiplier_to_base, is_default_sale_unit)
-VALUES ('10000000-0000-0000-0000-000000000021','BOX_100',100,false) ON CONFLICT DO NOTHING;
-
--- Selling prices (mrp ~15-25% over ref purchase price)
+-- Selling prices (mrp ~15-25% over ref purchase price). Per BASE unit — for the
+-- gram-stocked stainer that is a price per gram, hence four decimals.
 INSERT INTO product_prices (product_id, mrp, selling_price, effective_from)
 SELECT product_id,
-       ROUND(reference_purchase_price * 1.45, 2),
-       ROUND(reference_purchase_price * 1.30, 2),
+       ROUND(reference_purchase_price * 1.45, CASE WHEN base_unit = 'G' THEN 4 ELSE 2 END),
+       ROUND(reference_purchase_price * 1.30, CASE WHEN base_unit = 'G' THEN 4 ELSE 2 END),
        '2025-01-01'::timestamptz
 FROM products
 ON CONFLICT DO NOTHING;
@@ -218,6 +238,10 @@ INSERT INTO vendors (vendor_id, name, gstin, phone, payment_terms_days, is_activ
  ('d0000000-0000-0000-0000-000000000004','Bosch Power Tools Wholesale','27BBBBB0004B1Z1','9811111114',45,true),
  ('d0000000-0000-0000-0000-000000000005','Local Hardware Supplies Co','27BBBBB0005B1Z1','9811111115',7,true)
 ON CONFLICT DO NOTHING;
+UPDATE vendors SET state = 'Maharashtra', state_code = '27',
+       address = 'Industrial Estate, Bhiwandi, Thane 421302',
+       email = lower(replace(split_part(name, ' ', 1), '''', '')) || '@example.com'
+ WHERE state_code IS NULL;
 
 -- ---------- Expense categories ----------
 INSERT INTO expense_categories (category_id, name) VALUES
@@ -245,20 +269,51 @@ SELECT
 FROM generate_series(1, 60) AS i
 ON CONFLICT DO NOTHING;
 
+-- Contractors are registered businesses: a tax invoice to them prints their
+-- company, address, GSTIN and state. One is in Karnataka, so a bill to them is an
+-- inter-state supply and carries IGST instead of CGST + SGST.
+UPDATE customers SET
+    company_name = split_part(name, ' ', 2) || ' Constructions',
+    address = (10 + (substring(customer_id::text, 31)::int % 80)) || ', Link Road, Mumbai 400053',
+    state = 'Maharashtra', state_code = '27',
+    -- A well-formed GSTIN: state(2) + PAN(5 letters, 4 digits, 1 letter) + entity + Z + check.
+    gstin = '27AABC' || chr(65 + substring(customer_id::text, 31)::int % 26)
+            || lpad((1000 + substring(customer_id::text, 31)::int)::text, 4, '0') || 'F1Z'
+            || (substring(customer_id::text, 31)::int % 9 + 1)::text,
+    notes = 'Contractor account — monthly settlement.'
+ WHERE customer_type = 'B2B_CONTRACTOR';
+UPDATE customers SET state = 'Karnataka', state_code = '29',
+       address = '14 Residency Road, Bengaluru 560025',
+       gstin = '29AABCK1060F1Z5'
+ WHERE customer_id = 'f0000000-0000-0000-0000-000000000060';
+
 
 -- 2.2 multi-unit sale: a higher sale unit is ONLY ever a multiple of base_unit,
 -- never an independently typed price (2.2.1). Box/reel/tin rows below prove the
 -- billing engine's conversion path, not just the schema's ability to store it.
 INSERT INTO product_units (product_id, unit_label, multiplier_to_base, is_default_sale_unit)
 VALUES
- ('10000000-0000-0000-0000-000000000021','BOX_100',100,false),   -- 1 box = 100 screws
- ('10000000-0000-0000-0000-000000000022','BOX_50',50,false),     -- 1 box = 50 bolts
- ('10000000-0000-0000-0000-000000000010','REEL_90',90,false),    -- 1 reel = 90 m of 1.5sqmm wire
- ('10000000-0000-0000-0000-000000000011','REEL_90',90,false),
- ('10000000-0000-0000-0000-000000000001','LENGTH_3M',3,false),   -- pipe sold as a 3 m length or cut-to-length
- ('10000000-0000-0000-0000-000000000002','LENGTH_3M',3,false),
- ('10000000-0000-0000-0000-000000000007','TIN_4L',4,false),      -- 4 L tin of a LITRE-based paint
- ('10000000-0000-0000-0000-000000000023','BOX_20',20,false)
+ ('10000000-0000-0000-0000-000000000021','BOX',100,false),       -- 1 box = 100 screws (pack size is per product)
+ ('10000000-0000-0000-0000-000000000022','BOX',50,false),        -- 1 box = 50 bolts
+ ('10000000-0000-0000-0000-000000000010','REEL',90,false),       -- 1 reel = 90 m of 1.5sqmm wire
+ ('10000000-0000-0000-0000-000000000011','REEL',90,false),
+ ('10000000-0000-0000-0000-000000000001','LENGTH',3,false),      -- pipe sold as a 3 m length or cut-to-length
+ ('10000000-0000-0000-0000-000000000002','LENGTH',3,false),
+ ('10000000-0000-0000-0000-000000000007','TIN',4,true),          -- 4 L tin of a LITRE-based paint; sold by the tin
+ ('10000000-0000-0000-0000-000000000023','BOX',20,false),
+ ('10000000-0000-0000-0000-000000000010','CM',0.01,false),       -- wire cut by the centimetre: 1 cm = 0.01 m
+ -- Wall putty, KG base: each weight unit's multiplier is its gram size ÷ 1000.
+ ('10000000-0000-0000-0000-000000000026','100G',0.1,false),
+ ('10000000-0000-0000-0000-000000000026','250G',0.25,false),
+ ('10000000-0000-0000-0000-000000000026','500G',0.5,false),
+ -- Stainer, GRAM base: each weight unit's multiplier is its size in grams.
+ ('10000000-0000-0000-0000-000000000027','100G',100,true),
+ ('10000000-0000-0000-0000-000000000027','250G',250,false),
+ ('10000000-0000-0000-0000-000000000027','500G',500,false),
+ ('10000000-0000-0000-0000-000000000027','KG',1000,false),
+ -- Nails, KG base.
+ ('10000000-0000-0000-0000-000000000028','250G',0.25,false),
+ ('10000000-0000-0000-0000-000000000028','500G',0.5,false)
 ON CONFLICT DO NOTHING;
 
 -- 3.9 barcodes exist where the manufacturer prints one; fuzzy search remains the
@@ -334,18 +389,16 @@ INSERT INTO marketing_campaigns (name, campaign_type, message_template, schedule
 ON CONFLICT DO NOTHING;
 
 -- 16 training journals, versioned and bilingual.
+-- The guides are real documents served by the web app (apps/web/public/docs).
+-- English only for now; a Hindi edition is listed here when it is written.
 INSERT INTO training_journals (journal_type, language, version, content_url) VALUES
- ('ADMIN','en',1,'/docs/admin-journal-en-v1.md'),
- ('ADMIN','hi',1,'/docs/admin-journal-hi-v1.md'),
- ('STAFF','en',1,'/docs/staff-journal-en-v1.md'),
- ('STAFF','hi',1,'/docs/staff-journal-hi-v1.md')
+ ('ADMIN','en',1,'/docs/admin-guide-en-v1.md'),
+ ('STAFF','en',1,'/docs/staff-guide-en-v1.md')
 ON CONFLICT DO NOTHING;
 
--- 15 backup history with a documented restore test.
-INSERT INTO backups (taken_at, storage_ref, status, restore_tested_at)
-SELECT now() - (i || ' days')::interval, 's3://erp-backups/daily/' || to_char(now() - (i || ' days')::interval,'YYYY-MM-DD') || '.dump',
-       'COMPLETED', CASE WHEN i % 30 = 0 THEN now() - (i || ' days')::interval + interval '2 hours' ELSE NULL END
-FROM generate_series(0, 29) i;
+-- 15 backups: deliberately NONE. The backups table is written only by the backup
+-- script after a dump has actually been taken and verified, so a fresh install
+-- honestly reports "no backup yet" rather than showing a history that never happened.
 
 COMMIT;
 
@@ -388,6 +441,10 @@ DECLARE
   sale_price NUMERIC;
   gst_rate NUMERIC;
   qty_sold NUMERIC;
+  qty_unit NUMERIC;
+  line_no INT;
+  v_paid_at TIMESTAMPTZ;
+  v_receipt UUID;
   taxable NUMERIC; cgst NUMERIC; sgst NUMERIC;
   v_subtotal NUMERIC; cgst_t NUMERIC; sgst_t NUMERIC; v_grand NUMERIC;
   cashier UUID;
@@ -401,6 +458,10 @@ DECLARE
   w INT;
   this_grn_id UUID;
   grn_total NUMERIC;
+  v_type TEXT;
+  g_taxable NUMERIC; g_half NUMERIC;
+  vend_balance NUMERIC;
+  qty_scale NUMERIC;
 BEGIN
   SELECT array_agg(vendor_id) INTO vendor_ids FROM vendors;
   SELECT array_agg(product_id) INTO product_ids FROM products;
@@ -408,30 +469,50 @@ BEGIN
   -- ============== GRNs: weekly restock per branch for 40 weeks back ==============
   FOR b IN SELECT unnest(branch_ids) LOOP
     branch_mult := CASE b WHEN branch_ids[1] THEN 1.3 WHEN branch_ids[2] THEN 1.0 ELSE 0.8 END;
-    FOR w IN 0..39 LOOP
+    -- Up to last week: nothing in the history is dated today or later.
+    FOR w IN 1..40 LOOP
       d := CURRENT_DATE - (w * 7);
       vend := vendor_ids[1 + (w % array_length(vendor_ids,1))];
       grn_seq := grn_seq + 1;
       grn_no := 'GRN-' || to_char(d,'YYYYMM') || '-' || grn_seq;
       this_grn_id := gen_random_uuid();
-      INSERT INTO grn (grn_id, branch_id, vendor_id, grn_number, received_at, created_by)
-      VALUES (this_grn_id, b, vend, grn_no, d::timestamptz + interval '9 hours', 'a0000000-0000-0000-0000-000000000008');
+      INSERT INTO grn (grn_id, branch_id, vendor_id, grn_number, vendor_invoice_no, vendor_invoice_date,
+                       received_at, created_by)
+      VALUES (this_grn_id, b, vend, grn_no, 'SB/' || to_char(d,'YYMM') || '/' || (4000 + grn_seq), d,
+              d::timestamptz + interval '9 hours', 'a0000000-0000-0000-0000-000000000008');
 
-      FOR prod IN SELECT product_id, reference_purchase_price, base_unit FROM products ORDER BY random() LIMIT 8 LOOP
-        qty := (20 + (random()*80))::numeric(14,4) * branch_mult;
-        rate := prod.reference_purchase_price * (0.95 + random()*0.1);
+      FOR prod IN SELECT pr.product_id, pr.reference_purchase_price, pr.base_unit,
+                         COALESCE(h.gst_rate_pct, 0) AS gst_rate_pct
+                    FROM products pr
+                    LEFT JOIN hsn_tax_rates h ON h.hsn_code = pr.hsn_code AND h.effective_to IS NULL
+                   ORDER BY random() LIMIT 8 LOOP
+        -- A gram-stocked product arrives by the kilo: 20-100 KG is 20,000-100,000 G.
+        qty_scale := CASE WHEN prod.base_unit = 'G' THEN 1000 ELSE 1 END;
+        qty := round(((20 + (random()*80)) * branch_mult * qty_scale)::numeric,
+                     CASE WHEN prod.base_unit IN ('PIECE','PCS') THEN 0 ELSE 2 END);
+        -- The 4 L emulsion arrives in whole tins: a multiple of 4 litres.
+        IF prod.product_id = '10000000-0000-0000-0000-000000000007' THEN qty := GREATEST(round(qty / 4) * 4, 4); END IF;
+        rate := round((prod.reference_purchase_price * (0.95 + random()*0.1))::numeric, 4);
 
         SELECT base_unit_qty, weighted_avg_cost INTO cur_qty, cur_cost
         FROM branch_stock WHERE branch_id = b AND product_id = prod.product_id;
         IF NOT FOUND THEN
           cur_qty := 0; cur_cost := rate;
+          -- Reorder levels in the product's own base unit: 10 and 200 of a gram
+          -- are nothing, so a gram-stocked product gets them in kilograms' worth.
           INSERT INTO branch_stock (branch_id, product_id, base_unit_qty, weighted_avg_cost, reorder_min, reorder_max)
-          VALUES (b, prod.product_id, 0, rate, 10, 200);
+          VALUES (b, prod.product_id, 0, rate, 10 * qty_scale, 200 * qty_scale);
         END IF;
 
         new_cost := CASE WHEN (cur_qty + qty) = 0 THEN rate ELSE ((cur_qty*cur_cost)+(qty*rate))/(cur_qty+qty) END;
 
-        INSERT INTO grn_lines (grn_id, product_id, qty_base_unit, rate) VALUES (this_grn_id, prod.product_id, qty, rate);
+        -- Purchase GST is claimed back as ITC, so the landed cost is the ex-GST rate
+        -- and the vendor is owed taxable + GST.
+        g_taxable := round(qty * rate, 2);
+        g_half := round(g_taxable * (prod.gst_rate_pct / 2) / 100, 2);
+        INSERT INTO grn_lines (grn_id, product_id, qty_in_unit, qty_base_unit, rate, gst_rate_pct,
+                               taxable_value, cgst_amount, sgst_amount)
+        VALUES (this_grn_id, prod.product_id, qty, qty, rate, prod.gst_rate_pct, g_taxable, g_half, g_half);
 
         UPDATE branch_stock SET base_unit_qty = base_unit_qty + qty, weighted_avg_cost = new_cost, updated_at = now()
         WHERE branch_id = b AND product_id = prod.product_id;
@@ -440,20 +521,38 @@ BEGIN
         VALUES (b, prod.product_id, 'PURCHASE', qty, rate, 'grn', this_grn_id, 'a0000000-0000-0000-0000-000000000008', d::timestamptz + interval '9 hours');
       END LOOP;
 
-      SELECT SUM(gl.qty_base_unit*gl.rate) INTO grn_total FROM grn_lines gl WHERE gl.grn_id = this_grn_id;
+      UPDATE grn g SET gross_total = t.taxable, taxable_total = t.taxable, cgst_total = t.cgst,
+                       sgst_total = t.sgst, grand_total = t.taxable + t.cgst + t.sgst
+        FROM (SELECT SUM(taxable_value) AS taxable, SUM(cgst_amount) AS cgst, SUM(sgst_amount) AS sgst
+                FROM grn_lines gl2 WHERE gl2.grn_id = this_grn_id) t
+       WHERE g.grn_id = this_grn_id
+      RETURNING g.grand_total INTO grn_total;
+    END LOOP;
+  END LOOP;
+
+  -- The payables ledger carries a RUNNING balance per vendor, so it is written in
+  -- date order after all receipts exist rather than inside the per-branch loop.
+  FOR vend IN SELECT vendor_id FROM vendors LOOP
+    vend_balance := 0;
+    FOR prod IN SELECT g.grn_id, g.branch_id, g.grand_total, g.received_at FROM grn g
+                 WHERE g.vendor_id = vend ORDER BY g.received_at, g.grn_id LOOP
+      vend_balance := vend_balance + prod.grand_total;
       INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, ref_table, ref_id, balance_after, created_at)
-      VALUES (vend, b, 'GRN_PAYABLE', grn_total, 'grn', this_grn_id, grn_total, d::timestamptz + interval '9 hours');
+      VALUES (vend, prod.branch_id, 'GRN_PAYABLE', prod.grand_total, 'grn', prod.grn_id, vend_balance, prod.received_at);
     END LOOP;
   END LOOP;
 
   -- ============== Invoices: daily sales for the last 270 days per branch ==============
   FOR b IN SELECT unnest(branch_ids) LOOP
     cashier := (cashier_by_branch->>(b::text))::uuid;
-    branch_code := upper(substr(replace((SELECT name FROM branches WHERE branch_id = b), ' ', ''), 1, 3));
+    branch_code := (SELECT code FROM branches WHERE branch_id = b);
     inv_seq := 0;
     branch_mult := CASE b WHEN branch_ids[1] THEN 1.4 WHEN branch_ids[2] THEN 1.0 ELSE 0.75 END;
 
-    FOR day_count IN 0..269 LOOP
+    -- History runs to YESTERDAY. Today belongs to the person using the app: a
+    -- freshly seeded database whose "today" already held invoices stamped later
+    -- than the current time was showing sales that had not happened yet.
+    FOR day_count IN 1..270 LOOP
       d := CURRENT_DATE - day_count;
       -- seasonal bump around Diwali (Oct/Nov) and a dip in monsoon (Jul/Aug)
       seasonal := CASE WHEN EXTRACT(MONTH FROM d) IN (10,11) THEN 1.5
@@ -466,63 +565,102 @@ BEGIN
       -- one till session per branch per day
       till_id := gen_random_uuid();
       INSERT INTO till_sessions (session_id, branch_id, counter_id, cashier_user_id, opening_float, opened_at, closed_at, closing_counted_cash, status)
-      VALUES (till_id, b, 'COUNTER-1', cashier, 2000, d::timestamptz + interval '9 hours', d::timestamptz + interval '21 hours', 2000 + (500 + random()*4000), 'CLOSED');
+      VALUES (till_id, b, 'COUNTER-1', cashier, 2000, d::timestamptz + interval '9 hours', d::timestamptz + interval '21 hours', 2000, 'CLOSED');
 
       FOR inv IN 1..invoices_per_day LOOP
         ts := d::timestamptz + (make_interval(hours => 9) + (random()*11) * interval '1 hour');
-        SELECT customer_id INTO cust FROM customers ORDER BY random() LIMIT 1;
+        pay_method := CASE WHEN random() < 0.33 THEN 'CASH' WHEN random() < 0.65 THEN 'UPI' WHEN random() < 0.85 THEN 'CARD' ELSE 'CREDIT' END;
+        -- Credit is only ever given to a customer with a credit line; everyone else
+        -- is a known customer most of the time and a walk-in otherwise.
+        IF pay_method = 'CREDIT' THEN
+          SELECT customer_id INTO cust FROM customers WHERE credit_allowed ORDER BY random() LIMIT 1;
+        ELSE
+          SELECT customer_id INTO cust FROM customers ORDER BY random() LIMIT 1;
+          IF random() < 0.15 THEN cust := NULL; END IF;
+        END IF;
         n_lines := 1 + (random()*3)::int;
-        v_subtotal := 0; cgst_t := 0; sgst_t := 0;
+        v_subtotal := 0; cgst_t := 0; sgst_t := 0; line_no := 0;
         v_invoice_id := gen_random_uuid();
         inv_seq := inv_seq + 1;
         v_fy := erp_fiscal_year(ts);
+        v_type := CASE WHEN random() < 0.7 THEN 'GST' ELSE 'NON_GST' END;
 
         INSERT INTO invoices (invoice_id, invoice_number, branch_id, till_session_id, customer_id, invoice_type, status,
                                subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
                                device_created_at, server_received_at, created_by, sold_by_employee_id)
         VALUES (v_invoice_id, 'INV-' || branch_code || '/' || v_fy || '/' || lpad(inv_seq::text, 5, '0'), b, till_id,
-                CASE WHEN random() < 0.15 THEN NULL ELSE cust END,
-                CASE WHEN random() < 0.7 THEN 'GST' ELSE 'NON_GST' END::invoice_type, 'FINAL'::invoice_status,
+                cust,
+                -- Built as a DRAFT and finalised once its totals are known, the
+                -- same order the application follows: a FINAL row is immutable.
+                v_type::invoice_type, 'DRAFT'::invoice_status,
                 0, 0, 0, 0, 0, 0, ts, ts, cashier,
                 (SELECT employee_id FROM employees WHERE user_id = cashier));
 
         FOR li IN 1..n_lines LOOP
-          SELECT pr.product_id, pr.base_unit, pp.selling_price, htr.gst_rate_pct
+          -- Each line is sold in the product's default sale unit (a 4 L TIN, a 100 G
+          -- scoop, a PIECE, a METRE): whole units where the unit is counted.
+          SELECT pr.product_id, pr.base_unit, pp.selling_price, htr.gst_rate_pct,
+                 su.product_unit_id AS sale_unit_id, su.multiplier_to_base AS sale_mult, u.allows_fraction AS sale_fraction
             INTO p
             FROM products pr
             JOIN product_prices pp ON pp.product_id = pr.product_id AND pp.effective_to IS NULL
             JOIN hsn_tax_rates htr ON htr.hsn_code = pr.hsn_code AND htr.effective_to IS NULL
+            JOIN product_units su ON su.product_id = pr.product_id AND su.is_default_sale_unit
+            JOIN units u ON u.unit_code = su.unit_label
             ORDER BY random() LIMIT 1;
 
-          qty_sold := CASE WHEN p.base_unit = 'PIECE' THEN (1 + (random()*4))::int
-                            ELSE round((1 + random()*8)::numeric, 2) END;
+          qty_unit := CASE WHEN p.sale_fraction THEN round((1 + random()*8)::numeric, 2)
+                           ELSE (1 + (random()*4))::int END;
+          qty_sold := round(qty_unit * p.sale_mult, 4);
+          -- Nothing is sold that is not on the shelf, so the stock ledger and the
+          -- stock on hand agree line for line.
+          CONTINUE WHEN COALESCE((SELECT base_unit_qty FROM branch_stock
+                                   WHERE branch_id = b AND product_id = p.product_id), 0) < qty_sold;
+          line_no := line_no + 1;
           sale_price := p.selling_price;
-          gst_rate := p.gst_rate_pct;
+          -- A bill of supply charges no GST, whatever the product's HSN rate.
+          gst_rate := CASE WHEN v_type = 'GST' THEN p.gst_rate_pct ELSE 0 END;
           taxable := round((qty_sold * sale_price) / (1 + gst_rate/100), 2);
           cgst := round(taxable * (gst_rate/2) / 100, 2);
-          sgst := cgst;
+          -- Tax-inclusive: the parts must add back to the marked price exactly, the
+          -- same last-paisa rule the billing engine applies (3.1.1).
+          sgst := round(qty_sold * sale_price, 2) - taxable - cgst;
 
           v_line_id := gen_random_uuid();
-          INSERT INTO invoice_lines (line_id, invoice_id, product_id, qty_in_sale_unit, base_unit_qty, price_type,
-                                      rate_locked_at_scan, taxable_value, cgst_amount, sgst_amount, igst_amount)
-          VALUES (v_line_id, v_invoice_id, p.product_id, qty_sold, qty_sold, 'TAX_INCLUSIVE', sale_price, taxable, cgst, sgst, 0);
+          INSERT INTO invoice_lines (line_id, invoice_id, line_no, product_id, product_unit_id, qty_in_sale_unit,
+                                      base_unit_qty, price_type, rate_locked_at_scan, taxable_value,
+                                      cgst_amount, sgst_amount, igst_amount)
+          VALUES (v_line_id, v_invoice_id, line_no, p.product_id, p.sale_unit_id,
+                  qty_unit, qty_sold, 'TAX_INCLUSIVE', sale_price, taxable, cgst, sgst, 0);
 
           v_subtotal := v_subtotal + taxable;
           cgst_t := cgst_t + cgst;
           sgst_t := sgst_t + sgst;
 
           -- decrement stock (allow going slightly negative is blocked by trigger, so clamp)
-          UPDATE branch_stock SET base_unit_qty = GREATEST(base_unit_qty - qty_sold, 0.5), updated_at = now()
+          UPDATE branch_stock SET base_unit_qty = base_unit_qty - qty_sold, updated_at = now()
           WHERE branch_id = b AND product_id = p.product_id;
 
           INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, ref_table, ref_id, created_by, created_at)
           VALUES (b, p.product_id, 'SALE', -qty_sold, 'invoices', v_invoice_id, cashier, ts);
         END LOOP;
 
+        -- Every line was out of stock: the bill never happened, and its number is reused.
+        IF line_no = 0 THEN
+          DELETE FROM invoices WHERE invoice_id = v_invoice_id;
+          inv_seq := inv_seq - 1;
+          CONTINUE;
+        END IF;
         v_grand := v_subtotal + cgst_t + sgst_t;
-        UPDATE invoices SET subtotal = v_subtotal, cgst_total = cgst_t, sgst_total = sgst_t, grand_total = v_grand WHERE invoice_id = v_invoice_id;
+        UPDATE invoices SET subtotal = v_subtotal, cgst_total = cgst_t, sgst_total = sgst_t, grand_total = v_grand,
+                            status = 'FINAL'
+         WHERE invoice_id = v_invoice_id;
 
-        pay_method := CASE WHEN random() < 0.35 THEN 'CASH' WHEN random() < 0.7 THEN 'UPI' WHEN random() < 0.9 THEN 'CARD' ELSE 'CREDIT' END;
+        -- Within the credit limit, or it is paid by UPI instead.
+        IF pay_method = 'CREDIT' AND COALESCE((SELECT SUM(amount) FROM customer_credit_ledger WHERE customer_id = cust), 0) + v_grand
+             > (SELECT credit_limit FROM customers WHERE customer_id = cust) THEN
+          pay_method := 'UPI';
+        END IF;
         INSERT INTO invoice_payments (invoice_id, method, amount) VALUES (v_invoice_id, pay_method::payment_method, v_grand);
 
         IF pay_method = 'CASH' THEN
@@ -540,34 +678,63 @@ BEGIN
           END IF;
         END IF;
 
-        -- Requirement #4: every invoice for an identified customer is queued for
-        -- WhatsApp delivery; the worker drains the queue and retries on failure.
-        IF cust IS NOT NULL AND random() < 0.75 THEN
-          INSERT INTO whatsapp_message_log (customer_id, invoice_id, to_phone, message_type, body, status, sent_at, queued_at)
-          VALUES (cust, v_invoice_id, (SELECT phone FROM customers WHERE customer_id = cust), 'INVOICE_PDF',
-                  'Your invoice is attached. Thank you for shopping with us.',
-                  CASE WHEN random() < 0.95 THEN 'SENT' ELSE 'FAILED' END,
-                  ts + interval '2 minutes', ts);
-        END IF;
+        -- No WhatsApp delivery history is invented: bills are shared from the screen
+        -- by a person, and nothing in the seed claims a message was delivered.
 
-        IF pay_method = 'CREDIT' AND cust IS NOT NULL THEN
+        IF pay_method = 'CREDIT' THEN
+          -- balance_after is recomputed in date order once all entries exist.
           INSERT INTO customer_credit_ledger (customer_id, branch_id, entry_type, amount, balance_after, ref_table, ref_id, created_at)
-          VALUES (cust, b, 'SALE_ON_CREDIT', v_grand,
-                  v_grand + COALESCE((SELECT balance_after FROM customer_credit_ledger WHERE customer_id = cust ORDER BY created_at DESC LIMIT 1), 0),
-                  'invoices', v_invoice_id, ts);
+          VALUES (cust, b, 'SALE_ON_CREDIT', v_grand, 0, 'invoices', v_invoice_id, ts);
+          -- Most credit customers settle within 10–40 days: a numbered receipt, by
+          -- bank transfer, UPI or cash. Bills too recent to be due stay outstanding.
+          v_paid_at := ts + make_interval(days => 10 + floor(random() * 30)::int);
+          IF random() < 0.85 AND v_paid_at < now() - interval '1 hour' THEN
+            v_receipt := gen_random_uuid();
+            INSERT INTO customer_payments (payment_id, receipt_number, customer_id, branch_id, amount, method, reference, created_by, created_at)
+            VALUES (v_receipt, 'tmp-' || v_receipt, cust, b, v_grand,
+                    (ARRAY['BANK_TRANSFER','UPI','CASH'])[1 + floor(random() * 3)::int],
+                    NULL, cashier, v_paid_at);
+            UPDATE customer_payments SET reference = 'UTR' || upper(substr(md5(v_receipt::text), 1, 10))
+             WHERE payment_id = v_receipt AND method = 'BANK_TRANSFER';
+            INSERT INTO customer_credit_ledger (customer_id, branch_id, entry_type, amount, balance_after, ref_table, ref_id, created_at)
+            VALUES (cust, b, 'PAYMENT_RECEIVED', -v_grand, 0, 'customer_payments', v_receipt, v_paid_at);
+          END IF;
         END IF;
       END LOOP;
 
       -- occasional cash drop
       IF random() < 0.3 THEN
         INSERT INTO till_events (session_id, event_type, amount, acknowledged_by, created_at)
-        VALUES (till_id, 'CASH_DROP', 1000 + random()*2000, cashier, d::timestamptz + interval '18 hours');
+        VALUES (till_id, 'CASH_DROP', round((1000 + random()*2000)::numeric, 2),
+                (SELECT user_id FROM users WHERE role = 'BRANCH_MANAGER' AND branch_id = b LIMIT 1),
+                d::timestamptz + interval '18 hours');
       END IF;
+
+      -- The drawer is counted at close. Most days balance to the rupee; a few are
+      -- a little over or short, which is what the variance report is for.
+      UPDATE till_sessions ts SET closing_counted_cash = round(ts.opening_float
+               + COALESCE((SELECT SUM(amount) FILTER (WHERE event_type = 'CASH_SALE')
+                           - COALESCE(SUM(amount) FILTER (WHERE event_type = 'CASH_DROP'), 0)
+                             FROM till_events WHERE session_id = till_id), 0)
+               + CASE WHEN random() < 0.85 THEN 0 ELSE round((random()*80 - 40)::numeric, 0) END, 2)
+       WHERE ts.session_id = till_id;
+      INSERT INTO till_events (session_id, event_type, amount, note, created_at)
+      SELECT till_id, 'CLOSING_COUNT', closing_counted_cash, 'Shift close count', d::timestamptz + interval '21 hours'
+        FROM till_sessions WHERE session_id = till_id;
     END LOOP;
   END LOOP;
 
   RAISE NOTICE 'Transaction seed complete.';
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- The customer account ledger in date order: each entry's running balance.
+-- ---------------------------------------------------------------------------
+UPDATE customer_credit_ledger l SET balance_after = x.running
+  FROM (SELECT entry_id, SUM(amount) OVER (PARTITION BY customer_id ORDER BY created_at, entry_id) AS running
+          FROM customer_credit_ledger) x
+ WHERE x.entry_id = l.entry_id;
+
 
 -- ============================================================================
 -- EXPENSES, HR, RETURNS & CREDIT NOTES
@@ -620,6 +787,16 @@ BEGIN
     END LOOP;
   END LOOP;
 
+  -- An expense is dated the day the money was spent; none are in the future.
+  DELETE FROM expenses WHERE created_at > now();
+  UPDATE expenses e SET expense_date = e.created_at::date,
+         payment_method = CASE WHEN c.name IN ('Rent','Salaries') THEN 'BANK_TRANSFER'
+                               WHEN c.name = 'Electricity' THEN 'UPI' ELSE 'CASH' END,
+         payee = CASE c.name WHEN 'Rent' THEN 'Shop landlord' WHEN 'Electricity' THEN 'MSEDCL'
+                             WHEN 'Salaries' THEN 'Staff payroll' ELSE NULL END,
+         description = COALESCE(e.description, c.name || ' — ' || to_char(e.created_at, 'Mon YYYY'))
+    FROM expense_categories c WHERE c.category_id = e.category_id;
+
   -- Attendance: last 60 working days per employee
   FOR emp IN SELECT employee_id, branch_id FROM employees LOOP
     FOR i IN 0..59 LOOP
@@ -643,7 +820,7 @@ BEGIN
   -- Sales returns: pick ~120 random GST invoices, return one line each with a credit note
   FOR inv IN
     SELECT i.invoice_id, i.branch_id, i.server_received_at
-    FROM invoices i WHERE i.invoice_type = 'GST'
+    FROM invoices i WHERE i.invoice_type = 'GST' AND i.server_received_at < now() - interval '3 days'
     ORDER BY random() LIMIT 120
   LOOP
     SELECT * INTO line FROM invoice_lines WHERE invoice_id = inv.invoice_id ORDER BY random() LIMIT 1;
@@ -661,8 +838,10 @@ BEGIN
     VALUES (ret_id, inv.invoice_id, inv.branch_id, cn_id, (ARRAY['CASH','UPI','CARD'])[1+floor(random()*3)::int]::payment_method,
             'Customer return', 'a0000000-0000-0000-0000-000000000002', inv.server_received_at + interval '2 days');
 
+    -- Returned in the unit it was sold in (whole tins, whole pieces), stored in base units.
     return_qty := LEAST(line.qty_in_sale_unit, GREATEST(1, floor(line.qty_in_sale_unit * random())));
     ret_taxable := round((line.taxable_value / line.qty_in_sale_unit) * return_qty, 2);
+    return_qty := round(return_qty * line.base_unit_qty / line.qty_in_sale_unit, 4);
     ret_cgst := round(ret_taxable * (line.cgst_amount / NULLIF(line.taxable_value,0)), 2);
 
     INSERT INTO sales_return_lines (return_id, invoice_line_id, qty_base_unit, condition, cash_refund_amount)
@@ -671,6 +850,7 @@ BEGIN
 
     INSERT INTO credit_note_lines (credit_note_id, invoice_line_id, qty_base_unit, taxable_value, cgst_amount, sgst_amount)
     VALUES (cn_id, line.line_id, return_qty, ret_taxable, ret_cgst, ret_cgst);
+    UPDATE sales_returns SET refund_total = ret_taxable + 2 * ret_cgst WHERE return_id = ret_id;
 
     -- restock resellable returns
     UPDATE branch_stock SET base_unit_qty = base_unit_qty + return_qty WHERE branch_id = inv.branch_id AND product_id = line.product_id;
@@ -698,7 +878,7 @@ DECLARE
   inv1 UUID := 'a0000000-0000-0000-0000-000000000008';
   v_po UUID; v_transfer UUID; v_line UUID; v_audit UUID; v_dn UUID;
   v_grn RECORD; v_q UUID; v_cust UUID; v_prod RECORD; v_total NUMERIC;
-  v_claim_line RECORD; i INT;
+  v_claim_line RECORD; i INT; v_paid_at TIMESTAMPTZ;
 BEGIN
   -- 4.2 batch tracking for shelf-life-sensitive stock (paint/adhesive/chemicals).
   INSERT INTO stock_batches (branch_id, product_id, batch_number, mfg_date, expiry_date, qty_remaining)
@@ -742,17 +922,43 @@ BEGIN
   -- what reverses the ITC claimed on the original GRN.
   FOR v_grn IN SELECT * FROM grn ORDER BY received_at DESC LIMIT 3 LOOP
     v_dn := gen_random_uuid();
-    SELECT SUM(gl.qty_base_unit * 0.1 * gl.rate) INTO v_total FROM grn_lines gl WHERE gl.grn_id = v_grn.grn_id;
     INSERT INTO vendor_debit_notes (debit_note_id, debit_note_number, grn_id, vendor_id, branch_id,
                                     reason, total_amount, created_by, created_at)
     VALUES (v_dn, 'DN/' || erp_fiscal_year() || '/' || lpad((floor(random() * 89999) + 10000)::text, 5, '0'),
             v_grn.grn_id, v_grn.vendor_id, v_grn.branch_id,
             (ARRAY['Damaged in transit','Wrong specification supplied','Short shipment'])[1 + floor(random() * 3)::int],
-            COALESCE(v_total, 0), inv1, v_grn.received_at + interval '3 days');
+            0, inv1, v_grn.received_at + interval '3 days');
 
-    INSERT INTO vendor_debit_note_lines (debit_note_id, grn_line_id, qty_base_unit, rate)
-    SELECT v_dn, gl.grn_line_id, round(gl.qty_base_unit * 0.1, 4), gl.rate
-    FROM grn_lines gl WHERE gl.grn_id = v_grn.grn_id;
+    -- 10% of each line goes back, at the receipt's own rate and GST.
+    INSERT INTO vendor_debit_note_lines (debit_note_id, grn_line_id, qty_base_unit, rate, taxable_value, tax_amount)
+    SELECT v_dn, gl.grn_line_id, x.q, gl.rate, round(gl.rate * x.q, 2), round(gl.rate * x.q, 2) * gl.gst_rate_pct / 100
+    FROM grn_lines gl JOIN products p ON p.product_id = gl.product_id JOIN units u ON u.unit_code = p.base_unit
+    CROSS JOIN LATERAL (SELECT CASE WHEN p.product_id = '10000000-0000-0000-0000-000000000007' THEN GREATEST(round(gl.qty_base_unit * 0.025) * 4, 4)
+                                    WHEN u.allows_fraction THEN round(gl.qty_base_unit * 0.1, 2)
+                                    ELSE GREATEST(round(gl.qty_base_unit * 0.1), 1) END AS q) x
+    JOIN branch_stock bs ON bs.branch_id = v_grn.branch_id AND bs.product_id = gl.product_id
+    WHERE gl.grn_id = v_grn.grn_id
+      AND bs.base_unit_qty >= x.q;          -- only goods still on the shelf can go back
+    -- Nothing from this receipt is left to send back: no debit note.
+    IF NOT EXISTS (SELECT 1 FROM vendor_debit_note_lines WHERE debit_note_id = v_dn) THEN
+      DELETE FROM vendor_debit_notes WHERE debit_note_id = v_dn;
+      CONTINUE;
+    END IF;
+    -- The returned goods leave the branch's stock through the ledger.
+    INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, cost_at_movement, ref_table, ref_id, created_by, created_at)
+    SELECT v_grn.branch_id, gl.product_id, 'PURCHASE_RETURN', -l.qty_base_unit, l.rate, 'vendor_debit_notes', v_dn, inv1,
+           v_grn.received_at + interval '3 days'
+      FROM vendor_debit_note_lines l JOIN grn_lines gl ON gl.grn_line_id = l.grn_line_id WHERE l.debit_note_id = v_dn;
+    UPDATE branch_stock bs SET base_unit_qty = bs.base_unit_qty - t.q
+      FROM (SELECT gl.product_id, SUM(l.qty_base_unit) AS q FROM vendor_debit_note_lines l
+              JOIN grn_lines gl ON gl.grn_line_id = l.grn_line_id WHERE l.debit_note_id = v_dn GROUP BY gl.product_id) t
+     WHERE bs.branch_id = v_grn.branch_id AND bs.product_id = t.product_id;
+    UPDATE vendor_debit_note_lines SET tax_amount = round(tax_amount, 2) WHERE debit_note_id = v_dn;
+    UPDATE vendor_debit_notes dn SET taxable_total = t.taxable, tax_total = t.tax, total_amount = t.taxable + t.tax
+      FROM (SELECT SUM(taxable_value) AS taxable, SUM(tax_amount) AS tax
+              FROM vendor_debit_note_lines WHERE debit_note_id = v_dn) t
+     WHERE dn.debit_note_id = v_dn
+    RETURNING dn.total_amount INTO v_total;
 
     -- The debit note reduces the payable, mirroring the GRN_PAYABLE entry.
     INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, ref_table, ref_id, balance_after, created_at)
@@ -761,31 +967,66 @@ BEGIN
             v_grn.received_at + interval '3 days');
   END LOOP;
 
-  -- Some vendor payments, so the payables ageing report is not all one bucket.
-  INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, ref_table, ref_id, balance_after, created_at)
-  SELECT v.vendor_id, b1, 'PAYMENT_MADE',
-         -round(COALESCE((SELECT SUM(amount) FROM vendor_ledger vl WHERE vl.vendor_id = v.vendor_id), 0) * 0.6, 2),
-         'manual', gen_random_uuid(),
-         round(COALESCE((SELECT SUM(amount) FROM vendor_ledger vl WHERE vl.vendor_id = v.vendor_id), 0) * 0.4, 2),
-         now() - interval '10 days'
-  FROM vendors v;
+  -- Suppliers are paid bill by bill, around each bill's due date (received date +
+  -- the supplier's payment terms), mostly by bank transfer. Bills not yet due stay
+  -- open, and roughly one in ten older bills is still unpaid — so the payables
+  -- screen shows a believable mix of current and overdue rather than all of one.
+  FOR v_grn IN
+    SELECT g.grn_id, g.vendor_id, g.branch_id, g.received_at,
+           g.grand_total - COALESCE((SELECT SUM(dn.total_amount) FROM vendor_debit_notes dn WHERE dn.grn_id = g.grn_id), 0) AS net,
+           COALESCE(v.payment_terms_days, 30) AS terms
+      FROM grn g JOIN vendors v ON v.vendor_id = g.vendor_id
+     ORDER BY g.received_at
+  LOOP
+    CONTINUE WHEN v_grn.net <= 0 OR random() < 0.1;
+    v_paid_at := v_grn.received_at + make_interval(days => GREATEST(v_grn.terms - 5 + floor(random() * 8)::int, 1));
+    CONTINUE WHEN v_paid_at > now() - interval '1 day';
+    v_line := gen_random_uuid();
+    i := floor(random() * 10)::int;
+    INSERT INTO vendor_payments (payment_id, payment_number, vendor_id, branch_id, grn_id, amount, method, reference,
+                                 paid_on, created_by, created_at)
+    VALUES (v_line, 'tmp-' || v_line, v_grn.vendor_id, v_grn.branch_id, v_grn.grn_id, round(v_grn.net, 2),
+            CASE WHEN i < 7 THEN 'BANK_TRANSFER' WHEN i < 9 THEN 'CHEQUE' ELSE 'UPI' END,
+            CASE WHEN i < 7 THEN 'UTR' || upper(substr(md5(v_line::text), 1, 10))
+                 WHEN i < 9 THEN lpad((100000 + floor(random() * 899999))::text, 6, '0') ELSE NULL END,
+            v_paid_at::date, owner_id, v_paid_at);
+    INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, ref_table, ref_id, balance_after, created_at)
+    VALUES (v_grn.vendor_id, v_grn.branch_id, 'PAYMENT_MADE', -round(v_grn.net, 2), 'vendor_payments', v_line, 0, v_paid_at);
+  END LOOP;
 
   -- 4.4 inter-branch transfers: one completed cleanly, one still in transit, and
   -- one that arrived short — the TRANSFER_DISCREPANCY case from 4.4.1.
   FOR i IN 1..3 LOOP
     v_transfer := gen_random_uuid();
-    INSERT INTO stock_transfers (transfer_id, from_branch_id, to_branch_id, status, transfer_doc_type,
-                                 driver_ref, requested_by, dispatched_at, received_at)
-    VALUES (v_transfer, b1, (ARRAY[b2, b3, b2])[i],
+    INSERT INTO stock_transfers (transfer_id, transfer_number, from_branch_id, to_branch_id, status, transfer_doc_type,
+                                 driver_ref, requested_by, created_at, dispatched_at, received_at)
+    VALUES (v_transfer, 'TR-AND/' || erp_fiscal_year() || '/' || lpad(i::text, 5, '0'),
+            b1, (ARRAY[b2, b3, b2])[i],
             (ARRAY['RECEIVED','DISPATCHED','TRANSFER_DISCREPANCY'])[i]::transfer_status,
             'INTRASTATE', 'MH-01-AB-' || (1000 + i), mgr1,
+            now() - ((11 - i) || ' days')::interval,
             now() - ((10 - i) || ' days')::interval,
             CASE WHEN i = 2 THEN NULL ELSE now() - ((8 - i) || ' days')::interval END);
 
-    FOR v_prod IN SELECT product_id FROM products ORDER BY random() LIMIT 3 LOOP
+    FOR v_prod IN SELECT p.product_id FROM products p JOIN branch_stock bs ON bs.product_id = p.product_id AND bs.branch_id = b1
+                   WHERE p.base_unit IN ('PIECE', 'PCS') AND bs.base_unit_qty >= 20 ORDER BY random() LIMIT 3 LOOP
       INSERT INTO stock_transfer_lines (transfer_id, product_id, dispatched_qty, received_qty)
       VALUES (v_transfer, v_prod.product_id, 20,
               CASE i WHEN 1 THEN 20 WHEN 2 THEN NULL ELSE 17 END);   -- case 3: 3 units short
+      INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, ref_table, ref_id, created_by, created_at)
+      VALUES (b1, v_prod.product_id, 'TRANSFER_OUT', -20, 'stock_transfers', v_transfer, mgr1, now() - ((10 - i) || ' days')::interval);
+      UPDATE branch_stock SET base_unit_qty = base_unit_qty - 20 WHERE branch_id = b1 AND product_id = v_prod.product_id;
+      IF i <> 2 THEN
+        INSERT INTO branch_stock (branch_id, product_id, base_unit_qty, weighted_avg_cost)
+        VALUES ((ARRAY[b2, b3, b2])[i], v_prod.product_id, 0,
+                (SELECT reference_purchase_price FROM products WHERE product_id = v_prod.product_id))
+        ON CONFLICT (branch_id, product_id) DO NOTHING;
+        INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, ref_table, ref_id, created_by, created_at)
+        VALUES ((ARRAY[b2, b3, b2])[i], v_prod.product_id, 'TRANSFER_IN', CASE i WHEN 1 THEN 20 ELSE 17 END,
+                'stock_transfers', v_transfer, mgr1, now() - ((8 - i) || ' days')::interval);
+        UPDATE branch_stock SET base_unit_qty = base_unit_qty + CASE i WHEN 1 THEN 20 ELSE 17 END
+         WHERE branch_id = (ARRAY[b2, b3, b2])[i] AND product_id = v_prod.product_id;
+      END IF;
     END LOOP;
   END LOOP;
 
@@ -795,15 +1036,32 @@ BEGIN
   VALUES (v_audit, b1, 'COMPLETED', now() - interval '20 days', now() - interval '19 days', mgr1);
   INSERT INTO stock_audit_lines (audit_id, product_id, system_qty, counted_qty)
   SELECT v_audit, bs.product_id, bs.base_unit_qty,
-         GREATEST(bs.base_unit_qty + (random() * 6 - 3)::numeric(14,4), 0)
-  FROM branch_stock bs WHERE bs.branch_id = b1 LIMIT 12;
+         GREATEST(bs.base_unit_qty + CASE WHEN u.allows_fraction THEN round((random() * 6 - 3)::numeric, 2)
+                                          ELSE round(random() * 6 - 3)::numeric END, 0)
+  FROM branch_stock bs JOIN products p ON p.product_id = bs.product_id JOIN units u ON u.unit_code = p.base_unit
+  WHERE bs.branch_id = b1 AND p.product_id <> '10000000-0000-0000-0000-000000000007' LIMIT 12;
+  INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, ref_table, ref_id, reason_code, created_by, created_at)
+  SELECT b1, sal.product_id, 'COUNT_ADJUSTMENT', sal.counted_qty - sal.system_qty, 'stock_audits', v_audit, 'PHYSICAL_COUNT', mgr1,
+         now() - interval '19 days'
+    FROM stock_audit_lines sal WHERE sal.audit_id = v_audit AND sal.counted_qty <> sal.system_qty;
+  UPDATE branch_stock bs SET base_unit_qty = sal.counted_qty
+    FROM stock_audit_lines sal WHERE sal.audit_id = v_audit AND bs.branch_id = b1 AND bs.product_id = sal.product_id;
 
   -- 4.7 damage/wastage write-offs, distinct from a sales return.
   INSERT INTO stock_writeoffs (branch_id, product_id, qty_base_unit, reason_code, created_by, created_at)
-  SELECT bs.branch_id, bs.product_id, round((1 + random() * 3)::numeric, 2),
+  SELECT bs.branch_id, bs.product_id,
+         CASE WHEN u.allows_fraction THEN round((1 + random() * 3)::numeric, 2) ELSE (1 + floor(random() * 3))::numeric END,
          (ARRAY['DAMAGED','EXPIRED','TRANSFER_LOSS'])[1 + floor(random() * 3)::int], inv1,
          now() - (floor(random() * 60) || ' days')::interval
-  FROM branch_stock bs WHERE bs.branch_id IN (b1, b2) ORDER BY random() LIMIT 8;
+  FROM branch_stock bs JOIN products p ON p.product_id = bs.product_id JOIN units u ON u.unit_code = p.base_unit
+  WHERE bs.branch_id IN (b1, b2) AND p.product_id <> '10000000-0000-0000-0000-000000000007' AND bs.base_unit_qty >= 4
+  ORDER BY random() LIMIT 8;
+  INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change, ref_table, ref_id, reason_code, created_by, created_at)
+  SELECT branch_id, product_id, 'WRITE_OFF', -qty_base_unit, 'stock_writeoffs', writeoff_id, reason_code, created_by, created_at
+    FROM stock_writeoffs;
+  UPDATE branch_stock bs SET base_unit_qty = bs.base_unit_qty - w.q
+    FROM (SELECT branch_id, product_id, SUM(qty_base_unit) AS q FROM stock_writeoffs GROUP BY 1, 2) w
+   WHERE bs.branch_id = w.branch_id AND bs.product_id = w.product_id;
 
   -- 5 quotations for B2B/contractor customers, including one with stock actually
   -- reserved (5.1) and one already converted to an invoice.
@@ -811,17 +1069,25 @@ BEGIN
     SELECT customer_id INTO v_cust FROM customers WHERE customer_type = 'B2B_CONTRACTOR' ORDER BY random() LIMIT 1;
     v_q := gen_random_uuid();
     INSERT INTO quotations (quotation_id, quotation_number, branch_id, customer_id, status, price_type,
-                            stock_reserved, reservation_hold_until, created_by, created_at)
+                            stock_reserved, reservation_hold_until, valid_until, notes, created_by, created_at)
     VALUES (v_q, 'QT/' || erp_fiscal_year() || '/' || lpad(i::text, 5, '0'),
             (ARRAY[b1, b2, b3])[1 + (i % 3)], v_cust,
             (ARRAY['DRAFT','APPROVED','APPROVED','CONVERTED','EXPIRED','DRAFT'])[i]::quotation_status,
             'TAX_EXCLUSIVE',
             i = 3, CASE WHEN i = 3 THEN now() + interval '3 days' ELSE NULL END,
+            (now() - ((20 - i * 2) || ' days')::interval)::date + 15,
+            'Site supply as discussed. Delivery within 2 days of confirmation.',
             mgr1, now() - ((20 - i * 2) || ' days')::interval);
 
-    INSERT INTO quotation_lines (quotation_id, product_id, qty_base_unit, rate)
-    SELECT v_q, p.product_id, 10 + floor(random() * 40), pp.selling_price * 0.92   -- contractor tier discount
-    FROM products p JOIN product_prices pp ON pp.product_id = p.product_id AND pp.effective_to IS NULL
+    INSERT INTO quotation_lines (quotation_id, product_id, product_unit_id, qty_in_sale_unit, qty_base_unit, rate, sort_order)
+    SELECT v_q, p.product_id, pu.product_unit_id, x.qty, x.qty * pu.multiplier_to_base,
+           round(pp.selling_price * 0.92, 4),   -- contractor tier discount
+           row_number() OVER ()
+    FROM products p
+    JOIN product_prices pp ON pp.product_id = p.product_id AND pp.effective_to IS NULL
+    -- Quoted in the unit the item is sold in (4 L tins, 100 G scoops, pieces).
+    JOIN product_units pu ON pu.product_id = p.product_id AND pu.is_default_sale_unit
+    CROSS JOIN LATERAL (SELECT (10 + floor(random() * 40))::numeric AS qty) x
     ORDER BY random() LIMIT 4;
   END LOOP;
 
@@ -938,12 +1204,18 @@ BEGIN
         WHEN random() < 0.12 THEN COALESCE(r.reorder_min, 10) * 0.4      -- a few genuinely low
         ELSE COALESCE(r.reorder_max, 200) * (0.55 + random() * 0.4)
     END;
-    IF r.base_unit = 'PIECE' THEN v_target := round(v_target); END IF;
-    v_delta := round((v_target - r.base_unit_qty)::numeric, 4);
-    CONTINUE WHEN v_delta = 0;
+    IF r.base_unit IN ('PIECE', 'PCS', 'G') THEN v_target := round(v_target); END IF;
+    IF r.base_unit IN ('KG', 'METRE', 'LITRE') THEN v_target := round(v_target, 2); END IF;
+    IF r.product_id = '10000000-0000-0000-0000-000000000007' THEN v_target := round(v_target / 4) * 4; END IF;
+    -- The adjustment is whatever brings the LEDGER to the target, and stock on hand
+    -- is set to that same figure: the movement log always adds up to the shelf.
+    v_delta := round((v_target - COALESCE((SELECT SUM(base_unit_qty_change) FROM stock_ledger sl
+                                            WHERE sl.branch_id = r.branch_id AND sl.product_id = r.product_id
+                                              AND sl.movement_type NOT IN ('RESERVATION', 'RESERVATION_RELEASE')), 0))::numeric, 4);
 
-    UPDATE branch_stock SET base_unit_qty = base_unit_qty + v_delta, updated_at = now()
+    UPDATE branch_stock SET base_unit_qty = v_target, updated_at = now()
      WHERE branch_id = r.branch_id AND product_id = r.product_id;
+    CONTINUE WHEN v_delta = 0;
 
     INSERT INTO stock_ledger (branch_id, product_id, movement_type, base_unit_qty_change,
                               ref_table, ref_id, reason_code, created_by, created_at)
@@ -953,30 +1225,109 @@ BEGIN
   RAISE NOTICE 'Closing stock levelled.';
 END $$;
 
+UPDATE customer_payments cp SET receipt_number = 'RCT-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT payment_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, payment_id) AS rn
+          FROM customer_payments) x, branches b
+ WHERE x.payment_id = cp.payment_id AND b.branch_id = cp.branch_id;
+
+-- ---------------------------------------------------------------------------
+-- The payables ledger in date order: each entry's running balance.
+-- ---------------------------------------------------------------------------
+UPDATE vendor_ledger l SET balance_after = x.running
+  FROM (SELECT entry_id, SUM(amount) OVER (PARTITION BY vendor_id ORDER BY created_at, entry_id) AS running
+          FROM vendor_ledger) x
+ WHERE x.entry_id = l.entry_id;
+
+-- ---------------------------------------------------------------------------
+-- One numbering format for history and live documents: PREFIX-BRANCH/FY/NNNNN,
+-- counted per branch per financial year in date order — exactly what the app
+-- issues (next_document_number). The counters below then continue each series.
+-- ---------------------------------------------------------------------------
+UPDATE grn g SET grn_number = 'GRN-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT grn_id, erp_fiscal_year(received_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(received_at) ORDER BY received_at, grn_id) AS rn
+          FROM grn) x, branches b
+ WHERE x.grn_id = g.grn_id AND b.branch_id = g.branch_id;
+
+UPDATE credit_notes c SET credit_note_number = 'CN-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT cn.credit_note_id, i.branch_id, erp_fiscal_year(cn.created_at) AS fy,
+               row_number() OVER (PARTITION BY i.branch_id, erp_fiscal_year(cn.created_at) ORDER BY cn.created_at, cn.credit_note_id) AS rn
+          FROM credit_notes cn JOIN invoices i ON i.invoice_id = cn.invoice_id) x, branches b
+ WHERE x.credit_note_id = c.credit_note_id AND b.branch_id = x.branch_id;
+
+UPDATE vendor_debit_notes d SET debit_note_number = 'DN-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT debit_note_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, debit_note_id) AS rn
+          FROM vendor_debit_notes) x, branches b
+ WHERE x.debit_note_id = d.debit_note_id AND b.branch_id = d.branch_id;
+
+UPDATE quotations q SET quotation_number = 'QT-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT quotation_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, quotation_id) AS rn
+          FROM quotations) x, branches b
+ WHERE x.quotation_id = q.quotation_id AND b.branch_id = q.branch_id;
+
+UPDATE delivery_challans d SET challan_number = 'DC-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT challan_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, challan_id) AS rn
+          FROM delivery_challans) x, branches b
+ WHERE x.challan_id = d.challan_id AND b.branch_id = d.branch_id;
+
+UPDATE purchase_orders po SET po_number = 'PO-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT po_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, po_id) AS rn
+          FROM purchase_orders) x, branches b
+ WHERE x.po_id = po.po_id AND b.branch_id = po.branch_id;
+
+-- Two steps where the old numbers already share the new format, so no row
+-- collides with one not yet renumbered.
+UPDATE stock_transfers SET transfer_number = 'tmp-' || transfer_id;
+UPDATE stock_transfers t SET transfer_number = 'TR-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT transfer_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY from_branch_id, erp_fiscal_year(created_at) ORDER BY created_at, transfer_id) AS rn
+          FROM stock_transfers) x, branches b
+ WHERE x.transfer_id = t.transfer_id AND b.branch_id = t.from_branch_id;
+
+UPDATE vendor_payments SET payment_number = 'tmp-' || payment_id;
+UPDATE vendor_payments vp SET payment_number = 'VP-' || b.code || '/' || x.fy || '/' || lpad(x.rn::text, 5, '0')
+  FROM (SELECT payment_id, erp_fiscal_year(created_at) AS fy,
+               row_number() OVER (PARTITION BY branch_id, erp_fiscal_year(created_at) ORDER BY created_at, payment_id) AS rn
+          FROM vendor_payments) x, branches b
+ WHERE x.payment_id = vp.payment_id AND b.branch_id = vp.branch_id;
+
 -- ---------------------------------------------------------------------------
 -- Align the gapless counters with the history just generated, so the first live
 -- document issued after seeding continues the series instead of colliding (3.6).
 -- ---------------------------------------------------------------------------
 INSERT INTO document_sequences (branch_id, series, fiscal_year, prefix, last_number)
 SELECT i.branch_id, 'INVOICE', erp_fiscal_year(now()),
-       'INV-' || upper(substr(replace(b.name, ' ', ''), 1, 3)),
+       'INV-' || b.code,
        count(*) FILTER (WHERE erp_fiscal_year(i.server_received_at) = erp_fiscal_year(now()))
 FROM invoices i JOIN branches b ON b.branch_id = i.branch_id
-GROUP BY i.branch_id, b.name
+GROUP BY i.branch_id, b.code
 ON CONFLICT (branch_id, series, fiscal_year) DO UPDATE SET last_number = EXCLUDED.last_number;
 
+-- Every other series continues from the highest number this financial year has
+-- already used at that branch (zero where the seed issued none).
 INSERT INTO document_sequences (branch_id, series, fiscal_year, prefix, last_number)
-SELECT b.branch_id, s.series, erp_fiscal_year(now()), s.prefix, s.start_at
+SELECT b.branch_id, s.series, erp_fiscal_year(now()), s.prefix || '-' || b.code,
+       COALESCE((SELECT max(split_part(d.num, '/', 3)::int) FROM (
+           SELECT grn_number AS num FROM grn WHERE s.series = 'GRN' AND branch_id = b.branch_id
+           UNION ALL SELECT cn.credit_note_number FROM credit_notes cn JOIN invoices i ON i.invoice_id = cn.invoice_id
+                      WHERE s.series = 'CREDIT_NOTE' AND i.branch_id = b.branch_id
+           UNION ALL SELECT debit_note_number FROM vendor_debit_notes WHERE s.series = 'DEBIT_NOTE' AND branch_id = b.branch_id
+           UNION ALL SELECT quotation_number FROM quotations WHERE s.series = 'QUOTATION' AND branch_id = b.branch_id
+           UNION ALL SELECT challan_number FROM delivery_challans WHERE s.series = 'CHALLAN' AND branch_id = b.branch_id
+           UNION ALL SELECT po_number FROM purchase_orders WHERE s.series = 'PO' AND branch_id = b.branch_id
+           UNION ALL SELECT transfer_number FROM stock_transfers WHERE s.series = 'TRANSFER' AND from_branch_id = b.branch_id
+           UNION ALL SELECT payment_number FROM vendor_payments WHERE s.series = 'VENDOR_PAYMENT' AND branch_id = b.branch_id
+           UNION ALL SELECT receipt_number FROM customer_payments WHERE s.series = 'RECEIPT' AND branch_id = b.branch_id
+         ) d WHERE split_part(d.num, '/', 2) = erp_fiscal_year(now())), 0)
 FROM branches b CROSS JOIN (VALUES
-    ('CREDIT_NOTE','CN', 200),
-    ('DEBIT_NOTE','DN', 20),
-    ('QUOTATION','QT', 10),
-    ('GRN','GRN', 500),
-    ('CHALLAN','DC', 10),
-    ('TRANSFER','TR', 10),
-    ('PO','PO', 10),
-    ('RMA','RMA', 10)
-) AS s(series, prefix, start_at)
-ON CONFLICT (branch_id, series, fiscal_year) DO NOTHING;
+    ('CREDIT_NOTE','CN'), ('DEBIT_NOTE','DN'), ('QUOTATION','QT'), ('GRN','GRN'), ('CHALLAN','DC'),
+    ('TRANSFER','TR'), ('PO','PO'), ('VENDOR_PAYMENT','VP'), ('RECEIPT','RCT')
+) AS s(series, prefix)
+ON CONFLICT (branch_id, series, fiscal_year) DO UPDATE SET last_number = EXCLUDED.last_number;
 
 ANALYZE;

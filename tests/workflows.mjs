@@ -126,7 +126,8 @@ try {
     // The last link in the Section 44 chain: the report has to agree with the raw
     // transactions, not compute its own version of the truth.
     const rep = await call('GET', `/api/reports/sales-trend?days=1&branch_id=${B1}`, { token: owner.token });
-    const today = new Date().toISOString().slice(0, 10);
+    // The shop's calendar day, as the database sees it — not the test runner's UTC date.
+    const today = (await q(`SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS d`))[0].d;
     const reported = rep.body.find((r) => String(r.period).startsWith(today));
     const raw = (await q(
       `SELECT COALESCE(SUM(grand_total + round_off), 0) s FROM invoices
@@ -236,7 +237,7 @@ try {
   section('5 · Inter-branch transfer → dispatch → receive → both ledgers');
   {
     const branches = (await call('GET', '/api/admin/branches', { token: owner.token })).body;
-    const B2 = branches.find((b) => b.branch_id !== B1).branch_id;
+    const B2 = branches.find((b) => b.branch_id !== B1 && b.is_active).branch_id;
     const qtyA0 = Number((await q('SELECT base_unit_qty FROM branch_stock WHERE branch_id=$1 AND product_id=$2', [B1, wf1.product.product_id]))[0].base_unit_qty);
 
     const tr = await call('POST', '/api/inventory/transfers', { token: invStaff.token,
@@ -356,10 +357,20 @@ try {
       doc.ok && /ESTIMATE|QUOTATION/i.test(doc.text) && /not a tax invoice/i.test(doc.text),
       `${doc.status}, ${doc.bytes} bytes`);
 
-    const conv = await call('POST', `/api/quotations/${qt.body.quotation_id}/convert`, { token: mgr.token,
-      body: { payments: [{ method: 'CASH', amount: 0 }] } });
-    check('it converts to an invoice', conv.status === 200 || conv.status === 400,
+    // Converting opens a DRAFT bill carrying the estimate's lines and rates; the
+    // bill is then finalised through the ordinary billing path.
+    const convDraft = await call('POST', `/api/quotations/${qt.body.quotation_id}/convert`, { token: mgr.token });
+    check('it opens as a draft bill', convDraft.status === 200 && convDraft.body.draft?.status === 'DRAFT',
+      convDraft.status === 200 ? convDraft.body.draft_invoice_id : String(convDraft.body.error).slice(0, 80));
+    const stillHeld = Number((await q('SELECT COALESCE(reserved_qty,0) r FROM branch_stock WHERE branch_id=$1 AND product_id=$2', [B1, wf1.product.product_id]))[0].r);
+    check('the stock stays reserved while the bill is only a draft', stillHeld === reservedAfter, `${reservedAfter} → ${stillHeld}`);
+    const conv = convDraft.status === 200 ? await call('POST', `/api/billing/drafts/${convDraft.body.draft_invoice_id}/finalize`, {
+      token: mgr.token, body: { payments: [{ method: 'CASH', amount: convDraft.body.draft.totals.payable }] } }) : convDraft;
+    check('it converts to an invoice', conv.status === 200,
       conv.status === 200 ? conv.body.invoice_number : String(conv.body.error).slice(0, 80));
+    const qAfter = (await q('SELECT status, converted_invoice_id FROM quotations WHERE quotation_id = $1', [qt.body.quotation_id]))[0];
+    check('the estimate is marked converted only once the bill is final',
+      qAfter.status === 'CONVERTED' && qAfter.converted_invoice_id === conv.body.invoice_id, qAfter.status);
     if (conv.status === 200) {
       const reservedFinal = Number((await q('SELECT COALESCE(reserved_qty,0) r FROM branch_stock WHERE branch_id=$1 AND product_id=$2', [B1, wf1.product.product_id]))[0].r);
       check('and the reservation is consumed, not left hanging', reservedFinal <= reservedBefore,

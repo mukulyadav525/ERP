@@ -22,6 +22,42 @@ import reportsRoutes from './routes/reports/index.js';
 import adminRoutes from './routes/admin/index.js';
 import searchRoutes from './routes/search/index.js';
 
+/** Unique-constraint names → what the person at the screen should be told. */
+const UNIQUE_MESSAGES: Record<string, string> = {
+  products_sku_key: 'That SKU is already used by another product.',
+  product_barcodes_barcode_key: 'That barcode is already assigned to another product.',
+  product_units_product_id_unit_label_key: 'This product already has that unit.',
+  ux_product_units_default: 'A product can have only one default sale unit.',
+  ux_brands_name: 'A brand with that name already exists.',
+  ux_categories_name: 'A category with that name already exists here.',
+  units_pkey: 'A unit with that code already exists.',
+  customers_phone_key: 'A customer with this phone number already exists.',
+  users_phone_key: 'A user with this phone number already exists.',
+  users_email_key: 'A user with this email already exists.',
+  branches_code_key: 'Another branch already uses that branch code.',
+  ux_grn_vendor_invoice: 'This supplier bill number has already been entered for this vendor at this branch.',
+  ux_till_sessions_open_counter: 'That counter already has an open till. Close it before opening a new one.',
+  // Idempotency keys: a second submit of the same form lands here when the first
+  // is still committing. The first one is the record; nothing was duplicated.
+  invoices_client_txn_id_key: 'This bill was already saved — it was not recorded twice. Refresh to see it.',
+  customer_payments_client_txn_id_key: 'This payment was already recorded — it was not taken twice.',
+  vendor_payments_client_txn_id_key: 'This payment was already recorded — it was not paid twice.',
+  grn_client_txn_id_key: 'This goods receipt was already saved — the stock was not received twice.',
+  hsn_tax_rates_hsn_code_effective_from_key: 'A rate for that HSN already starts on that date.',
+};
+
+/** Check-constraint names → plain explanations. */
+const CHECK_MESSAGES: Record<string, string> = {
+  chk_product_prices_values: 'The MRP cannot be lower than the selling price, and neither can be negative.',
+  chk_product_unit_multiplier: 'A unit conversion must be greater than zero.',
+  chk_unit_factor: 'A measured unit needs its size; a pack unit (box, set, reel) must not have one.',
+  chk_unit_code: 'A unit code may only use capital letters, digits and underscores (max 20).',
+  chk_branch_code: 'A branch code is 2–6 capital letters or digits, e.g. AND or PUN1.',
+  chk_transfer_branches: 'The sending and receiving branches must be different.',
+  chk_users_branch_scope: 'Every staff account other than the owner must be assigned to a branch.',
+  chk_stock_adjustment_reason: 'Choose a reason for the stock adjustment.',
+};
+
 const app = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? 'info',
@@ -32,6 +68,19 @@ const app = Fastify({
   },
   trustProxy: true,
   bodyLimit: 2 * 1024 * 1024,
+});
+
+// A POST with a JSON content type and no body (an action button with nothing to
+// send) is an empty object, not an error. Anything that is not valid JSON is a
+// 400 with a plain message.
+// Fastify's default parser is kept for everything else, because it is the one
+// that refuses __proto__ / constructor.prototype keys (prototype poisoning).
+const secureJsonParser = app.getDefaultJsonParser('error', 'error');
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  const text = typeof body === 'string' ? body.trim() : '';
+  if (!text) return done(null, {});
+  // Callback-style: it reports through `done`; its return value carries nothing.
+  void secureJsonParser(req, text, done);
 });
 
 await app.register(helmet, {
@@ -48,7 +97,8 @@ await app.register(cors, {
     cb(null, env.corsOrigins.includes(origin));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Authorization', 'Content-Type'],
+  // X-Branch-Id carries the branch picked in the top bar; the server verifies it.
+  allowedHeaders: ['Authorization', 'Content-Type', 'X-Branch-Id'],
   maxAge: 86400,
 });
 
@@ -68,7 +118,9 @@ await app.register(rateLimit, {
 // Everything a route throws lands here. Known errors keep their message; anything
 // else becomes a generic 500 so a driver error or SQL fragment never reaches a
 // client (and never hints at the schema to someone probing it).
-app.setErrorHandler((err, req, reply) => {
+app.setErrorHandler((thrown, req, reply) => {
+  // Fastify 5 types a thrown value as unknown; everything below inspects it defensively.
+  const err = (thrown instanceof Error ? thrown : new Error(String(thrown))) as Error & Record<string, any>;
   if (err instanceof HttpError) {
     return reply.code(err.statusCode).send({ error: err.message, details: err.details });
   }
@@ -84,13 +136,36 @@ app.setErrorHandler((err, req, reply) => {
   if ((err as any).validation) {
     return reply.code(400).send({ error: 'Invalid request body.' });
   }
+  // Fastify's own client errors (malformed JSON, unsupported media type, body too
+  // large) carry a 4xx status. Reporting them as a 500 blamed the server for a bad
+  // request and hid the actual problem from whoever sent it.
+  const status = Number((err as any).statusCode);
+  if (status >= 400 && status < 500) {
+    const message = status === 413 ? 'That request is too large.'
+      : status === 415 ? 'Send the request as JSON.'
+      : 'The request could not be read. Please try again.';
+    return reply.code(status).send({ error: message });
+  }
   const pgCode = (err as any).code;
-  if (pgCode === '23505') return reply.code(409).send({ error: 'That record already exists.' });
-  if (pgCode === '23503') return reply.code(400).send({ error: 'Referenced record does not exist.' });
-  if (pgCode === '23514') return reply.code(400).send({ error: 'That change is not allowed by a data rule.' });
+  const constraint = String((err as any).constraint ?? '');
+  if (pgCode === '23505') {
+    return reply.code(409).send({ error: UNIQUE_MESSAGES[constraint] ?? 'That record already exists.' });
+  }
+  if (pgCode === '23503') return reply.code(400).send({ error: 'One of the selected records no longer exists. Refresh and try again.' });
+  if (pgCode === '23514') {
+    return reply.code(400).send({ error: CHECK_MESSAGES[constraint] ?? 'That change is not allowed by a data rule.' });
+  }
+  if (pgCode === '23502') return reply.code(400).send({ error: 'A required value is missing.' });
+  if (pgCode === '22P02' || pgCode === '22007' || pgCode === '22008') {
+    return reply.code(400).send({ error: 'One of the values entered is not in a valid format.' });
+  }
+  if (pgCode === '22003') return reply.code(400).send({ error: 'A number entered is too large.' });
+  // Raised by the finalised-invoice guard in the schema. Its message is written
+  // for a person ("Invoice X is FINAL and cannot be altered..."), so it is kept.
+  if (pgCode === '23001') return reply.code(409).send({ error: String(err.message) });
   if (typeof err.message === 'string' && err.message.includes('Negative stock blocked')) {
     return reply.code(409).send({
-      error: 'Not enough stock at this branch. Enable "Allow negative stock" in Admin Settings, or adjust the quantity.',
+      error: 'Not enough stock at this branch for that quantity. Reduce the quantity, receive stock first, or ask a manager to approve it.',
     });
   }
 
@@ -157,16 +232,32 @@ if (process.env.DISABLE_WORKERS !== 'true') {
   // scope this UPDATE matches nothing and holds never expire.
   workers.push(setInterval(() => {
     withSystemScope(async (trx) => {
+      // An estimate lapses when its hold runs out OR when its printed validity date
+      // has passed — the customer was told the price held until then, not after.
+      // One with a bill already being prepared from it is left alone.
       const released = await sql<{ quotation_id: string }>`
-        WITH lapsed AS (
-          UPDATE quotations SET stock_reserved = FALSE, status = 'EXPIRED'
-           WHERE stock_reserved AND reservation_hold_until < now() AND status = 'APPROVED'
-          RETURNING quotation_id, branch_id
+        WITH target AS (
+          -- Read BEFORE the update: UPDATE ... RETURNING reports the new values,
+          -- and only an estimate that was actually holding stock may give any back.
+          SELECT q.quotation_id, q.branch_id, q.stock_reserved AS was_reserved
+            FROM quotations q
+           WHERE q.status IN ('DRAFT', 'APPROVED')
+             AND ((q.stock_reserved AND q.reservation_hold_until < now())
+                  OR (q.valid_until IS NOT NULL AND q.valid_until < CURRENT_DATE))
+             AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.source_quotation_id = q.quotation_id AND i.status = 'DRAFT')
+           FOR UPDATE OF q SKIP LOCKED
+        ), lapsed AS (
+          UPDATE quotations q SET stock_reserved = FALSE, reservation_hold_until = NULL,
+                 status = 'EXPIRED', updated_at = now()
+            FROM target t WHERE q.quotation_id = t.quotation_id
+          RETURNING q.quotation_id
         ), freed AS (
           UPDATE branch_stock bs
-             SET reserved_qty = GREATEST(bs.reserved_qty - ql.qty_base_unit, 0), updated_at = now()
-            FROM quotation_lines ql JOIN lapsed l ON l.quotation_id = ql.quotation_id
-           WHERE bs.product_id = ql.product_id AND bs.branch_id = l.branch_id
+             SET reserved_qty = GREATEST(bs.reserved_qty - ql.qty, 0), updated_at = now()
+            FROM (SELECT t.branch_id, ql.product_id, SUM(ql.qty_base_unit) AS qty
+                    FROM quotation_lines ql JOIN target t ON t.quotation_id = ql.quotation_id AND t.was_reserved
+                   GROUP BY t.branch_id, ql.product_id) ql
+           WHERE bs.product_id = ql.product_id AND bs.branch_id = ql.branch_id
           RETURNING bs.product_id
         )
         SELECT quotation_id FROM lapsed

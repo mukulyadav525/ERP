@@ -16,7 +16,8 @@ export type IconName =
   | 'returns' | 'customers' | 'vendors' | 'expenses' | 'staff' | 'settings'
   | 'search' | 'plus' | 'check' | 'alert' | 'info' | 'close' | 'menu' | 'signout'
   | 'sun' | 'moon' | 'monitor' | 'branch' | 'chevron' | 'inbox' | 'lock'
-  | 'download' | 'print' | 'whatsapp' | 'scan' | 'clock' | 'rupee';
+  | 'download' | 'print' | 'whatsapp' | 'scan' | 'clock' | 'rupee'
+  | 'edit' | 'trash' | 'refresh' | 'calendar' | 'box' | 'truck' | 'receipt';
 
 const PATHS: Record<IconName, React.ReactNode> = {
   dashboard: <><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>,
@@ -52,6 +53,13 @@ const PATHS: Record<IconName, React.ReactNode> = {
   scan: <><path d="M4 8V6a2 2 0 0 1 2-2h2" /><path d="M16 4h2a2 2 0 0 1 2 2v2" /><path d="M20 16v2a2 2 0 0 1-2 2h-2" /><path d="M8 20H6a2 2 0 0 1-2-2v-2" /><path d="M7.5 8.5v7" /><path d="M10.5 8.5v7" /><path d="M13.5 8.5v7" /><path d="M16.5 8.5v7" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5.2l3.2 2" /></>,
   rupee: <><path d="M7 4h10" /><path d="M7 8.5h10" /><path d="M14.5 4c0 3.6-2.4 5.4-6 5.4L15.5 20" /></>,
+  edit: <><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>,
+  trash: <><path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6 7l1 13h10l1-13" /><path d="M10 11v5" /><path d="M14 11v5" /></>,
+  refresh: <><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" /><path d="M4 3v5h5" /><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" /><path d="M20 21v-5h-5" /></>,
+  calendar: <><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M3.5 10h17" /><path d="M8 3v4" /><path d="M16 3v4" /></>,
+  box: <><path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Z" /><path d="M3 7.5 12 12l9-4.5" /><path d="M12 12v9" /></>,
+  truck: <><path d="M2 6h11v10H2z" /><path d="M13 9h4.5L21 12.5V16h-8" /><circle cx="6" cy="18" r="2" /><circle cx="17" cy="18" r="2" /></>,
+  receipt: <><path d="M6 3h12v18l-2.5-1.5L13 21l-1.5-1.5L10 21l-2.5-1.5L5 21V4a1 1 0 0 1 1-1Z" /><path d="M9 8h6" /><path d="M9 12h6" /><path d="M9 16h3" /></>,
 };
 
 /**

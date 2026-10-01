@@ -40,6 +40,15 @@ export const env = {
   resetExpiryMinutes: int('RESET_EXPIRY_MINUTES', 30),
   corsOrigins: (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
     .split(',').map((s) => s.trim()).filter(Boolean),
+  // An IANA zone name. Validated because it is interpolated into the connection
+  // options string: anything but a plain zone name is refused at boot.
+  businessTimezone: (() => {
+    const tz = process.env.BUSINESS_TIMEZONE || 'Asia/Kolkata';
+    if (!/^[A-Za-z_]+(\/[A-Za-z_+-]+)*$/.test(tz)) {
+      throw new Error(`BUSINESS_TIMEZONE must be an IANA zone name such as Asia/Kolkata, got "${tz}"`);
+    }
+    return tz;
+  })(),
   whatsapp: {
     token: process.env.WHATSAPP_CLOUD_API_TOKEN ?? '',
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? '',

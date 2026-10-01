@@ -103,19 +103,23 @@ export function qty(value: unknown): string {
   return Number(n.toFixed(3)).toLocaleString('en-IN', { maximumFractionDigits: 3 });
 }
 
+// Printed dates are the SHOP's dates. Formatting in the process's own zone would
+// print a bill raised at 00:30 IST as the previous day on a server running in UTC.
+const DOC_TZ = process.env.BUSINESS_TIMEZONE || 'Asia/Kolkata';
+
 export function dateOnly(value: unknown): string {
   if (!value) return '—';
   const d = new Date(value as string);
   if (!Number.isFinite(d.getTime())) return '—';
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: DOC_TZ });
 }
 
 export function dateTime(value: unknown): string {
   if (!value) return '—';
   const d = new Date(value as string);
   if (!Number.isFinite(d.getTime())) return '—';
-  return `${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}, ` +
-         `${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
+  return `${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: DOC_TZ })}, ` +
+         `${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: DOC_TZ })}`;
 }
 
 /**
@@ -126,8 +130,9 @@ export function amountInWords(amount: number, currency = 'Rupees'): string {
   const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
     'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
   const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+  // Compound numbers are hyphenated ("Twenty-Nine"), as on a cheque.
   const two = (n: number): string =>
-    n < 20 ? ones[n] : `${tens[Math.floor(n / 10)]}${n % 10 ? ' ' + ones[n % 10] : ''}`;
+    n < 20 ? ones[n] : `${tens[Math.floor(n / 10)]}${n % 10 ? '-' + ones[n % 10] : ''}`;
   const three = (n: number): string =>
     n >= 100 ? `${ones[Math.floor(n / 100)]} Hundred${n % 100 ? ' ' + two(n % 100) : ''}` : two(n);
 
@@ -141,19 +146,22 @@ export function amountInWords(amount: number, currency = 'Rupees'): string {
   const carried = paise === 100 ? rupees + 1 : rupees;
   const realPaise = paise === 100 ? 0 : paise;
 
-  if (carried === 0 && realPaise === 0) return `Zero ${currency} Only`;
+  if (carried === 0 && realPaise === 0) return `${currency} Zero Only`;
 
   const parts: string[] = [];
+  // Crores above 99 are themselves spelled in the Indian system ("One Hundred
+  // Crore", "Twelve Thousand Crore") rather than falling off the end of a table.
   const crore = Math.floor(carried / 10_000_000);
   const lakh = Math.floor((carried % 10_000_000) / 100_000);
   const thousand = Math.floor((carried % 100_000) / 1000);
   const rest = carried % 1000;
-  if (crore) parts.push(`${three(crore)} Crore`);
+  if (crore) parts.push(`${crore >= 1000 ? amountInWords(crore, '').replace(/ Only$/, '').trim() : three(crore)} Crore`);
   if (lakh) parts.push(`${three(lakh)} Lakh`);
   if (thousand) parts.push(`${three(thousand)} Thousand`);
   if (rest) parts.push(three(rest));
 
-  let out = parts.length ? `${parts.join(' ')} ${currency}` : `Zero ${currency}`;
+  // "Rupees One Thousand Two Hundred Twenty-Nine and Fifty Paise Only".
+  let out = parts.length ? `${currency} ${parts.join(' ')}` : `${currency} Zero`;
   if (realPaise) out += ` and ${two(realPaise)} Paise`;
-  return `${negative ? 'Minus ' : ''}${out} Only`;
+  return `${negative ? 'Minus ' : ''}${out.trim()} Only`;
 }

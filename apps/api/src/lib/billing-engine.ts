@@ -22,10 +22,11 @@ import { badRequest } from './errors.js';
 import { num, oneOf, optionalUuid, uuid } from './http.js';
 import { computeLine, round2, totalInvoice, type ComputedLine, type InvoiceTotals } from './tax.js';
 import type { SETTING_DEFAULTS } from './settings.js';
+import { assertQuantityAllowed } from './units.js';
 
 export const PRICE_TYPES = ['TAX_INCLUSIVE', 'TAX_EXCLUSIVE'] as const;
 export const INVOICE_TYPES = ['GST', 'NON_GST'] as const;
-export const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS'] as const;
+export const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER', 'CREDIT', 'LOYALTY_POINTS'] as const;
 
 export type InvoiceType = (typeof INVOICE_TYPES)[number];
 export type PriceType = (typeof PRICE_TYPES)[number];
@@ -46,7 +47,13 @@ export interface PreparedLine {
   product_name: string;
   hsn_code: string | null;
   gst_rate_pct: number;
+  /** Unit code of the sale unit ('100G', 'BOX') and what a document prints for it ('100 G'). */
   unit_label: string | null;
+  unit_print_label: string | null;
+  multiplier_to_base: number;
+  base_unit: string;
+  /** Price of ONE sale unit — what a bill shows in its Rate column. */
+  rate_per_sale_unit: number;
 }
 
 export interface PricedBasket {
@@ -109,42 +116,81 @@ export async function priceBasket(trx: Tx, opts: {
 
   const prepared: PreparedLine[] = [];
 
-  for (const raw of rawLines) {
-    const productId = uuid(raw.product_id, 'lines[].product_id');
+  // Validate every line's identifiers first, then read the catalog for the whole
+  // basket in ONE query — a 100-line contractor bill used to cost 100 round trips
+  // on every draft save.
+  const parsed = rawLines.map((raw, i) => {
+    const n = rawLines.length > 1 ? ` (line ${i + 1})` : '';
     // The ceiling is an overflow guard tied to the column width — base_unit_qty is
     // NUMERIC(14,4), so a quantity times its unit multiplier has to stay inside
     // that or the insert dies with a numeric-overflow 500 instead of a useful
     // message. It is deliberately far above any real basket, so that an ordinary
     // "more than we have" quantity still reaches the stock check and gets the
     // answer a cashier can act on ("not enough stock") rather than a range error.
-    const qty = num(raw.qty_in_sale_unit, 'lines[].qty_in_sale_unit', { min: 0.0001, max: 1e9 });
-    const productUnitId = optionalUuid(raw.product_unit_id, 'lines[].product_unit_id');
+    const qtyRaw = typeof raw.qty_in_sale_unit === 'string' ? Number(raw.qty_in_sale_unit) : raw.qty_in_sale_unit;
+    if (typeof qtyRaw !== 'number' || !Number.isFinite(qtyRaw) || qtyRaw <= 0) {
+      throw badRequest(`Quantity must be greater than zero${n}.`);
+    }
+    if (qtyRaw > 1e9) throw badRequest(`Quantity is too large${n}.`);
+    return {
+      raw,
+      productId: uuid(raw.product_id, `Product${n}`),
+      productUnitId: optionalUuid(raw.product_unit_id, `Unit${n}`),
+      qty: qtyRaw,
+    };
+  });
+  const productIds = [...new Set(parsed.map((p) => p.productId))];
+  const catalog = new Map((await sql<any>`
+    SELECT p.product_id, p.name, p.base_unit, p.hsn_code, p.default_price_type, p.is_active,
+           p.batch_tracked, p.serial_tracked,
+           pp.selling_price,
+           COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+           (SELECT jsonb_object_agg(pu.product_unit_id::text, jsonb_build_object(
+                     'unit_code', pu.unit_label, 'multiplier', pu.multiplier_to_base,
+                     'print_label', u.print_label, 'name', u.name,
+                     'allows_fraction', u.allows_fraction))
+              FROM product_units pu JOIN units u ON u.unit_code = pu.unit_label
+             WHERE pu.product_id = p.product_id) AS units
+      FROM products p
+      LEFT JOIN LATERAL (
+          SELECT selling_price FROM product_prices
+           WHERE product_id = p.product_id AND effective_to IS NULL
+           ORDER BY (branch_id = ${branchId}) DESC NULLS LAST LIMIT 1
+      ) pp ON TRUE
+      LEFT JOIN LATERAL (
+          SELECT gst_rate_pct FROM hsn_tax_rates
+           WHERE hsn_code = p.hsn_code
+             AND daterange(effective_from, effective_to, '[)') @> ${asOf}::date
+           LIMIT 1
+      ) htr ON TRUE
+     WHERE p.product_id = ANY(${productIds}::uuid[])
+  `.execute(trx)).rows.map((r: any) => [r.product_id, r]));
 
-    const product = (await sql<any>`
-      SELECT p.product_id, p.name, p.base_unit, p.hsn_code, p.default_price_type,
-             p.batch_tracked, p.serial_tracked,
-             COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
-             COALESCE(pu.product_unit_id, defu.product_unit_id) AS resolved_unit_id,
-             COALESCE(pu.unit_label, defu.unit_label, p.base_unit::text) AS unit_label,
-             pp.selling_price,
-             COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct
-        FROM products p
-        LEFT JOIN product_units pu ON pu.product_unit_id = ${productUnitId} AND pu.product_id = p.product_id
-        LEFT JOIN product_units defu ON defu.product_id = p.product_id AND defu.is_default_sale_unit
-        LEFT JOIN LATERAL (
-            SELECT selling_price FROM product_prices
-             WHERE product_id = p.product_id AND effective_to IS NULL
-             ORDER BY (branch_id = ${branchId}) DESC NULLS LAST LIMIT 1
-        ) pp ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT gst_rate_pct FROM hsn_tax_rates
-             WHERE hsn_code = p.hsn_code
-               AND daterange(effective_from, effective_to, '[)') @> ${asOf}::date
-             LIMIT 1
-        ) htr ON TRUE
-       WHERE p.product_id = ${productId} AND p.is_active
-    `.execute(trx)).rows[0];
-    if (!product) throw badRequest('One of the items is no longer in the catalog. Remove it and try again.');
+  for (const { raw, productId, productUnitId, qty } of parsed) {
+    const product = catalog.get(productId);
+    if (!product || !product.is_active) {
+      throw badRequest(`${product ? `"${product.name}" has been deactivated` : 'One of the items is no longer in the catalog'}. Remove it and try again.`);
+    }
+
+    // 2.2.1 — which unit this quantity is in. A line that names no unit is in the
+    // BASE unit (multiplier 1), and the stored unit is the base unit's row, so the
+    // unit on the bill and the arithmetic behind it can never disagree. A named
+    // unit must belong to THIS product.
+    const units = (product.units ?? {}) as Record<string, { unit_code: string; multiplier: string; print_label: string; name: string; allows_fraction: boolean }>;
+    let unitId: string | null;
+    if (productUnitId) {
+      if (!units[productUnitId]) throw badRequest(`That unit is not set up for "${product.name}".`);
+      unitId = productUnitId;
+    } else {
+      unitId = Object.entries(units).find(([, u]) => u.unit_code === product.base_unit)?.[0] ?? null;
+    }
+    const unit = unitId ? units[unitId] : null;
+    const multiplier = unit ? Number(unit.multiplier) : 1;
+    assertQuantityAllowed(qty, {
+      allows_fraction: unit ? unit.allows_fraction : true,
+      name: unit?.name ?? product.base_unit,
+      print_label: unit?.print_label ?? product.base_unit,
+    }, product.name);
 
     // 3.9 — a barcode is a speed option, never mandatory, unless the owner turned
     // that on for this branch.
@@ -164,45 +210,64 @@ export async function priceBasket(trx: Tx, opts: {
     // price is a discount by another name, and if it were not counted as one,
     // posting rate: 1 would bypass the 3.4 ceiling entirely and leave no audit
     // trail. The shortfall is folded into the line's implied discount below.
-    const lockedRate = repriceFromCatalog || raw.rate_locked_at_scan === undefined
-      ? catalogRate
-      : num(raw.rate_locked_at_scan, 'lines[].rate_locked_at_scan', { min: 0, max: 10_000_000 });
-
-    const priceType = oneOf(raw.price_type ?? product.default_price_type, 'lines[].price_type', PRICE_TYPES);
+    const priceType = oneOf(raw.price_type ?? product.default_price_type, 'Price type', PRICE_TYPES);
     // A NON_GST invoice charges no GST even when the product carries a rate — a
     // bill of supply that shows tax is a compliance problem, not a rounding one.
     const gstRate = invoiceType === 'NON_GST' ? 0 : Number(product.gst_rate_pct);
 
+    // The catalog price expressed on THIS line's basis. A line priced tax-exclusive
+    // (a contractor estimate) against a tax-inclusive catalog price has to be
+    // compared ex-GST, or ₹100 incl. against ₹90 excl. reads as a 10% discount when
+    // the customer is in fact paying ₹106.20.
+    const catalogBasis = priceType === product.default_price_type || gstRate === 0
+      ? catalogRate
+      : priceType === 'TAX_EXCLUSIVE'
+        ? Math.round((catalogRate / (1 + gstRate / 100)) * 10000) / 10000
+        : Math.round(catalogRate * (1 + gstRate / 100) * 10000) / 10000;
+
+    const lockedRate = repriceFromCatalog || raw.rate_locked_at_scan === undefined || raw.rate_locked_at_scan === null
+      ? catalogBasis
+      : Math.round(num(raw.rate_locked_at_scan, `Rate for "${product.name}"`, { min: 0, max: 10_000_000 }) * 10000) / 10000;
+
     const computed = computeLine({
       qty_in_sale_unit: qty,
-      multiplier_to_base: Number(product.multiplier_to_base),
+      multiplier_to_base: multiplier,
       rate_per_base_unit: lockedRate,
       gst_rate_pct: gstRate,
       price_type: priceType,
-      discount_amount: raw.discount_amount === undefined
+      discount_amount: raw.discount_amount === undefined || raw.discount_amount === null
         ? 0
-        : num(raw.discount_amount, 'lines[].discount_amount', { min: 0, max: 10_000_000 }),
+        : num(raw.discount_amount, `Discount on "${product.name}"`, { min: 0, max: 10_000_000 }),
       interstate,
     }, Number(settings.fractional_unit_rounding_dp));
 
+    const typedDiscount = Number(raw.discount_amount ?? 0);
+    if (typedDiscount > computed.gross + 0.001) {
+      throw badRequest(`The discount on "${product.name}" (₹${typedDiscount.toFixed(2)}) is more than the line value (₹${computed.gross.toFixed(2)}).`);
+    }
+
     prepared.push({
       product_id: productId,
-      product_unit_id: product.resolved_unit_id ?? null,
+      product_unit_id: unitId,
       qty_in_sale_unit: qty,
       computed,
       price_type: priceType,
       rate_locked_at_scan: lockedRate,
-      catalog_rate: catalogRate,
+      catalog_rate: catalogBasis,
       implied_discount: round2(
-        Math.max(catalogRate - lockedRate, 0) * computed.base_unit_qty + computed.discount_amount,
+        Math.max(catalogBasis - lockedRate, 0) * computed.base_unit_qty + computed.discount_amount,
       ),
-      batch_id: optionalUuid(raw.batch_id, 'lines[].batch_id'),
+      batch_id: optionalUuid(raw.batch_id, 'Batch'),
       tint: (raw.tint as PreparedLine['tint']) ?? null,
       serials: Array.isArray(raw.serial_numbers) ? raw.serial_numbers.map(String) : [],
       product_name: product.name,
       hsn_code: product.hsn_code ?? null,
       gst_rate_pct: gstRate,
-      unit_label: product.unit_label ?? null,
+      unit_label: unit?.unit_code ?? product.base_unit,
+      unit_print_label: unit?.print_label ?? product.base_unit,
+      multiplier_to_base: multiplier,
+      base_unit: product.base_unit,
+      rate_per_sale_unit: round2(lockedRate * multiplier),
     });
   }
 

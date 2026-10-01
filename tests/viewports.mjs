@@ -131,9 +131,13 @@ for (const theme of ['light', 'dark']) {
 console.log(`\n${C.b}Billing on a phone${C.x}`);
 await page.setViewportSize({ width: 375, height: 720 });
 await page.goto(`${WEB}/billing`, { waitUntil: 'networkidle' });
-await page.waitForTimeout(400);
+// A bill is made at one branch: the owner picks one first (on "All branches" the
+// screen asks for a branch instead of showing the bill).
+const branchSel = page.locator('select.branch-select').first();
+if (await branchSel.count()) await branchSel.selectOption({ index: 1 });
+await page.waitForTimeout(900);
 for (const [label, sel] of [
-  ['the item scan box', '.content input[type=search]'],
+  ['the item scan box', '.content input[aria-label="Search or scan an item"]'],
   ['the GST / non-GST selector', '.content .segmented'],
   ['a primary action', '.content .btn.primary, .content button.btn'],
 ]) {

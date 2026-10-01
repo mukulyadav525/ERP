@@ -139,41 +139,63 @@ try {
       });
       const rows = await res.json();
       return rows.filter((p) => Number(p.available_qty ?? 0) > 5 && Number(p.selling_price) > 0)
-                 .slice(0, 2).map((p) => p.name);
+                 .slice(0, 2).map((p) => ({ name: p.name, sku: p.sku }));
     });
-    check('the branch has stocked items to bill', stocked.length > 0, stocked.join(', '));
+    check('the branch has stocked items to bill', stocked.length > 0, stocked.map((p) => p.name).join(', '));
 
-    // Fuzzy search is doing its job, so the top hit for "Asian Paints Emul" may be
-    // a near neighbour that happens to be out of stock. Pick the way a cashier
-    // would: the first result that is not marked out of stock.
-    const search = page.locator('.card', { hasText: 'Find an item' }).locator('input');
+    // The item search is one combobox that keeps focus. Typing goes into it, the
+    // results appear in a listbox, ↓ / Enter pick one, and focus comes straight
+    // back to the search for the next item — no mouse at any point.
+    const search = page.locator('input[aria-label="Search or scan an item"]');
+    check('the item search has focus when the bill opens',
+      await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) === 'Search or scan an item');
     let added = 0;
-    for (const name of stocked.slice(0, 2)) {
-      await search.fill(name.slice(0, 18));
-      await page.waitForTimeout(1000);
-      const results = page.locator('.card', { hasText: 'Find an item' }).locator('button');
-      const n = await results.count();
-      for (let i = 0; i < n; i += 1) {
-        const txt = await results.nth(i).innerText();
-        if (/Out of stock/i.test(txt)) continue;
-        await results.nth(i).click();
-        await page.waitForTimeout(500);
-        added += 1;
-        break;
+    let focusKept = true;
+    for (const item of stocked.slice(0, 2)) {
+      await search.click();
+      // Type slowly, the way a person does, while searches are in flight: the
+      // field must keep focus and keep every character. The SKU is typed, so the
+      // two items are certainly different products (names can share a prefix).
+      const term = item.sku;
+      for (const ch of term) {
+        await page.keyboard.type(ch, { delay: 60 });
+        const state = await page.evaluate(() => ({ label: document.activeElement?.getAttribute('aria-label'), value: (document.activeElement)?.value }));
+        if (state.label !== 'Search or scan an item') focusKept = false;
       }
+      if ((await search.inputValue()) !== term) focusKept = false;
+      await page.waitForSelector('[role=listbox] [role=option]', { timeout: 10_000 });
+      await page.waitForTimeout(600);
+      const options = await page.locator('[role=listbox] [role=option]').allInnerTexts();
+      const idx = options.findIndex((t) => !/Out of stock/i.test(t));
+      if (idx < 0) continue;
+      for (let i = 0; i < idx; i += 1) await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(600);
+      added += 1;
     }
-    check('in-stock items can be added to the cart', added > 0, `${added} added`);
+    check('typing in the item search never loses focus or characters', focusKept);
+    check('in-stock items can be added with the keyboard', added > 0, `${added} added`);
+    check('focus returns to the search after adding an item',
+      await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) === 'Search or scan an item');
+    const lines = await page.locator('table.pos-lines tbody tr').count();
+    check('the added items are on the bill', lines === added, `${lines} line(s)`);
 
-    const reviewBtn = page.locator('button:has-text("Review bill")');
-    check('the cart offers a Review step', await reviewBtn.isVisible());
-    await reviewBtn.click();
-    await page.waitForTimeout(2000);
+    // Escape closes an open result list without clearing the bill.
+    await search.fill('putty');
+    await page.waitForSelector('[role=listbox] [role=option]', { timeout: 10_000 });
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    check('Escape closes the result list', (await page.locator('[role=listbox]').count()) === 0);
+    await search.fill('');
 
+    // Ctrl/Cmd + S saves the draft and opens the review.
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s');
+    await page.waitForTimeout(2200);
     let body = await page.locator('body').innerText();
-    check('the review screen opens', /Total payable/.test(body));
+    check('Ctrl/Cmd + S opens the review', /Total payable/.test(body));
     check('it offers Edit bill', /Edit bill/.test(body));
     check('it offers Finalise', /Finalise/.test(body));
-    check('it says the bill is not yet a tax invoice', /not a tax invoice|Not a tax invoice/i.test(body));
+    check('it says the bill is not yet a tax invoice', /not a tax invoice/i.test(body));
 
     // The figure on the review screen must be the server's.
     const totalText = (body.match(/Total payable\s*\n?\s*₹?\s*([\d,]+\.?\d*)/) ?? [])[1];
@@ -182,8 +204,8 @@ try {
     // Edit → back to the cart, then review again.
     await page.click('button:has-text("Edit bill")');
     await page.waitForTimeout(800);
-    body = await page.locator('body').innerText();
-    check('Edit bill returns to the cart', /Find an item/.test(body));
+    check('Edit bill returns to the cart with the items kept',
+      (await page.locator('table.pos-lines tbody tr').count()) === added);
 
     await page.locator('button:has-text("Review bill")').click();
     await page.waitForTimeout(1800);
@@ -192,9 +214,81 @@ try {
     await page.click('button:has-text("Finalise")');
     await page.waitForTimeout(2500);
     body = await page.locator('body').innerText();
-    const finalised = /Sale complete|Bill .* created|INV-/.test(body);
-    check('finalising produces an invoice', finalised, finalised ? '' : body.slice(0, 160).replace(/\n/g, ' '));
+    const finalised = /Sale complete/.test(body) && /INV-[A-Z0-9]+\/\d{4}-\d{2}\/\d{5}/.test(body);
+    check('finalising produces a numbered invoice', finalised, finalised ? '' : body.slice(0, 160).replace(/\n/g, ' '));
+    check('the receipt offers print, PDF and WhatsApp', /Print/.test(body) && /Download PDF/.test(body));
     check('no console errors through the whole flow', errs.length === 0, errs.slice(0, 2).join(' | '));
+    await ctx.close();
+  }
+
+  // ── Offline billing: a sale made with no connection syncs once it returns ───
+  section('Offline billing');
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 950 } });
+    const page = await ctx.newPage();
+    await login(page, { email: 'sunita@hardwareerp.in', password: 'Manager@12345' });
+    await page.goto(`${WEB}/billing`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    const sku = await page.evaluate(async () => {
+      const token = localStorage.getItem('erp_auth_token');
+      const rows = await (await fetch('http://localhost:4000/api/catalog/products?limit=80', { headers: { Authorization: `Bearer ${token}` } })).json();
+      return rows.find((p) => Number(p.available_qty ?? 0) > 20 && Number(p.selling_price) > 0 && p.base_unit === 'PIECE')?.sku;
+    });
+    const before = await page.evaluate(async () => {
+      const token = localStorage.getItem('erp_auth_token');
+      const r = await (await fetch('http://localhost:4000/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json();
+      return r[0]?.invoice_number ?? null;
+    });
+    const search = page.locator('input[aria-label="Search or scan an item"]');
+    await search.fill(sku);
+    await page.waitForSelector('[role=listbox] [role=option]', { timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(600);
+    await ctx.setOffline(true);
+    await page.click('button:has-text("Complete sale")');
+    await page.waitForTimeout(1500);
+    const queued = await page.evaluate(() => JSON.parse(localStorage.getItem('erp_offline_bills') || '[]').length);
+    check('with no connection the sale is saved on the device, not lost', queued === 1, `${queued} queued`);
+    check('the cashier is told it is saved offline', /Saved offline/i.test(await page.locator('body').innerText()));
+    check('the bill is cleared for the next customer', (await page.locator('table.pos-lines tbody tr').count()) === 0);
+    await ctx.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.waitForTimeout(3500);
+    const left = await page.evaluate(() => JSON.parse(localStorage.getItem('erp_offline_bills') || '[]').length);
+    check('when the connection returns the queued sale uploads', left === 0, `${left} still queued`);
+    const after = await page.evaluate(async () => {
+      const token = localStorage.getItem('erp_auth_token');
+      return (await (await fetch('http://localhost:4000/api/billing/invoices?limit=3', { headers: { Authorization: `Bearer ${token}` } })).json()).map((r) => r.invoice_number);
+    });
+    check('it became exactly one new invoice', after[0] !== before && after[1] === before, `${before} → ${after.slice(0, 2).join(', ')}`);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.waitForTimeout(1500);
+    const again = await page.evaluate(async () => {
+      const token = localStorage.getItem('erp_auth_token');
+      return (await (await fetch('http://localhost:4000/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json())[0].invoice_number;
+    });
+    check('reconnecting again does not bill it twice', again === after[0]);
+    await ctx.close();
+  }
+
+  // ── Owner on "All branches" must pick a branch before billing ───────────────
+  section('Branch context for a transaction');
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    const page = await ctx.newPage();
+    const errs = watch(page);
+    await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
+    await page.evaluate(() => localStorage.removeItem('erp_active_branch'));
+    await page.goto(`${WEB}/billing`, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(900);
+    const sel = page.locator('select.branch-select').first();
+    if (await sel.count()) { await sel.selectOption({ label: 'All branches' }); await page.waitForTimeout(900); }
+    const body = await page.locator('body').innerText();
+    check('the owner on All branches is asked to choose a branch for the bill', /Please select a branch for this bill/i.test(body),
+      body.slice(0, 160).replace(/\n/g, ' '));
+    check('no internal error text is shown', !/branch_id is required|stack|TypeError/i.test(body));
+    check('no console errors', errs.length === 0, errs.slice(0, 2).join(' | '));
     await ctx.close();
   }
 

@@ -279,3 +279,67 @@ Everything in section E remains true. In particular: WhatsApp is a share link an
 a queue with a stub transport, not a delivered message — the post-sale screen now
 says so in as many words rather than leaving the cashier to assume the PDF went
 with it. Backups are not configured; that is a deployment task, not a code defect.
+
+---
+
+## Final master pass
+
+A further end-to-end pass against the final product specification. Every item below was
+reproduced against a running system, fixed, and is now covered by `tests/final-pass.mjs`,
+`tests/working-day.mjs`, `tests/uitest.mjs` or `tests/viewports.mjs`.
+
+### Defects fixed
+
+| Area | Defect | Fix |
+|---|---|---|
+| Branch context | The Owner on "All branches" got `branch_id is required` when billing | The branch picked in the top bar is sent as `X-Branch-Id` and verified; "All branches" is never a transaction branch and the screen asks for a branch in plain words |
+| Branch access | A person could work at one branch only | `user_branch_access`: a home branch plus granted branches, switched per request and verified before row-level security is scoped |
+| Numbering | Two branches could print the same document number | Every series carries the branch code: `INV-AND/2026-27/00001` |
+| Units | 100 G, 250 G and KG were ad hoc | A units master (count, mass, length, volume, area, pack); measured conversions are derived, pack sizes stated per product; whole-number units refuse fractions |
+| Billing | An estimate "converted to invoice" was billed as fully paid in cash | Conversion opens a draft bill to review, take payment and finalise |
+| Billing | A finalised invoice could be altered by the database role the API uses | A trigger freezes every financial column of a FINAL invoice; only FINAL → VOID is allowed |
+| Billing | Place of supply ignored the customer's state | IGST for an out-of-state GST customer, CGST + SGST otherwise |
+| Payments | No bank transfer; customer receipts were bare ledger entries | Numbered receipts with method and reference, idempotent, cash reaching the till; overpayment refused unless taken as an advance |
+| Purchases | Purchase bills had no GST, discount, supplier bill number or partial PO receipt | Full purchase bill: units, ex-GST rate, discount, CGST/SGST or IGST by supplier state, round-off, duplicate supplier bill refused, partial deliveries keep the PO open |
+| Payables | Supplier payments were not vouchers; per-bill dues ignored debit notes and on-account payments | Numbered vouchers with method and reference; bill dues applied oldest-first (`erp_vendor_bill_dues`) |
+| Receivables | Ageing ran from the first credit sale ever made | Ageing from the oldest charge still unpaid after payments are applied oldest-first (`erp_customer_dues`) |
+| Returns | A walk-in could be "refunded" to store credit that went nowhere | Refused in plain words; credit notes have their own PDF |
+| Stock | No opening stock or numbered adjustments; transfers unnumbered and uncancellable | Numbered adjustments with reasons and cost; numbered transfers that can be cancelled before dispatch |
+| Reports | Sales totals ignored round-off; dashboard periods fixed at 30 days; "today" compared with all of yesterday | Round-off included; period picker on dashboard and reports; today is compared with yesterday up to the same time |
+| Dates | "Today" was the UTC date | The business day is Asia/Kolkata (configurable) in the database, API and browser |
+| WhatsApp | Every bill and return was queued to the customer automatically; with no credentials, messages were marked **SENT** | Nothing is sent unless a person chooses to (an opt-in setting covers automatic bills); undeliverable messages are `NOT_CONFIGURED`, never SENT; the seed no longer invents delivery history |
+| Backups | The seed invented backup history; the API could record a backup that was never taken | `npm run backup` records only a verified dump; `npm run backup:restore-test` restores into a scratch database and checks integrity; the API is read-only |
+| Demo data | Fractional stock for counted items, stock that did not equal its ledger, credit sales to walk-ins and to customers with no credit line, bills and purchases dated later today, document numbers in a different format from live ones | All corrected; the ledger equals stock for every item, and history uses the live numbering |
+| Offline | When the connection returned, the service worker reloaded the page — throwing away a bill being typed | Reload-on-reconnect turned off; queued sales upload in place, exactly once |
+| Security | Guide links accepted any URL (`javascript:`); CSV exports could carry spreadsheet formulas | Links restricted to site paths and https; formula-leading cells neutralised |
+| Dependencies | Fastify 4, Kysely 0.27 and Next 14 carried published advisories (one critical) | Fastify 5.12.5, Kysely 0.28.17, Next 15.5.24, patched PostCSS and serialize-javascript: `npm audit` reports 0 vulnerabilities |
+
+### Front end rebuilt for the specification
+
+Billing (keyboard-first, units per line, review before finalise, drafts, split payments,
+post-sale print/PDF/WhatsApp, till with cash receipts), catalog (product editor with units,
+barcodes, price history; categories, brands, units and GST-rate masters; CSV import),
+inventory (purchase bills, purchase orders, adjustments, transfers, stock take, movement
+log), customers and vendors (profiles, statements, receipts and payments), estimates,
+returns, expenses, dashboard, reports (sales, profit, GST, registers, stock, tills, staff)
+and admin (users with branch access, branches, audit filters, honest backup status).
+Every searchable field is one combobox that keeps focus while results load; a dialog takes
+the whole screen on a phone.
+
+### Evidence (fresh database, in order)
+
+| Check | Result |
+|---|---|
+| `npm run typecheck`, `npm run lint`, `npm run build` | pass |
+| tax properties / smoke / regression / workflows / final pass / working day | 20 / 274 / 76 / 71 / 121 / 140 — all pass |
+| PDF matrix + geometry | 13 documents, no clipping or overlap |
+| Browser (Chrome) / responsive sweep | 90 / 35 — all pass, including an offline sale that syncs exactly once |
+| `npm run backup` + `npm run backup:restore-test` | verified dump; restore passes with 0 stock, balance or numbering mismatches |
+| `npm audit` | 0 vulnerabilities |
+| Clean install (`schema.sql` + `create-owner`, no seed) | owner signs in, creates a branch, GST rate and product; every list endpoint answers on an empty database |
+
+### Still open
+
+* Hindi covers the navigation and core labels; most of the new screens' text is English.
+* There are no incremental migrations; upgrading an existing database needs a written migration.
+* Inter-branch transfer GST treatment (intrastate vs interstate documents) needs the CA's confirmation.

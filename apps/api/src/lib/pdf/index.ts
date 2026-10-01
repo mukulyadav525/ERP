@@ -20,7 +20,8 @@ import { loadBusinessProfile } from './business-profile.js';
 import {
   renderDocument, type DocumentLine, type DocumentModel, type DocumentParty,
 } from './renderer.js';
-import { dateOnly, dateTime } from './theme.js';
+import { dateOnly, dateTime, qty } from './theme.js';
+import { GST_STATES } from '../units.js';
 
 export { loadBusinessProfile, normaliseProfile, DEFAULT_BUSINESS_PROFILE, BUSINESS_PROFILE_SETTING }
   from './business-profile.js';
@@ -38,26 +39,51 @@ function customerParty(row: Record<string, any>): DocumentParty | null {
     address: row.customer_address ?? null,
     phone: row.customer_phone ?? null,
     gstin: row.customer_gstin ?? null,
-    state: row.customer_state ?? null,
+    state: row.customer_state ?? (row.customer_state_code ? GST_STATES[String(row.customer_state_code)] ?? null : null),
     state_code: row.customer_state_code ?? row.place_of_supply_state_code ?? null,
   };
+}
+
+/** A delivery address that differs from the billing address is its own box. */
+function deliveryParty(row: Record<string, any>): DocumentParty | null {
+  if (!row.place_of_delivery) return null;
+  return { name: row.customer_company ?? row.customer_name ?? 'Delivery', address: String(row.place_of_delivery) };
+}
+
+/** "27" → "27 - Maharashtra", so a place of supply reads as a place. */
+export function stateLabel(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const name = GST_STATES[String(code).padStart(2, '0')];
+  return name ? `${String(code).padStart(2, '0')} - ${name}` : String(code);
 }
 
 function toLines(rows: Array<Record<string, any>>): DocumentLine[] {
   return rows.map((l) => {
     const notes: string[] = [];
+    // A pack unit's size is product-specific, so the bill says what one holds:
+    // "1 BOX = 100 PCS". A measured unit (100 G, KG) needs no explanation.
+    if (l.unit_dimension === 'PACK' && Number(l.multiplier_to_base) > 0 && l.base_unit_label) {
+      notes.push(`1 ${l.unit_print_label ?? l.unit_label} = ${qty(Number(l.multiplier_to_base))} ${l.base_unit_label}`);
+    }
     if (l.base_shade || l.tint_formula) {
       notes.push(`Tint: ${[l.base_shade, l.tint_formula].filter(Boolean).join(' / ')}`);
     }
     if (l.batch_number) notes.push(`Batch ${l.batch_number}`);
     if (l.serial_numbers) notes.push(`Sr. ${l.serial_numbers}`);
+    // The Rate column is the price of ONE of the units in the Qty column. The
+    // stored rate is per BASE unit (2.2.1), so a line of 2 BOX of 100 screws at
+    // ₹1.30 a screw prints ₹130.00 a box — not ₹1.30 against a quantity of 2.
+    const multiplier = Number(l.multiplier_to_base ?? 1) || 1;
+    const perSaleUnit = l.rate_per_sale_unit !== undefined && l.rate_per_sale_unit !== null
+      ? asNum(l.rate_per_sale_unit)
+      : round2(asNum(l.rate_locked_at_scan ?? l.rate) * multiplier);
     return {
       description: l.product_name ?? 'Item',
       sku: l.sku ?? null,
       hsn_code: l.hsn_code ?? null,
-      unit_label: l.unit_label ?? null,
+      unit_label: l.unit_print_label ?? l.unit_label ?? null,
       qty: asNum(l.qty_in_sale_unit),
-      rate: asNum(l.rate_locked_at_scan ?? l.rate),
+      rate: perSaleUnit,
       discount_amount: asNum(l.discount_amount),
       taxable_value: asNum(l.taxable_value),
       gst_rate_pct: l.gst_rate_pct === undefined || l.gst_rate_pct === null
@@ -119,10 +145,11 @@ export async function buildInvoicePdf(
   // which is exactly the confusion a bill of supply exists to avoid.
   if (isGst) {
     if (invoice.place_of_supply_state_code) {
-      meta.push(['Place of Supply', String(invoice.place_of_supply_state_code)]);
+      meta.push(['Place of Supply', stateLabel(invoice.place_of_supply_state_code) ?? String(invoice.place_of_supply_state_code)]);
     }
     meta.push(['Supply Type', interstate ? 'Inter-state (IGST)' : 'Intra-state (CGST + SGST)']);
   }
+  if (invoice.quotation_number) meta.push(['Against Estimate', String(invoice.quotation_number)]);
   if (invoice.sold_by_name) meta.push(['Served by', String(invoice.sold_by_name)]);
 
   const model: DocumentModel = {
@@ -132,6 +159,7 @@ export async function buildInvoicePdf(
       : (isGst ? 'TAX INVOICE' : 'CASH MEMO / BILL OF SUPPLY'),
     business,
     billTo: customerParty(invoice),
+    shipTo: deliveryParty(invoice),
     meta,
     lines,
     totals: {
@@ -215,6 +243,8 @@ export async function buildEstimatePdf(
     watermark: ['CANCELLED', 'EXPIRED', 'REJECTED'].includes(String(quotation.status)) ? String(quotation.status) : null,
     notes: quotation.notes ?? null,
     extraTerms: [
+      // Terms typed on this estimate come first; the standing ones follow.
+      ...String(quotation.terms ?? '').split(/\r?\n/).map((t) => t.trim()).filter(Boolean).slice(0, 6),
       quotation.valid_until
         ? `This estimate is valid until ${dateOnly(quotation.valid_until)}.`
         : 'This estimate is valid for 7 days unless stated otherwise.',
@@ -234,4 +264,49 @@ export async function generateInvoicePdf(
   trx: Tx, invoice: Record<string, any>, lines: Array<Record<string, any>>, payments: Array<Record<string, any>> = [],
 ): Promise<Buffer> {
   return buildInvoicePdf(trx, invoice, lines, payments);
+}
+
+/**
+ * The GST credit note (12.1.1). Printed from the credit note's own rows — its
+ * lines carry the proportional taxable value and tax computed when the return
+ * was processed — so the paper and GSTR-1 agree.
+ */
+export async function buildCreditNotePdf(
+  trx: Tx,
+  note: Record<string, any>,
+  lineRows: Array<Record<string, any>>,
+): Promise<Buffer> {
+  const business = await loadBusinessProfile(trx, note.branch_id, {
+    name: note.branch_name, address: note.branch_address, phone: note.branch_phone,
+    gstin: note.branch_gstin, state_code: note.branch_state_code,
+  });
+  const interstate = lineRows.some((l) => asNum(l.igst_amount) > 0);
+  const lines = toLines(lineRows);
+  const sum = (k: string) => round2(lineRows.reduce((s, l) => s + asNum(l[k]), 0));
+  const meta: Array<[string, string]> = [
+    ['Credit Note No.', note.credit_note_number ?? '—'],
+    ['Date', dateTime(note.created_at)],
+    ['Against Invoice', String(note.invoice_number ?? '—')],
+    ['Invoice Date', dateOnly(note.invoice_date)],
+  ];
+  if (note.place_of_supply_state_code) meta.push(['Place of Supply', stateLabel(note.place_of_supply_state_code) ?? '']);
+  meta.push(['Reason', String(note.reason ?? '—')]);
+  const model: DocumentModel = {
+    kind: 'CREDIT_NOTE',
+    business,
+    billTo: customerParty(note),
+    meta,
+    lines,
+    totals: {
+      gross: sum('taxable_value'), discount_total: 0, taxable_total: sum('taxable_value'),
+      cgst_total: sum('cgst_amount'), sgst_total: sum('sgst_amount'), igst_total: sum('igst_amount'),
+      round_off: 0, grand_total: round2(sum('taxable_value') + sum('cgst_amount') + sum('sgst_amount') + sum('igst_amount')),
+    },
+    interstate,
+    showTax: true,
+    watermark: null,
+    notes: null,
+    extraTerms: ['This credit note reduces the value of the invoice named above for the goods returned.'],
+  };
+  return renderDocument(model);
 }

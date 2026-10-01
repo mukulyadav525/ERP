@@ -51,7 +51,7 @@ const cashier = await loginPin('9900000005', '1234');
 const accountant = await login('meera@hardwareerp.in', 'Account@12345');
 const B1 = cashier.user.branch_id;
 const branches = (await call('GET', '/api/admin/branches', { token: owner.token })).body;
-const B2 = branches.find((b) => b.branch_id !== B1).branch_id;
+const B2 = branches.find((b) => b.branch_id !== B1 && b.is_active).branch_id;
 
 const products = (await call('GET', '/api/catalog/products?limit=80', { token: cashier.token })).body;
 const stocked = products.filter((p) => Number(p.available_qty ?? 0) > 60 && Number(p.selling_price) > 0);
@@ -80,10 +80,13 @@ try {
     const el = await call('GET', `/api/returns/eligibility/${sold.res.body.invoice_id}`, { token: cashier.token });
     const line = el.body.lines[0];
 
+    // Store credit needs an account to land on, so every policy is exercised
+    // against an identified customer; the walk-in case is checked separately below.
+    const acct = (await call('GET', '/api/customers?limit=1', { token: cashier.token })).body[0];
     for (const policy of ['ADMIN_CHOICE', 'CASH', 'ORIGINAL_MODE', 'STORE_CREDIT']) {
       await call('PUT', '/api/admin/settings/refund_method', { token: owner.token, body: { value: policy } });
       // A fresh sale per policy, so each return has something to return.
-      const s = await sell(cashier.token, { qty: 1 });
+      const s = await sell(cashier.token, { qty: 1, customerId: acct.customer_id });
       const e = await call('GET', `/api/returns/eligibility/${s.res.body.invoice_id}`, { token: cashier.token });
       const l = e.body.lines[0];
       const r = await call('POST', '/api/returns', {
@@ -95,6 +98,20 @@ try {
       // took every return down with a 500.
       check(`refund_method = ${policy}`, r.status === 200,
         r.status === 200 ? `settled as ${r.body.refund_method}` : JSON.stringify(r.body).slice(0, 90));
+    }
+    {
+      // A walk-in sale has no account: store credit there used to be silently
+      // dropped (no refund, no ledger entry). It must be refused, clearly.
+      await call('PUT', '/api/admin/settings/refund_method', { token: owner.token, body: { value: 'STORE_CREDIT' } });
+      const w = await sell(cashier.token, { qty: 1 });
+      const we = await call('GET', `/api/returns/eligibility/${w.res.body.invoice_id}`, { token: cashier.token });
+      const r = await call('POST', '/api/returns', {
+        token: cashier.token,
+        body: { invoice_id: w.res.body.invoice_id, return_reason: 'walk-in store credit',
+                lines: [{ invoice_line_id: we.body.lines[0].line_id, qty_base_unit: 1, condition: 'RESELLABLE' }] },
+      });
+      check('store credit for a walk-in is refused with a reason, not silently lost',
+        r.status === 400 && /walk-in/i.test(r.body?.error ?? ''), `${r.status} ${r.body?.error ?? ''}`);
     }
     await call('PUT', '/api/admin/settings/refund_method', { token: owner.token, body: { value: 'ADMIN_CHOICE' } });
     void sold; void line;

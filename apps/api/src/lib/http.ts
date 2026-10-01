@@ -30,6 +30,50 @@ export async function resolveSession(req: FastifyRequest): Promise<Session | nul
   return { ...row, role: row.role as Session['role'] };
 }
 
+/** The branches a user may act at, straight from the database (auth_user_branches). */
+export async function authorisedBranches(userId: string): Promise<Array<{ branch_id: string; name: string; code: string; is_home: boolean }>> {
+  const rows = await sql<{ branch_id: string; name: string; code: string; is_home: boolean }>`
+    SELECT * FROM auth_user_branches(${userId})
+  `.execute(db);
+  return rows.rows;
+}
+
+/**
+ * Section 0/3 — which branch this request acts at.
+ *
+ * The browser sends the branch the user picked in the top bar as `X-Branch-Id`.
+ * That header is a REQUEST, never a fact: for a branch user it is honoured only
+ * if auth_user_branches() lists the branch, and otherwise the call is refused.
+ * The chosen branch then becomes the RLS GUC for the whole transaction, so every
+ * policy in the schema confines the request to it exactly as before.
+ *
+ * An Owner keeps chain-wide visibility (branch_id null); their pick is recorded
+ * as `active_branch_id` and is what a write lands on when the body names none.
+ */
+async function applyActiveBranch(session: Session, req: FastifyRequest): Promise<Session> {
+  const raw = req.headers['x-branch-id'];
+  const requested = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  const withHome: Session = { ...session, home_branch_id: session.branch_id };
+  if (!requested) return withHome;
+  if (!UUID_RE.test(requested)) throw badRequest('The selected branch is not valid. Pick a branch again.');
+
+  // Checked through auth_user_branches(), a SECURITY DEFINER function: this runs
+  // before the request's RLS scope exists, so a plain SELECT on branches would
+  // see nothing and refuse every branch.
+  if (session.role !== 'OWNER_ADMIN' && requested === session.branch_id) return withHome;
+  const allowed = await authorisedBranches(session.user_id);
+  if (session.role === 'OWNER_ADMIN') {
+    if (!allowed.some((b) => b.branch_id === requested)) {
+      throw badRequest('The selected branch no longer exists or has been deactivated.');
+    }
+    return { ...withHome, active_branch_id: requested };
+  }
+  if (!allowed.some((b) => b.branch_id === requested)) {
+    throw forbidden('You do not have access to that branch.');
+  }
+  return { ...withHome, branch_id: requested };
+}
+
 /**
  * Wraps a route handler with: authentication, the role check, and an RLS-scoped
  * transaction. Pass `null` as the permission for endpoints that only require a
@@ -41,11 +85,12 @@ export function guarded<T>(
   handler: (ctx: Ctx) => Promise<T>,
 ) {
   return async (req: FastifyRequest, reply: FastifyReply): Promise<T | undefined> => {
-    const session = await resolveSession(req);
-    if (!session) throw unauthorized();
-    if (permission && !canAccess(session.role, permission)) {
-      throw forbidden(`Your role (${session.role}) is not permitted to ${permission.replace(/_/g, ' ')}.`);
+    const resolved = await resolveSession(req);
+    if (!resolved) throw unauthorized();
+    if (permission && !canAccess(resolved.role, permission)) {
+      throw forbidden(`Your role does not allow you to ${permission.replace(/_/g, ' ')}. Ask the owner if you need this.`);
     }
+    const session = await applyActiveBranch(resolved, req);
     return withScope(session, (trx) => handler({ session, db: trx, req, reply }));
   };
 }
@@ -70,25 +115,40 @@ export function resolveBranchScope(session: Session, requested?: string | null):
   // The admin's value is validated rather than passed through: an unparseable
   // branch_id reached Postgres as a uuid cast and came back as a 500 with no clue
   // what was wrong. A malformed id is a client error and should say so.
-  if (session.role === 'OWNER_ADMIN') return requested ? uuid(requested, 'branch_id') : null;
+  if (session.role === 'OWNER_ADMIN') {
+    if (requested === 'all') return null;
+    const pick = requested || session.active_branch_id || null;
+    return pick ? uuid(pick, 'branch_id') : null;
+  }
   return session.branch_id;
 }
 
+/** What the UI keys on to open its branch picker rather than show an error. */
+export const BRANCH_REQUIRED = 'BRANCH_REQUIRED';
+
 /**
- * For WRITES, the branch is never taken from the request body. A cashier creating
- * an invoice creates it at their own branch, full stop. An admin must name the
- * branch explicitly because they have no default one.
+ * For WRITES, a physical transaction always happens at ONE real branch.
+ *
+ * "All branches" is a way of LOOKING at the chain, never a place a sale, a
+ * receipt or a payment can happen. So:
+ *   - a branch user's write lands on the branch this request is acting at (their
+ *     home branch, or another they are authorised for — resolved in guarded());
+ *     naming any other branch is refused.
+ *   - an Owner's write lands on the branch named in the body, else the branch
+ *     picked in the top bar; with neither, the request is refused with a plain
+ *     instruction and a code the screen uses to ask for a branch.
  */
 export function writeBranch(session: Session, requested?: string | null): string {
   if (session.role === 'OWNER_ADMIN') {
-    if (!requested) throw badRequest('branch_id is required when acting as Owner/Admin, which has no default branch.');
-    return uuid(requested, 'branch_id');
+    const pick = requested || session.active_branch_id;
+    if (!pick) throw new HttpError(400, 'Please select a branch for this transaction.', { code: BRANCH_REQUIRED });
+    return uuid(pick, 'branch_id');
   }
-  if (!session.branch_id) throw forbidden('Your account is not assigned to a branch.');
-  // A branch user's write always lands on their own branch; anything else is a
-  // client bug or an attempt, and either way must not be honoured.
+  if (!session.branch_id) throw forbidden('Your account is not assigned to a branch. Ask the owner to assign one.');
+  // A branch user's write always lands on the branch they are acting at; anything
+  // else is a client bug or an attempt, and either way must not be honoured.
   if (requested && requested !== session.branch_id) {
-    throw forbidden('You can only create records for your own branch.');
+    throw forbidden('You can only record transactions for the branch you are working at.');
   }
   return session.branch_id;
 }
