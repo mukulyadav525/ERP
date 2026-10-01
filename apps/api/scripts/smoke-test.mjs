@@ -398,7 +398,10 @@ async function main() {
   // flows — batch-tracked goods legitimately refuse a receipt with no batch number,
   // which is a separate assertion below rather than something to work around here.
   const plain = ((await call('GET', '/api/catalog/products?limit=200', { token: tokens.inventory })).body ?? [])
-    .filter((p) => !p.batch_tracked && !p.serial_tracked && Number(p.available_qty ?? 0) > 30)
+    // Nothing reserved either: the stock audit below counts it down to 42, and a
+    // seeded estimate hold larger than that would leave nothing to reserve in 5.1.
+    .filter((p) => !p.batch_tracked && !p.serial_tracked && Number(p.available_qty ?? 0) > 30
+      && Number(p.reserved_qty ?? 0) === 0)
     .sort((a, b) => Number(b.available_qty) - Number(a.available_qty))[0];
   ids.plainProduct = plain?.product_id;
   assert('found a plain in-stock item for procurement tests', Boolean(ids.plainProduct), plain?.name ?? 'none');

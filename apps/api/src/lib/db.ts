@@ -18,10 +18,17 @@ const pool = new Pool({
   max: Number(process.env.PG_POOL_MAX ?? 20),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
-  // "Today", CURRENT_DATE and every ::date in a report are questions about the
-  // shop's calendar, not the server's. Set per connection so it holds even on a
-  // managed database where ALTER DATABASE ... SET timezone is not permitted.
-  options: `-c timezone=${env.businessTimezone}`,
+});
+
+// "Today", CURRENT_DATE and every ::date in a report are questions about the
+// shop's calendar, not the server's. Set per connection so it holds even on a
+// managed database where ALTER DATABASE ... SET timezone is not permitted. Done
+// with SET after connect rather than a startup `options` parameter, which
+// connection poolers (Supabase Supavisor, PgBouncer) refuse.
+pool.on('connect', (client) => {
+  client.query(`SET timezone TO '${env.businessTimezone.replace(/'/g, "''")}'`).catch((err: Error) => {
+    console.error('[db] could not set timezone', err.message);
+  });
 });
 
 pool.on('error', (err) => {
