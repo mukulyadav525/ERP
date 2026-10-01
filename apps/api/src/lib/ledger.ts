@@ -13,7 +13,8 @@
 import { sql } from 'kysely';
 import type { Tx } from './db.js';
 
-export type CreditEntryType = 'SALE_ON_CREDIT' | 'PAYMENT_RECEIVED' | 'REFUND_ADJUSTMENT';
+export type CreditEntryType =
+  | 'SALE_ON_CREDIT' | 'PAYMENT_RECEIVED' | 'REFUND_ADJUSTMENT' | 'OPENING_BALANCE' | 'ADJUSTMENT';
 
 export interface CreditPostResult {
   entry_id: string | null;
@@ -53,7 +54,16 @@ export async function postCredit(trx: Tx, opts: {
   };
 }
 
-export type VendorEntryType = 'GRN_PAYABLE' | 'PAYMENT_MADE' | 'DEBIT_NOTE';
+export type VendorEntryType = 'GRN_PAYABLE' | 'PAYMENT_MADE' | 'DEBIT_NOTE' | 'OPENING_BALANCE' | 'ADJUSTMENT';
+
+/** The current chain-wide payable to a vendor, for a read-only check. */
+export async function vendorBalance(trx: Tx, vendorId: string): Promise<number> {
+  const row = await sql<{ balance_after: string }>`
+    SELECT balance_after FROM vendor_ledger
+     WHERE vendor_id = ${vendorId} ORDER BY created_at DESC, entry_id DESC LIMIT 1
+  `.execute(trx);
+  return Number(row.rows[0]?.balance_after ?? 0);
+}
 
 export async function postVendor(trx: Tx, opts: {
   vendorId: string;

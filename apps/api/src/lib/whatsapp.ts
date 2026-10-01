@@ -116,17 +116,22 @@ export async function drainQueue(batchSize = 25): Promise<number> {
   for (const msg of claimed) {
     let ok = false;
     let error: string | null = null;
+    if (!env.whatsapp.enabled) {
+      // With no credentials configured there is nothing to call. The message is
+      // closed as NOT_CONFIGURED — never SENT — so no screen or report can claim a
+      // delivery that did not happen, and it is not retried forever.
+      await withSystemScope(async (trx) => {
+        await sql`
+          UPDATE whatsapp_message_log SET status = 'NOT_CONFIGURED', attempts = attempts + 1,
+                 last_error = 'WhatsApp Business API is not configured; nothing was sent.'
+           WHERE id = ${msg.id}
+        `.execute(trx);
+      });
+      continue;
+    }
     try {
-      if (!env.whatsapp.enabled) {
-        // With no credentials configured there is nothing to call. Marking it sent
-        // beats retrying forever and filling the log with noise, and the note says
-        // plainly that nothing actually left the building.
-        ok = true;
-        error = 'no WhatsApp credentials configured — not actually delivered';
-      } else {
-        await deliver(msg.to_phone, msg.body ?? '');
-        ok = true;
-      }
+      await deliver(msg.to_phone, msg.body ?? '');
+      ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }

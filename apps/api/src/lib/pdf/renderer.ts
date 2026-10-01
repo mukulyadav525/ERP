@@ -96,7 +96,7 @@ export interface DocumentPayment {
   ref_no?: string | null;
 }
 
-export type DocumentKind = 'TAX_INVOICE' | 'CASH_MEMO' | 'ESTIMATE';
+export type DocumentKind = 'TAX_INVOICE' | 'CASH_MEMO' | 'ESTIMATE' | 'CREDIT_NOTE';
 
 export interface DocumentModel {
   kind: DocumentKind;
@@ -209,6 +209,7 @@ const TITLES: Record<DocumentKind, string> = {
   TAX_INVOICE: 'TAX INVOICE',
   CASH_MEMO: 'CASH MEMO',
   ESTIMATE: 'ESTIMATE / QUOTATION',
+  CREDIT_NOTE: 'CREDIT NOTE',
 };
 
 // ── Column layout ───────────────────────────────────────────────────────────
@@ -579,7 +580,7 @@ export async function renderDocument(model: DocumentModel): Promise<Buffer> {
         }
         ry += 3;
         box(ctx, rightX, ry, rightW, 24, { fill: accent, stroke: null, radius: 3 });
-        text(ctx, model.kind === 'ESTIMATE' ? 'Estimated Total' : 'Grand Total', rightX + 8, ry + 7.5, {
+        text(ctx, model.kind === 'ESTIMATE' ? 'Estimated Total' : model.kind === 'CREDIT_NOTE' ? 'Credit Total' : 'Grand Total', rightX + 8, ry + 7.5, {
           size: TYPE.totalLabel, bold: true, color: '#ffffff', width: rightW * 0.5,
         });
         text(ctx, `Rs. ${money(model.totals.grand_total)}`, rightX + rightW * 0.5 - 8, ry + 6, {
@@ -911,6 +912,8 @@ export async function renderDocument(model: DocumentModel): Promise<Buffer> {
         const note = model.business.footer_note
           ?? (model.kind === 'ESTIMATE'
             ? 'This is an estimate, not a tax invoice. Prices are subject to change until the order is confirmed.'
+            : model.kind === 'CREDIT_NOTE'
+              ? 'Credit note against the invoice shown above, for goods returned. Computer-generated.'
             : model.showTax
               ? 'Computer-generated tax invoice. GST is computed per line and rounded to two decimals (half-up).'
               : 'Computer-generated bill. No GST has been charged on this transaction.');

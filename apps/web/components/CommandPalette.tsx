@@ -17,17 +17,24 @@ import { useAuth } from '../lib/AuthContext';
 import { Icon, type IconName } from './icons';
 
 interface Hit {
-  type: 'invoice' | 'estimate' | 'customer' | 'vendor' | 'product';
+  type: 'invoice' | 'estimate' | 'customer' | 'vendor' | 'product' | 'payment' | 'receipt'
+      | 'purchase_order' | 'purchase' | 'transfer' | 'credit_note';
   id: string; title: string; subtitle: string | null;
   amount: number | null; status: string | null; href: string;
 }
 
 const TYPE_META: Record<Hit['type'], { label: string; icon: IconName }> = {
-  invoice:  { label: 'Invoice',  icon: 'billing' },
-  estimate: { label: 'Estimate', icon: 'quotation' },
-  customer: { label: 'Customer', icon: 'customers' },
-  vendor:   { label: 'Vendor',   icon: 'vendors' },
-  product:  { label: 'Product',  icon: 'catalog' },
+  invoice:        { label: 'Bill',           icon: 'billing' },
+  estimate:       { label: 'Estimate',       icon: 'quotation' },
+  customer:       { label: 'Customer',       icon: 'customers' },
+  vendor:         { label: 'Vendor',         icon: 'vendors' },
+  product:        { label: 'Product',        icon: 'catalog' },
+  payment:        { label: 'Payment',        icon: 'rupee' },
+  receipt:        { label: 'Receipt',        icon: 'receipt' },
+  purchase_order: { label: 'Purchase order', icon: 'inventory' },
+  purchase:       { label: 'Purchase',       icon: 'truck' },
+  transfer:       { label: 'Transfer',       icon: 'truck' },
+  credit_note:    { label: 'Credit note',    icon: 'returns' },
 };
 
 interface QuickAction { label: string; href: string; icon: IconName; permission: string; hint: string; }
@@ -38,6 +45,9 @@ const QUICK_ACTIONS: QuickAction[] = [
   { label: 'Add product',     href: '/catalog?new=1',      icon: 'catalog',   permission: 'edit_catalog',            hint: '' },
   { label: 'New purchase',    href: '/inventory?new=grn',  icon: 'inventory', permission: 'create_grn',              hint: '' },
   { label: 'Record payment',  href: '/customers?tab=outstanding', icon: 'rupee', permission: 'record_customer_payment', hint: '' },
+  { label: 'New estimate',    href: '/quotations?new=1',   icon: 'quotation', permission: 'create_quotation',        hint: '' },
+  { label: 'Process a return', href: '/returns',           icon: 'returns',   permission: 'process_return',          hint: '' },
+  { label: 'Add expense',     href: '/expenses?new=1',     icon: 'expenses',  permission: 'create_expense',          hint: '' },
 ];
 
 export default function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {

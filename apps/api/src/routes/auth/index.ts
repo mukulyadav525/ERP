@@ -23,8 +23,25 @@ import { sql } from 'kysely';
 import { db } from '../../lib/db.js';
 import { env } from '../../lib/env.js';
 import {
-  guarded, uuid, str, optionalStr, oneOf, limit as clampLimit,
+  guarded, uuid, str, optionalStr, oneOf, limit as clampLimit, authorisedBranches,
 } from '../../lib/http.js';
+import type { Tx } from '../../lib/db.js';
+
+/**
+ * Replaces the extra branches a staff member may act at (beyond their home
+ * branch). Owner-only by the route's permission; the home branch is implicit and
+ * never stored here, so it cannot be "revoked" by accident.
+ */
+async function setBranchAccess(trx: Tx, userId: string, homeBranch: string | null, grantedBy: string, raw: unknown) {
+  if (raw === undefined) return false;
+  if (!Array.isArray(raw)) throw badRequest('Branch access must be a list of branches.');
+  const ids = [...new Set(raw.map((v, i) => uuid(v, `Branch ${i + 1}`)))].filter((b) => b !== homeBranch);
+  await sql`DELETE FROM user_branch_access WHERE user_id = ${userId}`.execute(trx);
+  for (const b of ids) {
+    await sql`INSERT INTO user_branch_access (user_id, branch_id, granted_by) VALUES (${userId}, ${b}, ${grantedBy})`.execute(trx);
+  }
+  return true;
+}
 import { badRequest, forbidden, tooMany, unauthorized, notFound } from '../../lib/errors.js';
 import {
   issueToken, hashToken, issueResetToken, hashResetToken, generateOtp, bearerFrom,
@@ -300,13 +317,18 @@ export default async function authRoutes(app: FastifyInstance) {
 
   // ── Session-bound endpoints ───────────────────────────────────────────────
   app.get('/me', guarded(null, async ({ session, db: trx }) => {
-    const branch = session.branch_id
+    const home = session.home_branch_id ?? session.branch_id;
+    const branch = home
       ? (await sql<{ name: string; state_code: string; gstin: string | null }>`
-          SELECT name, state_code, gstin FROM branches WHERE branch_id = ${session.branch_id}
+          SELECT name, state_code, gstin FROM branches WHERE branch_id = ${home}
         `.execute(trx)).rows[0]
       : null;
+    const branches = await authorisedBranches(session.user_id);
     return {
-      user_id: session.user_id, role: session.role, branch_id: session.branch_id,
+      user_id: session.user_id, role: session.role, branch_id: home,
+      // The branches this person may switch between. An Owner may also pick
+      // "All branches" for viewing; nobody may transact at "all branches".
+      branches,
       branch_name: branch?.name ?? null, full_name: session.full_name,
       email: session.email ?? null, phone: session.phone ?? null,
       language_pref: session.language_pref ?? 'en',
@@ -417,16 +439,26 @@ export default async function authRoutes(app: FastifyInstance) {
 
   // ── Branch list for authenticated users ───────────────────────────────────
   app.get('/branches', guarded(null, async ({ session, db: trx }) => {
-    // A branch user only ever needs their own branch; the Owner needs all of them.
+    // Exactly the branches this person may act at: every branch for the Owner,
+    // the home branch plus any granted ones for everyone else.
+    const allowed = (await authorisedBranches(session.user_id)).map((b) => b.branch_id);
     const rows = await sql<any>`
-      SELECT branch_id, name, address, state_code, gstin, phone
+      SELECT branch_id, code, name, address, state, state_code, gstin, phone,
+             (branch_id IS NOT DISTINCT FROM ${session.home_branch_id ?? null}) AS is_home
         FROM branches
-       WHERE is_active
-         ${session.role === 'OWNER_ADMIN' ? sql`` : sql`AND branch_id = ${session.branch_id}`}
-       ORDER BY name
+       WHERE is_active AND branch_id = ANY(${allowed}::uuid[])
+       ORDER BY (branch_id IS NOT DISTINCT FROM ${session.home_branch_id ?? null}) DESC, name
     `.execute(trx);
     return rows.rows;
   }));
+
+  /**
+   * Every active branch by name — the destinations a transfer can be sent to.
+   * Listing a branch grants nothing: acting at it still needs the access above.
+   */
+  app.get('/branch-directory', guarded(null, async ({ db: trx }) => (await sql<any>`
+      SELECT branch_id, code, name, state_code FROM branches WHERE is_active ORDER BY name
+    `.execute(trx)).rows));
 
   // ── User management (7.1) ─────────────────────────────────────────────────
   app.get('/users', guarded('manage_staff', async ({ db: trx, req }) => {
@@ -435,7 +467,10 @@ export default async function authRoutes(app: FastifyInstance) {
       SELECT u.user_id, u.branch_id, b.name AS branch_name, u.role, u.full_name, u.phone, u.email,
              u.language_pref, u.is_active, u.last_login_at,
              (u.pin_hash IS NOT NULL) AS has_pin, (u.password_hash IS NOT NULL) AS has_password,
-             (u.locked_until IS NOT NULL AND u.locked_until > now()) AS is_locked
+             (u.locked_until IS NOT NULL AND u.locked_until > now()) AS is_locked,
+             COALESCE((SELECT jsonb_agg(jsonb_build_object('branch_id', a.branch_id, 'name', ab.name) ORDER BY ab.name)
+                         FROM user_branch_access a JOIN branches ab ON ab.branch_id = a.branch_id
+                        WHERE a.user_id = u.user_id), '[]'::jsonb) AS extra_branches
         FROM users u LEFT JOIN branches b ON b.branch_id = u.branch_id
        ORDER BY u.full_name
        LIMIT ${clampLimit(q.limit, 200, 500)}
@@ -466,6 +501,7 @@ export default async function authRoutes(app: FastifyInstance) {
       RETURNING user_id
     `.execute(trx);
     const userId = inserted.rows[0].user_id;
+    if (role !== 'OWNER_ADMIN') await setBranchAccess(trx, userId, branchId, session.user_id, body.extra_branch_ids);
 
     // Every non-admin user is also an employee record, so attendance, shifts and
     // sales attribution have something to hang off from day one.
@@ -523,9 +559,17 @@ export default async function authRoutes(app: FastifyInstance) {
       await sql`UPDATE employees SET branch_id = ${branchId} WHERE user_id = ${userId}`.execute(trx);
     }
 
+    const accessChanged = role === 'OWNER_ADMIN'
+      ? (await sql`DELETE FROM user_branch_access WHERE user_id = ${userId}`.execute(trx), false)
+      : await setBranchAccess(trx, userId, branchId, session.user_id, body.extra_branch_ids);
+    if (accessChanged) {
+      await audit(trx, session, 'BRANCH_ACCESS_CHANGE', 'users', userId,
+        { after: { extra_branch_ids: body.extra_branch_ids } });
+    }
+
     // A deactivated or re-roled user must not keep an open session with their old
-    // privileges until it happens to expire.
-    if (!isActive || role !== before.role || branchId !== before.branch_id) {
+    // privileges until it happens to expire — nor one scoped to a branch they lost.
+    if (!isActive || role !== before.role || branchId !== before.branch_id || accessChanged) {
       await sql`SELECT auth_revoke_user_sessions(${userId})`.execute(trx);
     }
 

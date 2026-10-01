@@ -12,6 +12,13 @@ import { badRequest, notFound } from '../../lib/errors.js';
 import { SETTING_DEFAULTS, loadSettings } from '../../lib/settings.js';
 import { audit } from '../../lib/audit.js';
 import { BUSINESS_PROFILE_SETTING, normaliseProfile } from '../../lib/pdf/index.js';
+import { GST_STATES, optionalGstin, optionalStateCode } from '../../lib/units.js';
+
+function branchCode(v: unknown): string {
+  const code = str(v, 'Branch code', { max: 6 }).toUpperCase();
+  if (!/^[A-Z0-9]{2,6}$/.test(code)) throw badRequest('A branch code is 2–6 capital letters or digits, e.g. AND or PUN1. It appears in every document number.');
+  return code;
+}
 
 /**
  * The catalogue the Admin Settings screen renders from. Keeping the labels, types
@@ -117,7 +124,10 @@ const SETTING_META: Record<string, {
     help: 'Points lapse after this long with no activity.',
   },
   enable_birthday_greetings:  { label: 'Birthday greetings', group: 'Loyalty', type: 'boolean', per_branch: false,
-    help: 'Send an automated birthday message to customers whose date of birth is on file.',
+    help: 'Allow the "send birthday greetings" action for customers whose date of birth is on file. Messages go only when someone runs it.',
+  },
+  auto_whatsapp_documents:    { label: 'Queue bills and credit notes for WhatsApp automatically', group: 'Loyalty', type: 'boolean', per_branch: true,
+    help: 'Off: bills are shared from the screen by the cashier. On: every finalised bill and credit note for a customer with a phone number is queued for the WhatsApp Business API — which must be configured, or nothing is sent.',
   },
 
   refund_method:              { label: 'Refund method', group: 'Returns', type: 'select', per_branch: false,
@@ -273,17 +283,21 @@ export default async function adminRoutes(app: FastifyInstance) {
   // ── Audit log (7.3) ───────────────────────────────────────────────────────
   app.get('/audit-log', guarded('view_audit_log', async ({ db: trx, req }) => {
     const q = (req.query ?? {}) as Record<string, string | undefined>;
+    const dateOk = (v?: string) => Boolean(v && /^\d{4}-\d{2}-\d{2}$/.test(v));
     return (await sql<any>`
       SELECT a.*, u.full_name AS user_name, u.role AS user_role, b.name AS branch_name
         FROM audit_log a
         LEFT JOIN users u ON u.user_id = a.user_id
         LEFT JOIN branches b ON b.branch_id = a.branch_id
        WHERE 1=1
-         ${q.action ? sql`AND a.action = ${q.action}` : sql``}
-         ${q.entity_type ? sql`AND a.entity_type = ${q.entity_type}` : sql``}
+         ${q.action ? sql`AND a.action = ${str(q.action, 'action', { max: 60 })}` : sql``}
+         ${q.entity_type ? sql`AND a.entity_type = ${str(q.entity_type, 'entity_type', { max: 60 })}` : sql``}
+         ${q.entity_id ? sql`AND a.entity_id = ${uuid(q.entity_id, 'entity_id')}` : sql``}
          ${q.user_id ? sql`AND a.user_id = ${uuid(q.user_id, 'user_id')}` : sql``}
-         ${q.from ? sql`AND a.created_at >= ${q.from}::timestamptz` : sql``}
-       ORDER BY a.created_at DESC LIMIT ${clampLimit(q.limit, 100, 500)}
+         ${q.branch_id ? sql`AND a.branch_id = ${uuid(q.branch_id, 'branch_id')}` : sql``}
+         ${dateOk(q.from) ? sql`AND a.created_at >= ${q.from}::date` : sql``}
+         ${dateOk(q.to) ? sql`AND a.created_at < (${q.to}::date + 1)` : sql``}
+       ORDER BY a.created_at DESC LIMIT ${clampLimit(q.limit, 100, 1000)}
     `.execute(trx)).rows;
   }));
 
@@ -329,13 +343,20 @@ export default async function adminRoutes(app: FastifyInstance) {
 
   app.post('/branches', guarded('manage_settings', async ({ session, db: trx, req }) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const stateCode = optionalStateCode(body.state_code, 'State');
+    if (!stateCode) throw badRequest('Choose the state the branch is in — it decides CGST+SGST against IGST.');
+    const gstin = optionalGstin(body.gstin);
+    if (gstin && gstin.slice(0, 2) !== stateCode) throw badRequest('The GSTIN belongs to a different state than the one chosen.');
+    const code = branchCode(body.code);
+    const dup = (await sql<any>`SELECT name FROM branches WHERE code = ${code}`.execute(trx)).rows[0];
+    if (dup) throw badRequest(`Branch code ${code} is already used by ${dup.name}.`);
     const row = (await sql<any>`
-      INSERT INTO branches (name, address, state_code, gstin, phone)
-      VALUES (${str(body.name, 'Branch name', { max: 120 })},
+      INSERT INTO branches (code, name, address, state, state_code, gstin, phone, email)
+      VALUES (${code}, ${str(body.name, 'Branch name', { max: 120 })},
               ${optionalStr(body.address, 'Address', { max: 500 })},
-              ${str(body.state_code, 'State code', { max: 4 })},
-              ${optionalStr(body.gstin, 'GSTIN', { max: 20 })},
-              ${optionalStr(body.phone, 'Phone', { max: 20 })})
+              ${GST_STATES[stateCode]}, ${stateCode}, ${gstin},
+              ${optionalStr(body.phone, 'Phone', { max: 20 })},
+              ${optionalStr(body.email, 'Email', { max: 254 })})
       RETURNING *
     `.execute(trx)).rows[0];
     await audit(trx, session, 'SETTING_CHANGE', 'branches', row.branch_id, { after: row });
@@ -347,13 +368,32 @@ export default async function adminRoutes(app: FastifyInstance) {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const before = (await sql<any>`SELECT * FROM branches WHERE branch_id = ${id}`.execute(trx)).rows[0];
     if (!before) throw notFound('Branch not found.');
+    const stateCode = body.state_code === undefined ? before.state_code : (optionalStateCode(body.state_code, 'State') ?? before.state_code);
+    const gstin = body.gstin === undefined ? before.gstin : optionalGstin(body.gstin);
+    if (gstin && /^[0-9]{2}$/.test(stateCode) && gstin.slice(0, 2) !== stateCode) {
+      throw badRequest('The GSTIN belongs to a different state than the branch.');
+    }
+    // The code is printed on every document the branch has ever issued; changing it
+    // would make new numbers look like a different branch's. Set once.
+    if (body.code !== undefined && branchCode(body.code) !== before.code) {
+      throw badRequest('A branch code cannot be changed once set — it is part of every document number the branch has issued.');
+    }
+    if (body.is_active === false && before.is_active) {
+      const open = (await sql<{ n: string }>`
+        SELECT (SELECT count(*) FROM till_sessions WHERE branch_id = ${id} AND status = 'OPEN')
+             + (SELECT count(*) FROM stock_transfers WHERE (from_branch_id = ${id} OR to_branch_id = ${id})
+                                                     AND status IN ('REQUESTED', 'DISPATCHED', 'TRANSFER_DISCREPANCY')) AS n
+      `.execute(trx)).rows[0];
+      if (Number(open.n) > 0) throw badRequest('Close the branch\'s open tills and settle its transfers before deactivating it.');
+    }
     await sql`
       UPDATE branches SET
         name = ${optionalStr(body.name, 'Branch name', { max: 120 }) ?? before.name},
         address = ${body.address === undefined ? before.address : optionalStr(body.address, 'Address', { max: 500 })},
-        state_code = ${optionalStr(body.state_code, 'State code', { max: 4 }) ?? before.state_code},
-        gstin = ${body.gstin === undefined ? before.gstin : optionalStr(body.gstin, 'GSTIN', { max: 20 })},
+        state_code = ${stateCode}, state = ${GST_STATES[stateCode] ?? before.state},
+        gstin = ${gstin},
         phone = ${body.phone === undefined ? before.phone : optionalStr(body.phone, 'Phone', { max: 20 })},
+        email = ${body.email === undefined ? before.email : optionalStr(body.email, 'Email', { max: 254 })},
         is_active = ${body.is_active === undefined ? before.is_active : Boolean(body.is_active)}
       WHERE branch_id = ${id}
     `.execute(trx);
@@ -362,36 +402,35 @@ export default async function adminRoutes(app: FastifyInstance) {
   }));
 
   // ── Backups (15) ──────────────────────────────────────────────────────────
-  app.get('/backups', guarded('cloud_backup_restore', async ({ db: trx, req }) => {
+  /**
+   * Backup STATUS, read-only. Backups and restore tests are performed by the
+   * scripts in apps/api/scripts (backup.mjs / restore-test.mjs), which run
+   * pg_dump / pg_restore and record only what they verified. There is no endpoint
+   * that can claim a backup was taken, because a claimed backup is not a backup.
+   */
+  app.get('/backups', guarded('cloud_backup_restore', async ({ session, db: trx, req }) => {
     const rows = (await sql<any>`
       SELECT * FROM backups ORDER BY taken_at DESC LIMIT ${clampLimit((req.query as any)?.limit, 50, 200)}
     `.execute(trx)).rows;
+    const settings = await loadSettings(trx, session.branch_id);
+    const everyHours = Number(settings.backup_frequency_hours) || 24;
+    const lastOk = rows.find((r: any) => r.status === 'COMPLETED');
     const lastTested = rows.find((r: any) => r.restore_tested_at);
+    const ageHours = lastOk ? (Date.now() - new Date(lastOk.taken_at).getTime()) / 3_600_000 : null;
     return {
       backups: rows,
-      last_backup_at: rows[0]?.taken_at ?? null,
+      configured: Boolean(lastOk),
+      status: !lastOk ? 'NOT_CONFIGURED' : ageHours! > everyHours * 2 ? 'OVERDUE' : 'OK',
+      expected_every_hours: everyHours,
+      last_backup_at: lastOk?.taken_at ?? null,
+      last_backup_age_hours: ageHours === null ? null : Math.round(ageHours * 10) / 10,
       last_restore_test_at: lastTested?.restore_tested_at ?? null,
       // 15 asks for a *documented* disaster-recovery test, not just backups that
       // exist — an untested backup is a guess, so this is surfaced, not buried.
       restore_test_overdue: !lastTested
-        || (Date.now() - new Date(lastTested.restore_tested_at).getTime()) > 90 * 86_400_000 };
-  }));
-
-  app.post('/backups', guarded('cloud_backup_restore', async ({ session, db: trx, req }) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const row = (await sql<any>`
-      INSERT INTO backups (storage_ref, status) VALUES (${str(body.storage_ref, 'Storage reference', { max: 500 })}, 'COMPLETED')
-      RETURNING *
-    `.execute(trx)).rows[0];
-    await audit(trx, session, 'BACKUP_RESTORED', 'backups', row.backup_id, { after: { action: 'BACKUP_TAKEN' } });
-    return row;
-  }));
-
-  app.post('/backups/:id/restore-test', guarded('cloud_backup_restore', async ({ session, db: trx, req }) => {
-    const id = uuid((req.params as any).id, 'backup_id');
-    await sql`UPDATE backups SET restore_tested_at = now() WHERE backup_id = ${id}`.execute(trx);
-    await audit(trx, session, 'BACKUP_RESTORED', 'backups', id, { after: { restore_test: true } });
-    return { ok: true, message: 'Restore test recorded.' };
+        || (Date.now() - new Date(lastTested.restore_tested_at).getTime()) > 90 * 86_400_000,
+      how_to: 'Schedule `npm run backup` (daily) and `npm run backup:restore-test` (monthly) on the server. See docs/OPERATIONS.md.',
+    };
   }));
 
   // ── Training journals (16) ────────────────────────────────────────────────
@@ -421,9 +460,15 @@ export default async function adminRoutes(app: FastifyInstance) {
       SELECT COALESCE(MAX(version), 0) + 1 AS v FROM training_journals
        WHERE journal_type = ${type} AND language = ${language}
     `.execute(trx)).rows[0].v);
+    // A link every staff member will click: only a path on this site or an https
+    // address — never javascript:, data: or the like.
+    const url = str(body.content_url, 'Content URL', { max: 500 });
+    if (!/^\/(?!\/)[\w\-./]+$/.test(url) && !/^https:\/\/[^\s"'<>]+$/i.test(url)) {
+      throw badRequest('The guide link must be a path on this site (e.g. /docs/guide.md) or an https:// address.');
+    }
     return (await sql<any>`
       INSERT INTO training_journals (journal_type, language, version, content_url)
-      VALUES (${type}, ${language}, ${next}, ${str(body.content_url, 'Content URL', { max: 500 })})
+      VALUES (${type}, ${language}, ${next}, ${url})
       RETURNING *
     `.execute(trx)).rows[0];
   }));

@@ -25,7 +25,7 @@ export const SETTING_DEFAULTS = {
   enable_batch_tracking:           true,
   valuation_method:                'WEIGHTED_AVERAGE',      // | 'FIFO'
   // Quotations (Section 5)
-  enable_quotations_module:        false,
+  enable_quotations_module:        true,     // estimates are a daily counter task (spec §21)
   quotation_stock_reservation:     false,
   quotation_hold_days:             3,
   // Credit (Section 6)
@@ -45,6 +45,9 @@ export const SETTING_DEFAULTS = {
   loyalty_point_value_rupees:      1,
   loyalty_point_expiry_days:       365,
   enable_birthday_greetings:       true,
+  // Off by default: a bill or credit note is shared on WhatsApp by a person, from
+  // the screen, never sent to a customer automatically (spec §22).
+  auto_whatsapp_documents:         false,
   // Returns (Section 12)
   refund_method:                   'ADMIN_CHOICE',          // | 'CASH' | 'ORIGINAL_MODE' | 'STORE_CREDIT'
   return_window_days:              7,

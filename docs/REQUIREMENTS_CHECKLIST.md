@@ -1,14 +1,15 @@
 # BHAWANI ONE — Requirements Compliance Checklist
 
 Verified against a database built from scratch out of `db/schema.sql` + `db/seed.sql`.
-**496 automated checks pass, 0 failures**, across six suites — see `PRODUCTION_AUDIT.md`
-for the audit that produced most of them, the defects it found, and the remaining issues.
+**840 automated checks pass, 0 failures**, across nine suites (plus the PDF geometry check)
+— see `PRODUCTION_AUDIT.md` for the defects found and fixed, and the remaining issues.
 
-- Schema: `db/schema.sql` — 74 tables, all with row-level security enabled, 69 RLS policies
-- Seed: `db/seed.sql` — 3 branches, 11 users across 5 roles, 25 products, 60 customers, ~9,900 invoices over 270 days
-- API: Fastify + Kysely across 13 route modules, every endpoint behind a permission gate
-- Web: Next.js, 13 pages on one design system, light/dark, responsive to 390px, Hindi/English
-- Tests: tax properties (20), API smoke (254), regression (68), workflows (68), documents (26), browser (73)
+- Schema: `db/schema.sql` — 79 tables, row-level security throughout, run by a non-owner app role
+- Seed: `db/seed.sql` — 3 branches, 11 users across 5 roles, 28 products (with loose goods sold by 100 G / KG), 60 customers, ~8,300 invoices over 270 days; stock equals its ledger for every item
+- API: Fastify 5 + Kysely across 14 route modules, every endpoint behind a permission gate
+- Web: Next.js 15, 13 pages on one design system, light (default) and dark, responsive from 320px, Hindi/English navigation
+- Tests: tax properties (20), API smoke (274), regression (76), workflows (71), final pass (121), working day (140), documents (13 + geometry), browser (90), responsive (35)
+- Operations: `npm run backup`, `npm run backup:restore-test`, `npm run create-owner`; `docs/OPERATIONS.md`
 
 **Since the first release:** billing gained a draft → review → edit → finalise flow with
 server-side recalculation at every step (Sections 11, 12, 62); the printed documents were

@@ -22,7 +22,8 @@ import { sql } from 'kysely';
 import { guarded, limit as clampLimit, resolveBranchScope } from '../../lib/http.js';
 import { canAccess } from '../../lib/rbac.js';
 
-export type ResultType = 'invoice' | 'estimate' | 'customer' | 'vendor' | 'product';
+export type ResultType = 'invoice' | 'estimate' | 'customer' | 'vendor' | 'product'
+  | 'payment' | 'receipt' | 'purchase_order' | 'purchase' | 'transfer' | 'credit_note';
 
 export interface SearchHit {
   type: ResultType;
@@ -72,12 +73,13 @@ export default async function searchRoutes(app: FastifyInstance) {
     // finds their bills, not only their customer record.
     if (canAccess(session.role, 'view_billing')) {
       const rows = await sql<any>`
-        SELECT i.invoice_id, i.invoice_number, i.grand_total, i.status, i.server_received_at,
+        SELECT i.invoice_id, i.invoice_number, round(i.grand_total + i.round_off, 2) AS grand_total, i.status, i.server_received_at,
                c.name AS customer_name, b.name AS branch_name
           FROM invoices i
           LEFT JOIN customers c ON c.customer_id = i.customer_id
           LEFT JOIN branches  b ON b.branch_id  = i.branch_id
-         WHERE (i.invoice_number ILIKE ${term} ESCAPE '\'
+         WHERE i.status <> 'DRAFT'
+           AND (i.invoice_number ILIKE ${term} ESCAPE '\'
                 OR c.name ILIKE ${term} ESCAPE '\'
                 OR c.phone ILIKE ${term} ESCAPE '\')
            ${branchFilter}
@@ -203,6 +205,100 @@ export default async function searchRoutes(app: FastifyInstance) {
           amount: null,
           status: null,
           href: `/catalog?product=${r.product_id}`,
+        });
+      }
+    }
+
+    // ── Payment references (UTR, UPI txn id, card auth) → the bill they paid ──
+    if (canAccess(session.role, 'view_billing') && raw.length >= 4) {
+      const rows = await sql<any>`
+        SELECT DISTINCT ON (i.invoice_id) i.invoice_id, i.invoice_number, ip.ref_no, ip.method, ip.amount
+          FROM invoice_payments ip JOIN invoices i ON i.invoice_id = ip.invoice_id
+         WHERE ip.ref_no ILIKE ${term} ESCAPE '\' ${branchFilter}
+         ORDER BY i.invoice_id LIMIT ${perType}
+      `.execute(trx);
+      for (const r of rows.rows) {
+        hits.push({
+          type: 'payment', id: r.invoice_id, title: r.ref_no,
+          subtitle: `${String(r.method).replace('_', ' ')} on ${r.invoice_number}`,
+          amount: Number(r.amount), status: null, href: `/billing?invoice=${r.invoice_id}`,
+        });
+      }
+    }
+
+    // ── Account receipts (RCT-…) ────────────────────────────────────────────
+    if (canAccess(session.role, 'view_customer_outstanding')) {
+      const rows = await sql<any>`
+        SELECT cp.payment_id, cp.receipt_number, cp.amount, cp.reference, c.customer_id, c.name
+          FROM customer_payments cp JOIN customers c ON c.customer_id = cp.customer_id
+         WHERE (cp.receipt_number ILIKE ${term} ESCAPE '\' OR cp.reference ILIKE ${term} ESCAPE '\')
+           ${branch ? sql`AND cp.branch_id = ${branch}` : sql``}
+         ORDER BY cp.created_at DESC LIMIT ${perType}
+      `.execute(trx);
+      for (const r of rows.rows) {
+        hits.push({
+          type: 'receipt', id: r.payment_id, title: r.receipt_number,
+          subtitle: [r.name, r.reference].filter(Boolean).join(' · '),
+          amount: Number(r.amount), status: null, href: `/customers?customer=${r.customer_id}`,
+        });
+      }
+    }
+
+    // ── Purchase orders and goods receipts (by our number or the supplier's bill no.) ──
+    if (canAccess(session.role, 'view_inventory')) {
+      const pos = await sql<any>`
+        SELECT po.po_id, po.po_number, po.status, v.name AS vendor_name
+          FROM purchase_orders po JOIN vendors v ON v.vendor_id = po.vendor_id
+         WHERE po.po_number ILIKE ${term} ESCAPE '\' ${branch ? sql`AND po.branch_id = ${branch}` : sql``}
+         ORDER BY po.created_at DESC LIMIT ${perType}
+      `.execute(trx);
+      for (const r of pos.rows) {
+        hits.push({
+          type: 'purchase_order', id: r.po_id, title: r.po_number, subtitle: r.vendor_name,
+          amount: null, status: r.status, href: `/inventory?tab=reorder&po=${r.po_id}`,
+        });
+      }
+      const grns = await sql<any>`
+        SELECT g.grn_id, g.grn_number, g.vendor_invoice_no, v.name AS vendor_name
+          FROM grn g JOIN vendors v ON v.vendor_id = g.vendor_id
+         WHERE (g.grn_number ILIKE ${term} ESCAPE '\' OR g.vendor_invoice_no ILIKE ${term} ESCAPE '\')
+           ${branch ? sql`AND g.branch_id = ${branch}` : sql``}
+         ORDER BY g.received_at DESC LIMIT ${perType}
+      `.execute(trx);
+      for (const r of grns.rows) {
+        hits.push({
+          type: 'purchase', id: r.grn_id, title: r.grn_number,
+          subtitle: [r.vendor_name, r.vendor_invoice_no ? `bill ${r.vendor_invoice_no}` : null].filter(Boolean).join(' · '),
+          amount: null, status: null, href: `/inventory?tab=purchases&grn=${r.grn_id}`,
+        });
+      }
+      const transfers = await sql<any>`
+        SELECT t.transfer_id, t.transfer_number, t.status, fb.name AS from_name, tb.name AS to_name
+          FROM stock_transfers t JOIN branches fb ON fb.branch_id = t.from_branch_id
+          JOIN branches tb ON tb.branch_id = t.to_branch_id
+         WHERE t.transfer_number ILIKE ${term} ESCAPE '\'
+         ORDER BY t.created_at DESC LIMIT ${perType}
+      `.execute(trx);
+      for (const r of transfers.rows) {
+        hits.push({
+          type: 'transfer', id: r.transfer_id, title: r.transfer_number, subtitle: `${r.from_name} → ${r.to_name}`,
+          amount: null, status: r.status, href: `/inventory?tab=transfers&transfer=${r.transfer_id}`,
+        });
+      }
+    }
+
+    // ── Credit notes ─────────────────────────────────────────────────────────
+    if (canAccess(session.role, 'view_returns')) {
+      const rows = await sql<any>`
+        SELECT cn.credit_note_id, cn.credit_note_number, cn.total_amount, i.invoice_id, i.invoice_number
+          FROM credit_notes cn JOIN invoices i ON i.invoice_id = cn.invoice_id
+         WHERE cn.credit_note_number ILIKE ${term} ESCAPE '\' ${branchFilter}
+         ORDER BY cn.created_at DESC LIMIT ${perType}
+      `.execute(trx);
+      for (const r of rows.rows) {
+        hits.push({
+          type: 'credit_note', id: r.credit_note_id, title: r.credit_note_number, subtitle: `against ${r.invoice_number}`,
+          amount: Number(r.total_amount), status: null, href: `/returns?tab=credit_notes`,
         });
       }
     }

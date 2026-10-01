@@ -17,7 +17,7 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   view_billing:              ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   view_catalog:              ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'INVENTORY_STAFF'],
   view_inventory:            ['OWNER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_STAFF'],
-  view_quotations:           ['OWNER_ADMIN', 'BRANCH_MANAGER'],
+  view_quotations:           ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   view_returns:              ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
   view_customers:            ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   view_vendors:              ['OWNER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_STAFF', 'ACCOUNTANT'],
@@ -26,8 +26,9 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   view_reports:              ['OWNER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT'],
   view_admin:                ['OWNER_ADMIN'],
 
-  edit_catalog:              ['OWNER_ADMIN'],
+  edit_catalog:              ['OWNER_ADMIN', 'BRANCH_MANAGER'],
   edit_pricing:              ['OWNER_ADMIN'],
+  manage_master_data:        ['OWNER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_STAFF'],
   view_cost_price:           ['OWNER_ADMIN'],
 
   create_invoice:            ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
@@ -48,6 +49,7 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   resolve_transfer_discrepancy: ['OWNER_ADMIN'],
   run_stock_audit:           ['OWNER_ADMIN', 'BRANCH_MANAGER', 'INVENTORY_STAFF'],
   approve_write_off:         ['OWNER_ADMIN', 'BRANCH_MANAGER'],
+  adjust_stock:              ['OWNER_ADMIN', 'BRANCH_MANAGER'],
 
   edit_customer:             ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   set_credit_limit:          ['OWNER_ADMIN'],
@@ -59,9 +61,9 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   edit_vendor:               ['OWNER_ADMIN', 'BRANCH_MANAGER'],
   record_vendor_payment:     ['OWNER_ADMIN', 'ACCOUNTANT'],
 
-  create_quotation:          ['OWNER_ADMIN', 'BRANCH_MANAGER'],
+  create_quotation:          ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   approve_quotation:         ['OWNER_ADMIN', 'BRANCH_MANAGER'],
-  convert_quotation:         ['OWNER_ADMIN', 'BRANCH_MANAGER'],
+  convert_quotation:         ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
 
   create_expense:            ['OWNER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT'],
   approve_expense:           ['OWNER_ADMIN', 'BRANCH_MANAGER'],

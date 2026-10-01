@@ -12,7 +12,17 @@ export interface Session {
   session_id?: string;
   user_id: string;
   role: UserRole;
+  /**
+   * The branch this REQUEST runs at — what the RLS GUC is set to. For a branch
+   * user it is their home branch unless they asked (X-Branch-Id) for another
+   * branch they are authorised for. For an Owner it stays null (chain-wide
+   * visibility) and the chosen branch travels in `active_branch_id` instead.
+   */
   branch_id: string | null;
+  /** The user's own branch, whatever branch this request is acting at. */
+  home_branch_id?: string | null;
+  /** Owner only: the branch picked in the top bar, used as the default for writes and filters. */
+  active_branch_id?: string | null;
   full_name: string;
   email?: string | null;
   phone?: string | null;

@@ -30,6 +30,7 @@ import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import type { Tx } from '../../lib/db.js';
 import { postCredit } from '../../lib/ledger.js';
+import { buildCreditNotePdf } from '../../lib/pdf/index.js';
 
 /** Consumes a single-use manager approval — see the note in routes/billing. */
 async function consumeOverride(
@@ -62,7 +63,9 @@ export default async function returnsRoutes(app: FastifyInstance) {
         LEFT JOIN credit_notes cn ON cn.credit_note_id = r.credit_note_id
         LEFT JOIN users u ON u.user_id = r.created_by
        WHERE 1=1 ${branchId ? sql`AND r.branch_id = ${branchId}` : sql``}
-         ${q.q ? sql`AND (i.invoice_number ILIKE ${'%' + q.q + '%'} OR c.name ILIKE ${'%' + q.q + '%'})` : sql``}
+         ${q.q ? sql`AND (i.invoice_number ILIKE ${'%' + q.q + '%'} OR c.name ILIKE ${'%' + q.q + '%'} OR cn.credit_note_number ILIKE ${'%' + q.q + '%'})` : sql``}
+         ${q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? sql`AND r.created_at >= ${q.from}::date` : sql``}
+         ${q.to && /^\d{4}-\d{2}-\d{2}$/.test(q.to) ? sql`AND r.created_at < (${q.to}::date + 1)` : sql``}
        ORDER BY r.created_at DESC LIMIT ${clampLimit(q.limit, 50, 200)}
     `.execute(trx)).rows;
   }));
@@ -80,10 +83,16 @@ export default async function returnsRoutes(app: FastifyInstance) {
     `.execute(trx)).rows[0];
     if (!ret) throw notFound('Return not found.');
     const lines = (await sql<any>`
-      SELECT srl.*, p.name AS product_name, p.sku, il.rate_locked_at_scan
+      SELECT srl.*, p.name AS product_name, p.sku, il.rate_locked_at_scan,
+             COALESCE(u.print_label, bu.print_label) AS unit_print_label,
+             COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
+             round(srl.qty_base_unit / COALESCE(pu.multiplier_to_base, 1), 4) AS qty_in_sale_unit
         FROM sales_return_lines srl
         JOIN invoice_lines il ON il.line_id = srl.invoice_line_id
         JOIN products p ON p.product_id = il.product_id
+        JOIN units bu ON bu.unit_code = p.base_unit
+        LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+        LEFT JOIN units u ON u.unit_code = pu.unit_label
        WHERE srl.return_id = ${id}
     `.execute(trx)).rows;
     return { ...ret, lines };
@@ -108,9 +117,15 @@ export default async function returnsRoutes(app: FastifyInstance) {
       SELECT il.*, p.name AS product_name, p.sku, p.category_id, p.serial_tracked,
              COALESCE(rw.window_days, ${Number(settings.return_window_days)}) AS window_days,
              COALESCE((SELECT SUM(qty_base_unit) FROM sales_return_lines WHERE invoice_line_id = il.line_id), 0) AS already_returned,
-             w.duration_months AS warranty_months
+             w.duration_months AS warranty_months,
+             COALESCE(u.print_label, bu.print_label) AS unit_print_label, bu.print_label AS base_unit_label,
+             COALESCE(u.allows_fraction, bu.allows_fraction) AS allows_fraction,
+             COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base
         FROM invoice_lines il
         JOIN products p ON p.product_id = il.product_id
+        JOIN units bu ON bu.unit_code = p.base_unit
+        LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+        LEFT JOIN units u ON u.unit_code = pu.unit_label
         LEFT JOIN return_windows rw ON rw.category_id = p.category_id
         LEFT JOIN LATERAL (
             SELECT duration_months FROM warranties
@@ -118,6 +133,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
              ORDER BY (product_id IS NOT NULL) DESC LIMIT 1
         ) w ON TRUE
        WHERE il.invoice_id = ${invoiceId}
+       ORDER BY il.line_no, il.line_id
     `.execute(trx)).rows;
 
     const soldAt = new Date(invoice.server_received_at);
@@ -127,6 +143,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
       invoice: {
         invoice_id: invoice.invoice_id, invoice_number: invoice.invoice_number,
         invoice_type: invoice.invoice_type, grand_total: invoice.grand_total,
+        amount: Math.round((Number(invoice.grand_total) + Number(invoice.round_off)) * 100) / 100,
+        customer_id: invoice.customer_id,
         customer_name: invoice.customer_name, sold_at: invoice.server_received_at,
       },
       days_since_sale: daysSince,
@@ -135,10 +153,21 @@ export default async function returnsRoutes(app: FastifyInstance) {
       lines: lines.map((l: any) => {
         const remaining = round2(Number(l.base_unit_qty) - Number(l.already_returned));
         const withinWindow = daysSince <= Number(l.window_days);
+        const mult = Number(l.multiplier_to_base) || 1;
         return {
           line_id: l.line_id, product_id: l.product_id, product_name: l.product_name, sku: l.sku,
           sold_qty: Number(l.base_unit_qty), already_returned: Number(l.already_returned),
           returnable_qty: Math.max(remaining, 0),
+          // The same figures in the unit the customer bought in (2 BOX, 5 × 100 G),
+          // which is how the person at the counter will count what came back.
+          unit_print_label: l.unit_print_label, base_unit_label: l.base_unit_label,
+          multiplier_to_base: mult, allows_fraction: l.allows_fraction,
+          sold_qty_in_unit: Number(l.qty_in_sale_unit),
+          returnable_qty_in_unit: Math.max(Math.round((remaining / mult) * 10000) / 10000, 0),
+          // What one base unit refunds, GST included — proportional to the line as billed.
+          refund_per_base_unit: Number(l.base_unit_qty) > 0
+            ? Math.round((Number(l.taxable_value) + Number(l.cgst_amount) + Number(l.sgst_amount) + Number(l.igst_amount))
+                / Number(l.base_unit_qty) * 10000) / 10000 : 0,
           window_days: Number(l.window_days),
           within_return_window: withinWindow,
           warranty_months: l.warranty_months,
@@ -174,10 +203,10 @@ export default async function returnsRoutes(app: FastifyInstance) {
     // two are not payment_method enum members, so ORIGINAL_MODE was cast straight
     // into `::payment_method` and every return at a shop configured that way died
     // with a 500. Each policy is now mapped explicitly to a real payment method.
-    const refundMethod: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' = (() => {
+    const refundMethod: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'CREDIT' = (() => {
       switch (settings.refund_method) {
         case 'ADMIN_CHOICE':
-          return oneOf(body.refund_method ?? 'CASH', 'Refund method', ['CASH', 'UPI', 'CARD', 'CREDIT'] as const);
+          return oneOf(body.refund_method ?? 'CASH', 'Refund method', ['CASH', 'UPI', 'CARD', 'BANK_TRANSFER', 'CREDIT'] as const);
         case 'STORE_CREDIT':
           return 'CREDIT';
         case 'ORIGINAL_MODE': {
@@ -188,7 +217,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
             .filter((p) => p.method !== 'LOYALTY_POINTS')
             .sort((a, b) => Number(b.amount) - Number(a.amount));
           const top = ranked[0]?.method;
-          return top === 'CASH' || top === 'UPI' || top === 'CARD' || top === 'CREDIT' ? top : 'CREDIT';
+          return top === 'CASH' || top === 'UPI' || top === 'CARD' || top === 'BANK_TRANSFER' || top === 'CREDIT' ? top : 'CREDIT';
         }
         case 'CASH':
         default:
@@ -196,10 +225,22 @@ export default async function returnsRoutes(app: FastifyInstance) {
       }
     })();
 
-    const requested = arrayOf(body.lines, 'lines', (l) => ({
-      invoice_line_id: uuid(l.invoice_line_id, 'lines[].invoice_line_id'),
-      qty_base_unit: num(l.qty_base_unit, 'lines[].qty_base_unit', { min: 0.0001 }),
-      condition: oneOf(l.condition ?? 'RESELLABLE', 'lines[].condition', ['RESELLABLE', 'DAMAGED'] as const),
+    // Store credit and "back to the original credit sale" both land on a customer
+    // account. A walk-in has none, so there is nowhere for that money to go — it
+    // used to be silently dropped. Say so instead.
+    if (refundMethod === 'CREDIT' && !invoice.customer_id) {
+      throw badRequest('This was a walk-in sale, so there is no account to hold store credit. Refund by cash, UPI, card or bank transfer.');
+    }
+
+    // Quantities may be given in the unit the line was sold in (qty, e.g. 2 BOX)
+    // or directly in base units (qty_base_unit). Either way the refund is
+    // proportional to the line as billed.
+    const requested = arrayOf(body.lines, 'Items', (l, i) => ({
+      invoice_line_id: uuid(l.invoice_line_id, `Item ${i + 1}`),
+      qty_in_unit: l.qty === undefined || l.qty === null ? null : num(l.qty, `Quantity (item ${i + 1})`, { min: 0.0001, max: 1e9 }),
+      qty_base_unit: l.qty === undefined || l.qty === null
+        ? num(l.qty_base_unit, `Quantity (item ${i + 1})`, { min: 0.0001, max: 1e9 }) : 0,
+      condition: oneOf(l.condition ?? 'RESELLABLE', 'Condition', ['RESELLABLE', 'DAMAGED'] as const),
     }));
 
     const daysSince = Math.floor((Date.now() - new Date(invoice.server_received_at).getTime()) / 86_400_000);
@@ -258,13 +299,18 @@ export default async function returnsRoutes(app: FastifyInstance) {
 
       const line = (await sql<any>`
         SELECT il.*, p.name AS product_name, p.category_id,
+               COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
                COALESCE(rw.window_days, ${Number(settings.return_window_days)}) AS window_days,
                COALESCE((SELECT SUM(qty_base_unit) FROM sales_return_lines WHERE invoice_line_id = il.line_id), 0) AS already_returned
           FROM invoice_lines il JOIN products p ON p.product_id = il.product_id
+          LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
           LEFT JOIN return_windows rw ON rw.category_id = p.category_id
          WHERE il.line_id = ${r.invoice_line_id} AND il.invoice_id = ${invoiceId}
       `.execute(trx)).rows[0];
       if (!line) throw badRequest('One of the returned lines does not belong to that invoice.');
+      if (r.qty_in_unit !== null) {
+        r.qty_base_unit = Math.round(r.qty_in_unit * Number(line.multiplier_to_base) * 10000) / 10000;
+      }
 
       // Quantities already claimed by earlier lines of THIS request count too — a
       // single payload asking for 1 + 1 against a 1-unit line must not slip past a
@@ -274,7 +320,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
         .reduce((sum, q) => sum + q.qty_base_unit, 0);
       const remaining = Number(line.base_unit_qty) - Number(line.already_returned) - claimedInThisRequest;
       if (r.qty_base_unit > remaining + 0.0001) {
-        throw badRequest(`Only ${remaining} of "${line.product_name}" is left to return on this invoice.`);
+        const mult = Number(line.multiplier_to_base) || 1;
+        throw badRequest(`Only ${Math.max(Math.round((remaining / mult) * 10000) / 10000, 0)} of "${line.product_name}" is left to return on this invoice.`);
       }
       // 12.3 — past the window, a manager has to say yes, and the fact that they
       // did is recorded. An unverified id in the request body proved nothing.
@@ -475,7 +522,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
         });
       }
 
-      if (customer.phone) {
+      if (customer.phone && settings.auto_whatsapp_documents) {
         await queueMessage(trx, {
           to_phone: customer.phone, customer_id: invoice.customer_id, invoice_id: invoiceId,
           message_type: creditNoteNumber ? 'CREDIT_NOTE' : 'INVOICE_PDF',
@@ -568,6 +615,48 @@ export default async function returnsRoutes(app: FastifyInstance) {
          ${q.to ? sql`AND cn.created_at < (${q.to}::date + 1)` : sql``}
        ORDER BY cn.created_at DESC LIMIT ${clampLimit(q.limit, 100, 500)}
     `.execute(trx)).rows;
+  }));
+
+  /** The printed GST credit note (12.1.1), from its own stored lines. */
+  app.get('/credit-notes/:id/pdf', guarded('view_returns', async ({ db: trx, req, reply }) => {
+    const id = uuid((req.params as any).id, 'credit_note_id');
+    const note = (await sql<any>`
+      SELECT cn.*, i.invoice_number, i.server_received_at AS invoice_date, i.branch_id,
+             i.place_of_supply_state_code,
+             b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
+             b.phone AS branch_phone, b.state_code AS branch_state_code,
+             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+             c.address AS customer_address, c.company_name AS customer_company,
+             c.state AS customer_state, c.state_code AS customer_state_code
+        FROM credit_notes cn JOIN invoices i ON i.invoice_id = cn.invoice_id
+        JOIN branches b ON b.branch_id = i.branch_id
+        LEFT JOIN customers c ON c.customer_id = i.customer_id
+       WHERE cn.credit_note_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!note) throw notFound('Credit note not found.');
+    const lines = (await sql<any>`
+      SELECT cnl.*, p.name AS product_name, p.sku, p.hsn_code,
+             COALESCE(u.print_label, bu.print_label) AS unit_print_label, u.dimension AS unit_dimension,
+             bu.print_label AS base_unit_label,
+             COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
+             round(cnl.qty_base_unit / COALESCE(pu.multiplier_to_base, 1), 4) AS qty_in_sale_unit,
+             round(il.rate_locked_at_scan * COALESCE(pu.multiplier_to_base, 1), 2) AS rate_per_sale_unit,
+             CASE WHEN cnl.taxable_value > 0
+                  THEN round((cnl.cgst_amount + cnl.sgst_amount + cnl.igst_amount) / cnl.taxable_value * 100, 1)
+                  ELSE 0 END AS gst_rate_pct
+        FROM credit_note_lines cnl
+        JOIN invoice_lines il ON il.line_id = cnl.invoice_line_id
+        JOIN products p ON p.product_id = il.product_id
+        JOIN units bu ON bu.unit_code = p.base_unit
+        LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+        LEFT JOIN units u ON u.unit_code = pu.unit_label
+       WHERE cnl.credit_note_id = ${id} ORDER BY il.line_no
+    `.execute(trx)).rows;
+    const pdf = await buildCreditNotePdf(trx, note, lines);
+    return reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `inline; filename="CreditNote-${String(note.credit_note_number).replace(/[^\w.-]/g, '_')}.pdf"`)
+      .send(pdf);
   }));
 
   // ── Warranty (12.2) ───────────────────────────────────────────────────────

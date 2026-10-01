@@ -27,7 +27,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';
 import {
-  priceBasket, rawLinesFromStored, assertPaymentsSettle,
+  priceBasket, rawLinesFromStored, assertPaymentsSettle, PAYMENT_METHODS,
   type PricedBasket, type ParsedPayment,
 } from '../../lib/billing-engine.js';
 import { nextNumber } from '../../lib/numbering.js';
@@ -37,9 +37,87 @@ import { buildInvoicePdf } from '../../lib/pdf/index.js';
 import type { Tx } from '../../lib/db.js';
 import type { Session } from '../../lib/session.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
+import { optionalStateCode } from '../../lib/units.js';
 
-const PAYMENT_METHODS = ['CASH', 'UPI', 'CARD', 'CREDIT', 'LOYALTY_POINTS'] as const;
 const INVOICE_TYPES = ['GST', 'NON_GST'] as const;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function optionalDate(value: unknown, field: string): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const s = String(value).slice(0, 10);
+  if (!DATE_RE.test(s) || Number.isNaN(new Date(s).getTime())) throw badRequest(`${field} must be a date.`);
+  return s;
+}
+
+/**
+ * The document fields a tax invoice carries besides its items (Section 19). All
+ * optional, all validated, all frozen at finalisation with the rest of the bill.
+ * `undefined` means "not sent" so a draft edit can leave a field as it was.
+ */
+function parseDocFields(body: Record<string, any>) {
+  const pick = <T>(key: string, parse: (v: unknown) => T): T | undefined =>
+    body[key] === undefined ? undefined : parse(body[key]);
+  return {
+    due_date: pick('due_date', (v) => optionalDate(v, 'Due date')),
+    order_no: pick('order_no', (v) => optionalStr(v, 'Order number', { max: 60 })),
+    challan_no: pick('challan_no', (v) => optionalStr(v, 'Challan number', { max: 60 })),
+    challan_date: pick('challan_date', (v) => optionalDate(v, 'Challan date')),
+    vehicle_no: pick('vehicle_no', (v) => {
+      const s = optionalStr(v, 'Vehicle number', { max: 20 });
+      return s ? s.toUpperCase() : null;
+    }),
+    place_of_delivery: pick('place_of_delivery', (v) => optionalStr(v, 'Place of delivery', { max: 300 })),
+  };
+}
+
+/**
+ * The lines of an invoice as a document needs them: in the order they were rung
+ * up, with the sale unit's printed label, its size in base units, and the GST rate
+ * that applied on the billing date (2.7), not today's.
+ */
+async function invoiceLineRows(trx: Tx, invoiceId: string, billedAt: unknown) {
+  return (await sql<any>`
+    SELECT il.*, p.name AS product_name, p.sku, p.hsn_code, p.base_unit,
+           COALESCE(pu.unit_label, p.base_unit) AS unit_label,
+           COALESCE(u.print_label, bu.print_label, p.base_unit) AS unit_print_label,
+           u.dimension AS unit_dimension,
+           COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
+           bu.print_label AS base_unit_label,
+           round(il.rate_locked_at_scan * COALESCE(pu.multiplier_to_base, 1), 2) AS rate_per_sale_unit,
+           sb.batch_number,
+           tr.base_shade, tr.tint_formula,
+           COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+           (SELECT string_agg(ss.serial_number, ', ') FROM stock_serials ss
+             WHERE ss.invoice_line_id = il.line_id) AS serial_numbers,
+           COALESCE((SELECT SUM(srl.qty_base_unit) FROM sales_return_lines srl
+                      WHERE srl.invoice_line_id = il.line_id), 0) AS returned_base_qty
+      FROM invoice_lines il
+      JOIN products p ON p.product_id = il.product_id
+      JOIN units bu ON bu.unit_code = p.base_unit
+      LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+      LEFT JOIN units u ON u.unit_code = pu.unit_label
+      LEFT JOIN stock_batches sb ON sb.batch_id = il.batch_id
+      LEFT JOIN paint_tint_records tr ON tr.invoice_line_id = il.line_id
+      LEFT JOIN LATERAL (
+          SELECT gst_rate_pct FROM hsn_tax_rates
+           WHERE hsn_code = p.hsn_code
+             AND daterange(effective_from, effective_to, '[)') @> ${billedAt as any}::date
+           LIMIT 1
+      ) htr ON TRUE
+     WHERE il.invoice_id = ${invoiceId}
+     ORDER BY il.line_no, il.line_id
+  `.execute(trx)).rows;
+}
+
+/**
+ * How a finalised bill was settled at the counter. CREDIT on the bill is money
+ * still owed on the customer's account; everything else was received.
+ */
+const PAYMENT_STATUS_SQL = sql`
+  CASE WHEN i.status <> 'FINAL' THEN NULL
+       WHEN COALESCE(pay.on_credit, 0) <= 0.005 THEN 'PAID'
+       WHEN COALESCE(pay.settled, 0) <= 0.005 THEN 'CREDIT'
+       ELSE 'PARTIALLY_PAID' END`;
 
 /**
  * Consumes a single-use override grant issued by /auth/verify-override-pin.
@@ -61,32 +139,414 @@ async function consumeOverride(
   return { approver_id: row.approver_id!, approver_name: row.approver_name! };
 }
 
+// ── Draft bills: shared helpers (also used by estimate → bill conversion) ────
+/**
+ * The draft row alone, with no pricing. Discarding a draft must not depend on
+ * whether its contents can still be priced.
+ */
+async function loadDraftRow(trx: Tx, id: string) {
+  const row = (await sql<any>`
+    SELECT invoice_id, branch_id, status, created_by, grand_total, invoice_number
+      FROM invoices WHERE invoice_id = ${id}
+  `.execute(trx)).rows[0];
+  if (!row) throw notFound('That draft was not found at your branch.');
+  if (row.status !== 'DRAFT') {
+    throw badRequest(`Invoice ${row.invoice_number ?? ''} is ${row.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
+  }
+  return row;
+}
+
+/** Loads a draft with its lines and payments, re-priced from scratch. */
+async function loadDraft(trx: Tx, id: string) {
+  const draft = (await sql<any>`
+    SELECT i.*, b.name AS branch_name, b.state_code AS branch_state_code, b.gstin AS branch_gstin,
+           c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+           c.whatsapp AS customer_whatsapp, c.state_code AS customer_state_code,
+           c.credit_allowed, c.credit_limit, c.loyalty_points_balance,
+           COALESCE((SELECT balance_after FROM customer_credit_ledger l WHERE l.customer_id = c.customer_id
+                      ORDER BY l.created_at DESC, l.entry_id DESC LIMIT 1), 0) AS customer_balance,
+           u.full_name AS created_by_name, qt.quotation_number
+      FROM invoices i
+      JOIN branches b ON b.branch_id = i.branch_id
+      LEFT JOIN customers c ON c.customer_id = i.customer_id
+      LEFT JOIN users u ON u.user_id = i.created_by
+      LEFT JOIN quotations qt ON qt.quotation_id = i.source_quotation_id
+     WHERE i.invoice_id = ${id}
+  `.execute(trx)).rows[0];
+  if (!draft) throw notFound('That draft was not found at your branch.');
+  if (draft.status !== 'DRAFT') {
+    throw badRequest(`Invoice ${draft.invoice_number ?? ''} is ${draft.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
+  }
+
+  // Availability is read alongside the lines so the review screen can warn about
+  // short stock BEFORE the cashier tells the customer the bill is done. The
+  // binding check still happens under a row lock at finalisation — this is an
+  // early warning, not the enforcement.
+  const storedLines = (await sql<any>`
+    SELECT il.*, p.name AS product_name, p.sku,
+           COALESCE(bs.base_unit_qty, 0) - COALESCE(bs.reserved_qty, 0) AS available_qty
+      FROM invoice_lines il
+      JOIN products p ON p.product_id = il.product_id
+      LEFT JOIN branch_stock bs ON bs.product_id = il.product_id AND bs.branch_id = ${draft.branch_id}
+     WHERE il.invoice_id = ${id} ORDER BY il.line_no, il.line_id
+  `.execute(trx)).rows;
+  const payments = (await sql<any>`
+    SELECT method, amount, ref_no FROM invoice_payments WHERE invoice_id = ${id}
+  `.execute(trx)).rows;
+
+  const settings = await loadSettings(trx, draft.branch_id);
+  // Re-priced, never read back as stored: the stored figures are a cache of the
+  // last computation, and this is the recomputation that makes them trustworthy.
+  // Pricing can legitimately fail on an OLD draft — the clearest case being a
+  // product retired from the catalog while the bill sat open at the counter.
+  // Letting that throw made the draft unreadable, uneditable AND undiscardable:
+  // the cashier was left with a dead bill on screen and no way out of it. The
+  // failure is reported instead, so the screen can name the offending line and
+  // the cashier can remove it or throw the draft away.
+  let priced: PricedBasket | null = null;
+  let pricingError: string | null = null;
+  if (storedLines.length) {
+    try {
+      priced = await priceBasket(trx, {
+        branchId: draft.branch_id,
+        invoiceType: draft.invoice_type,
+        rawLines: rawLinesFromStored(storedLines),
+        settings,
+        branchStateCode: draft.branch_state_code,
+        placeOfSupplyStateCode: draft.place_of_supply_state_code,
+        applyCashRounding: Number(draft.round_off) !== 0,
+      });
+    } catch (err) {
+      pricingError = err instanceof Error ? err.message : 'This draft can no longer be priced.';
+    }
+  }
+
+  return { draft, storedLines, payments, settings, priced, pricingError };
+}
+
+/** Writes a priced basket over a draft's lines, and refreshes its totals. */
+async function writeDraftContents(
+  trx: Tx, invoiceId: string, priced: PricedBasket, settings: Awaited<ReturnType<typeof loadSettings>>,
+  payments: ParsedPayment[],
+) {
+  await sql`DELETE FROM paint_tint_records WHERE invoice_line_id IN
+              (SELECT line_id FROM invoice_lines WHERE invoice_id = ${invoiceId})`.execute(trx);
+  await sql`DELETE FROM invoice_lines WHERE invoice_id = ${invoiceId}`.execute(trx);
+  await sql`DELETE FROM invoice_payments WHERE invoice_id = ${invoiceId}`.execute(trx);
+
+  for (const [index, line] of priced.lines.entries()) {
+    const inserted = (await sql<any>`
+      INSERT INTO invoice_lines (invoice_id, line_no, product_id, product_unit_id, qty_in_sale_unit, base_unit_qty,
+                                 price_type, rate_locked_at_scan, discount_amount, taxable_value,
+                                 cgst_amount, sgst_amount, igst_amount, batch_id)
+      VALUES (${invoiceId}, ${index + 1}, ${line.product_id}, ${line.product_unit_id}, ${line.qty_in_sale_unit},
+              ${line.computed.base_unit_qty}, ${line.price_type}::price_type, ${line.rate_locked_at_scan},
+              ${line.computed.discount_amount}, ${line.computed.taxable_value}, ${line.computed.cgst_amount},
+              ${line.computed.sgst_amount}, ${line.computed.igst_amount}, ${line.batch_id})
+      RETURNING line_id
+    `.execute(trx)).rows[0];
+    if (line.tint && (line.tint.base_shade || line.tint.tint_formula) && settings.enable_tinting_records) {
+      await sql`
+        INSERT INTO paint_tint_records (invoice_line_id, base_shade, tint_formula)
+        VALUES (${inserted.line_id}, ${line.tint.base_shade ?? null}, ${line.tint.tint_formula ?? null})
+      `.execute(trx);
+    }
+  }
+
+  // Intended payments are kept alongside the draft so a half-taken split payment
+  // survives a page reload. They post nothing until finalisation.
+  for (const p of payments) {
+    if (p.amount <= 0) continue;
+    await sql`
+      INSERT INTO invoice_payments (invoice_id, method, amount, ref_no)
+      VALUES (${invoiceId}, ${p.method}::payment_method, ${p.amount}, ${p.ref_no})
+    `.execute(trx);
+  }
+
+  await sql`
+    UPDATE invoices
+       SET subtotal = ${priced.totals.subtotal}, discount_total = ${priced.totals.discount_total},
+           cgst_total = ${priced.totals.cgst_total}, sgst_total = ${priced.totals.sgst_total},
+           igst_total = ${priced.totals.igst_total}, grand_total = ${priced.totals.grand_total},
+           round_off = ${priced.totals.round_off}, updated_at = now()
+     WHERE invoice_id = ${invoiceId}
+  `.execute(trx);
+}
+
+function parsePayments(body: Record<string, any>, { required = true } = {}): ParsedPayment[] {
+  return arrayOf(body.payments ?? [], 'payments', (p) => ({
+    method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
+    amount: num(p.amount, 'payments[].amount', { min: 0, max: 1e9 }),
+    ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: required ? 1 : 0, max: 6,
+  });
+}
+
+/**
+ * What this session is allowed to change on a draft (Section 7.1 field-level
+ * permissions). Returned with every draft so the review screen can grey out
+ * what the person cannot touch, while the server still enforces it.
+ */
+function draftPermissions(session: Session, settings: Awaited<ReturnType<typeof loadSettings>>) {
+  const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
+  return {
+    edit_lines: true,
+    edit_quantity: true,
+    edit_customer: true,
+    edit_invoice_type: true,
+    edit_discount: true,
+    edit_notes: true,
+    edit_payment: true,
+    // A cashier may lower a rate, but only inside the staff ceiling; past that
+    // the server demands a manager grant at finalisation (3.4).
+    override_price: true,
+    discount_limit_pct: manager ? 100 : Number(settings.staff_discount_limit_pct),
+    needs_approval_beyond_limit: !manager,
+    finalize: true,
+    discard_any_draft: manager,
+  };
+}
+
+const draftView = (loaded: Awaited<ReturnType<typeof loadDraft>>, session: Session) => ({
+  ...loaded.draft,
+  // Non-null when the stored lines can no longer be priced. The screen shows it
+  // and offers the two ways out: drop the offending line, or discard the draft.
+  pricing_error: loaded.pricingError,
+  unpriced_lines: loaded.pricingError
+    ? loaded.storedLines.map((l: any) => ({
+        product_id: l.product_id, product_name: l.product_name, sku: l.sku,
+        qty_in_sale_unit: Number(l.qty_in_sale_unit),
+        rate_locked_at_scan: Number(l.rate_locked_at_scan),
+      }))
+    : [],
+  // The server's arithmetic, not the client's. This is the figure the review
+  // screen must display and the figure finalisation will charge.
+  totals: loaded.priced?.totals ?? {
+    subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0,
+    tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
+  },
+  lines: (loaded.priced?.lines ?? []).map((l, i) => ({
+    ...l.computed,
+    product_id: l.product_id,
+    product_name: l.product_name,
+    sku: loaded.storedLines[i]?.sku ?? null,
+    available_qty: Number(loaded.storedLines[i]?.available_qty ?? 0),
+    short_by: Math.max(round2(l.computed.base_unit_qty - Number(loaded.storedLines[i]?.available_qty ?? 0)), 0),
+    hsn_code: l.hsn_code,
+    unit_label: l.unit_label,
+    unit_print_label: l.unit_print_label,
+    multiplier_to_base: l.multiplier_to_base,
+    base_unit: l.base_unit,
+    rate_per_sale_unit: l.rate_per_sale_unit,
+    qty_in_sale_unit: l.qty_in_sale_unit,
+    product_unit_id: l.product_unit_id,
+    price_type: l.price_type,
+    rate_locked_at_scan: l.rate_locked_at_scan,
+    catalog_rate: l.catalog_rate,
+    // Shown on the review screen so the cashier can see at a glance which lines
+    // are being sold below catalog and by how much.
+    price_changed_since_scan: round2(l.catalog_rate - l.rate_locked_at_scan) !== 0,
+    implied_discount: l.implied_discount,
+    gst_rate_pct: l.gst_rate_pct,
+    batch_id: l.batch_id,
+    line_total: l.computed.line_total,
+  })),
+  payments: loaded.payments,
+  catalog_value: loaded.priced?.catalog_value ?? 0,
+  given_away: loaded.priced?.given_away ?? 0,
+  discount_pct: round2(loaded.priced?.discount_pct ?? 0),
+  interstate: loaded.priced?.interstate ?? false,
+  permissions: draftPermissions(session, loaded.settings),
+  // Surfaced as a whole-document flag so the review screen can say plainly that
+  // finalising will be refused (or need a manager PIN) before it is attempted.
+  stock_warnings: (loaded.priced?.lines ?? []).map((l, i) => ({
+    product_name: l.product_name,
+    unit: l.base_unit,
+    requested: l.computed.base_unit_qty,
+    available: Number(loaded.storedLines[i]?.available_qty ?? 0) })).filter((w) => w.available < w.requested),
+  payment_shortfall: round2(
+    (loaded.priced?.totals.payable ?? 0) -
+    loaded.payments.reduce((s: number, p: any) => s + Number(p.amount), 0),
+  ) });
+
+
+/**
+ * Opens a draft bill. A draft holds no number, moves no stock and posts nothing;
+ * every figure on it is the server's pricing of the basket (see priceBasket).
+ */
+async function createDraft(
+  trx: Tx, session: Session, body: Record<string, any>,
+  opts: { sourceQuotationId?: string | null } = {},
+) {
+  const branchId = writeBranch(session, body.branch_id);
+  const settings = await loadSettings(trx, branchId);
+  const invoiceType = oneOf(body.invoice_type ?? 'GST', 'Invoice type', INVOICE_TYPES);
+  const customerId = optionalUuid(body.customer_id, 'Customer');
+
+  const branch = (await sql<any>`SELECT * FROM branches WHERE branch_id = ${branchId}`.execute(trx)).rows[0];
+  if (!branch) throw notFound('Branch not found.');
+  let customer: any = null;
+  if (customerId) {
+    customer = (await sql<any>`
+      SELECT customer_id, name, state_code, is_active FROM customers WHERE customer_id = ${customerId}
+    `.execute(trx)).rows[0];
+    if (!customer) throw notFound('Customer not found.');
+    if (!customer.is_active) throw badRequest(`${customer.name}'s account is inactive.`);
+  }
+
+  // A draft may legitimately start empty — the cashier opens the bill first and
+  // scans into it — so `lines` is optional here in a way it never is for a sale.
+  const rawLines = body.lines === undefined
+    ? []
+    : arrayOf(body.lines, 'lines', (l) => l, { min: 0, max: 200 });
+  const placeOfSupply = optionalStateCode(body.place_of_supply_state_code, 'Place of supply')
+    ?? (invoiceType === 'GST' && customer?.state_code ? customer.state_code : null)
+    ?? branch.state_code;
+  const applyCashRounding = bool(body.apply_cash_rounding, 'apply_cash_rounding', false);
+  const doc = parseDocFields(body);
+
+  const priced = rawLines.length
+    ? await priceBasket(trx, {
+        branchId, invoiceType, rawLines, settings,
+        branchStateCode: branch.state_code,
+        placeOfSupplyStateCode: placeOfSupply,
+        applyCashRounding })
+    : null;
+
+  // No invoice_number: the CHECK constraint on `invoices` permits NULL only
+  // while the row is not FINAL, which is exactly the guarantee wanted here —
+  // a draft physically cannot hold a number from the gapless series (3.6).
+  const draft = (await sql<any>`
+    INSERT INTO invoices (invoice_number, branch_id, customer_id, invoice_type, status,
+                          subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
+                          round_off, place_of_supply_state_code, device_created_at, created_by, notes,
+                          due_date, order_no, challan_no, challan_date, vehicle_no, place_of_delivery,
+                          source_quotation_id)
+    VALUES (NULL, ${branchId}, ${customerId}, ${invoiceType}::invoice_type, 'DRAFT',
+            ${priced?.totals.subtotal ?? 0}, ${priced?.totals.discount_total ?? 0},
+            ${priced?.totals.cgst_total ?? 0}, ${priced?.totals.sgst_total ?? 0},
+            ${priced?.totals.igst_total ?? 0}, ${priced?.totals.grand_total ?? 0},
+            ${priced?.totals.round_off ?? 0}, ${placeOfSupply}, now(), ${session.user_id},
+            ${optionalStr(body.notes, 'Notes', { max: 1000 })},
+            ${doc.due_date ?? null}, ${doc.order_no ?? null}, ${doc.challan_no ?? null},
+            ${doc.challan_date ?? null}, ${doc.vehicle_no ?? null}, ${doc.place_of_delivery ?? null},
+            ${opts.sourceQuotationId ?? null})
+    RETURNING invoice_id
+  `.execute(trx)).rows[0];
+
+  if (priced) {
+    await writeDraftContents(trx, draft.invoice_id, priced, settings,
+      parsePayments(body, { required: false }));
+  }
+  await audit(trx, session, 'INVOICE_DRAFT_CREATED', 'invoices', draft.invoice_id,
+    { after: { lines: rawLines.length, invoice_type: invoiceType, from_quotation: opts.sourceQuotationId ?? null } },
+    { branchId });
+
+  return draftView(await loadDraft(trx, draft.invoice_id), session);
+}
+
+/**
+ * Section 21 — "convert an estimate to a bill". It opens a DRAFT bill carrying the
+ * estimate's lines at the estimate's rates, and nothing else happens yet: the
+ * bill then goes through review, payment and finalisation like any other, so the
+ * discount ceiling, the stock check, the credit limit and the till all apply. The
+ * estimate is marked converted only when that bill is finalised.
+ *
+ * Converting twice opens the same draft rather than a second one, so a double
+ * click cannot produce two bills for one estimate.
+ */
+export async function createDraftFromQuotation(trx: Tx, session: Session, quotationId: string) {
+  const q = (await sql<any>`
+    SELECT q.*, c.is_active AS customer_active, c.name AS customer_name
+      FROM quotations q JOIN customers c ON c.customer_id = q.customer_id
+     WHERE q.quotation_id = ${quotationId} FOR UPDATE OF q
+  `.execute(trx)).rows[0];
+  if (!q) throw notFound('Estimate not found.');
+  if (q.status === 'CONVERTED') throw badRequest(`Estimate ${q.quotation_number} has already been billed.`);
+  if (q.status === 'CANCELLED') throw badRequest(`Estimate ${q.quotation_number} was cancelled.`);
+  if (q.status === 'EXPIRED' || (q.valid_until && new Date(`${q.valid_until}T23:59:59+05:30`).getTime() < Date.now())) {
+    throw badRequest(`Estimate ${q.quotation_number} has expired. Revise it at current prices, or raise a fresh one.`);
+  }
+
+  const existing = (await sql<{ invoice_id: string }>`
+    SELECT invoice_id FROM invoices WHERE source_quotation_id = ${quotationId} AND status = 'DRAFT'
+     ORDER BY updated_at DESC LIMIT 1
+  `.execute(trx)).rows[0];
+  if (existing) return { ...draftView(await loadDraft(trx, existing.invoice_id), session), reused_existing_draft: true };
+
+  const lines = (await sql<any>`
+    SELECT * FROM quotation_lines WHERE quotation_id = ${quotationId} ORDER BY sort_order, line_id
+  `.execute(trx)).rows;
+  if (!lines.length) throw badRequest('This estimate has no items to bill.');
+
+  const draft = await createDraft(trx, session, {
+    branch_id: q.branch_id,
+    customer_id: q.customer_id,
+    invoice_type: q.with_gst === false ? 'NON_GST' : 'GST',
+    place_of_supply_state_code: q.place_of_supply_state_code ?? undefined,
+    notes: q.notes ?? undefined,
+    lines: lines.map((l: any) => ({
+      product_id: l.product_id,
+      product_unit_id: l.product_unit_id ?? undefined,
+      // Older estimates were quoted in base units only.
+      qty_in_sale_unit: Number(l.qty_in_sale_unit ?? l.qty_base_unit),
+      rate_locked_at_scan: Number(l.rate),
+      price_type: q.price_type,
+      discount_amount: Number(l.discount_amount ?? 0),
+    })),
+  }, { sourceQuotationId: quotationId });
+  await audit(trx, session, 'QUOTATION_UPDATED', 'quotations', quotationId,
+    { after: { draft_invoice_id: draft.invoice_id, action: 'OPENED_AS_BILL' } }, { branchId: q.branch_id });
+  return draft;
+}
+
 export default async function billingRoutes(app: FastifyInstance) {
   // ── Invoice list ──────────────────────────────────────────────────────────
   app.get('/invoices', guarded('view_billing', async ({ session, db: trx, req }) => {
     const q = (req.query ?? {}) as Record<string, string | undefined>;
     const branchId = resolveBranchScope(session, q.branch_id);
+    const from = optionalDate(q.from, 'From date');
+    const to = optionalDate(q.to, 'To date');
+    const search = q.q?.trim().slice(0, 60);
+    const payStatus = q.payment_status
+      ? oneOf(q.payment_status, 'Payment status', ['PAID', 'PARTIALLY_PAID', 'CREDIT'] as const) : null;
+    const method = q.payment_method ? oneOf(q.payment_method, 'Payment method', PAYMENT_METHODS) : null;
     const rows = await sql<any>`
-      SELECT i.invoice_id, i.invoice_number, i.branch_id, b.name AS branch_name, i.invoice_type,
-             i.status, i.subtotal, i.discount_total, i.cgst_total, i.sgst_total, i.igst_total,
-             i.grand_total, i.round_off, i.server_received_at, i.is_offline_conflict,
-             c.name AS customer_name, c.phone AS customer_phone,
-             u.full_name AS created_by_name,
-             (SELECT string_agg(DISTINCT ip.method::text, ', ') FROM invoice_payments ip
-               WHERE ip.invoice_id = i.invoice_id) AS payment_methods
-        FROM invoices i
-        JOIN branches b ON b.branch_id = i.branch_id
-        LEFT JOIN customers c ON c.customer_id = i.customer_id
-        LEFT JOIN users u ON u.user_id = i.created_by
-       WHERE 1=1
-         ${branchId ? sql`AND i.branch_id = ${branchId}` : sql``}
-         ${q.status ? sql`AND i.status = ${oneOf(q.status, 'status', ['DRAFT', 'FINAL', 'VOID'] as const)}::invoice_status` : sql``}
-         ${q.customer_id ? sql`AND i.customer_id = ${uuid(q.customer_id, 'customer_id')}` : sql``}
-         ${q.from ? sql`AND i.server_received_at >= ${q.from}::timestamptz` : sql``}
-         ${q.to ? sql`AND i.server_received_at < (${q.to}::date + 1)` : sql``}
-         ${q.q ? sql`AND (i.invoice_number ILIKE ${'%' + q.q + '%'} OR c.name ILIKE ${'%' + q.q + '%'} OR c.phone ILIKE ${'%' + q.q + '%'})` : sql``}
-       ORDER BY i.server_received_at DESC
-       LIMIT ${clampLimit(q.limit, 50, 500)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
+      SELECT * FROM (
+        SELECT i.invoice_id, i.invoice_number, i.branch_id, b.name AS branch_name, i.invoice_type,
+               i.status, i.subtotal, i.discount_total, i.cgst_total, i.sgst_total, i.igst_total,
+               i.grand_total, i.round_off,
+               -- What the customer was asked to pay: the tax total plus cash rounding.
+               round(i.grand_total + i.round_off, 2) AS amount,
+               i.server_received_at, i.is_offline_conflict, i.due_date,
+               c.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+               u.full_name AS created_by_name,
+               pay.methods AS payment_methods, pay.settled, pay.on_credit,
+               ${PAYMENT_STATUS_SQL} AS payment_status,
+               EXISTS (SELECT 1 FROM sales_returns r WHERE r.invoice_id = i.invoice_id) AS has_returns
+          FROM invoices i
+          JOIN branches b ON b.branch_id = i.branch_id
+          LEFT JOIN customers c ON c.customer_id = i.customer_id
+          LEFT JOIN users u ON u.user_id = i.created_by
+          LEFT JOIN LATERAL (
+              SELECT string_agg(DISTINCT ip.method::text, ', ') AS methods,
+                     SUM(ip.amount) FILTER (WHERE ip.method <> 'CREDIT') AS settled,
+                     SUM(ip.amount) FILTER (WHERE ip.method = 'CREDIT') AS on_credit
+                FROM invoice_payments ip WHERE ip.invoice_id = i.invoice_id
+          ) pay ON TRUE
+         WHERE 1=1
+           ${branchId ? sql`AND i.branch_id = ${branchId}` : sql``}
+           ${q.status ? sql`AND i.status = ${oneOf(q.status, 'status', ['DRAFT', 'FINAL', 'VOID'] as const)}::invoice_status` : sql`AND i.status <> 'DRAFT'`}
+           ${q.invoice_type ? sql`AND i.invoice_type = ${oneOf(q.invoice_type, 'Invoice type', INVOICE_TYPES)}::invoice_type` : sql``}
+           ${q.customer_id ? sql`AND i.customer_id = ${uuid(q.customer_id, 'customer_id')}` : sql``}
+           ${from ? sql`AND i.server_received_at >= ${from}::date` : sql``}
+           ${to ? sql`AND i.server_received_at < (${to}::date + 1)` : sql``}
+           ${search ? sql`AND (i.invoice_number ILIKE ${'%' + search + '%'} OR c.name ILIKE ${'%' + search + '%'} OR c.phone ILIKE ${'%' + search + '%'})` : sql``}
+      ) x
+      WHERE 1=1
+        ${payStatus ? sql`AND x.payment_status = ${payStatus}` : sql``}
+        ${method ? sql`AND x.invoice_id IN (SELECT invoice_id FROM invoice_payments WHERE method = ${method}::payment_method)` : sql``}
+      ORDER BY x.server_received_at DESC
+      LIMIT ${clampLimit(q.limit, 50, 500)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
     `.execute(trx);
     return rows.rows;
   }));
@@ -97,41 +557,52 @@ export default async function billingRoutes(app: FastifyInstance) {
     const showCost = canSeeCost(session.role, settings);
 
     const invoice = (await sql<any>`
-      SELECT i.*, b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
+      SELECT i.*, round(i.grand_total + i.round_off, 2) AS amount,
+             b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
              b.state_code AS branch_state_code, b.phone AS branch_phone,
              c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
-             u.full_name AS created_by_name, eu.full_name AS sold_by_name
+             c.whatsapp AS customer_whatsapp, c.company_name AS customer_company,
+             c.address AS customer_address, c.state_code AS customer_state_code,
+             u.full_name AS created_by_name, eu.full_name AS sold_by_name,
+             qt.quotation_number,
+             pay.settled, pay.on_credit, ${PAYMENT_STATUS_SQL} AS payment_status
         FROM invoices i
         JOIN branches b ON b.branch_id = i.branch_id
         LEFT JOIN customers c ON c.customer_id = i.customer_id
         LEFT JOIN users u ON u.user_id = i.created_by
         LEFT JOIN employees e ON e.employee_id = i.sold_by_employee_id
         LEFT JOIN users eu ON eu.user_id = e.user_id
+        LEFT JOIN quotations qt ON qt.quotation_id = i.source_quotation_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(ip.amount) FILTER (WHERE ip.method <> 'CREDIT') AS settled,
+                   SUM(ip.amount) FILTER (WHERE ip.method = 'CREDIT') AS on_credit
+              FROM invoice_payments ip WHERE ip.invoice_id = i.invoice_id
+        ) pay ON TRUE
        WHERE i.invoice_id = ${id}
     `.execute(trx)).rows[0];
     if (!invoice) throw notFound('Invoice not found.');
 
-    const [lines, payments, returns] = await Promise.all([
-      sql<any>`
-        SELECT il.*, p.name AS product_name, p.sku, p.base_unit, pu.unit_label,
-               pu.multiplier_to_base, tr.base_shade, tr.tint_formula
-          FROM invoice_lines il
-          JOIN products p ON p.product_id = il.product_id
-          LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
-          LEFT JOIN paint_tint_records tr ON tr.invoice_line_id = il.line_id
-         WHERE il.invoice_id = ${id} ORDER BY il.line_id
-      `.execute(trx),
-      sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx),
-      sql<any>`SELECT r.return_id, r.created_at, cn.credit_note_number, cn.total_amount
+    const [lines, payments, returns, audits] = await Promise.all([
+      invoiceLineRows(trx, id, invoice.server_received_at),
+      sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id} ORDER BY amount DESC`.execute(trx),
+      sql<any>`SELECT r.return_id, r.created_at, r.refund_total, r.store_credit_total, r.refund_method,
+                      cn.credit_note_number, cn.total_amount, u.full_name AS created_by_name
                  FROM sales_returns r LEFT JOIN credit_notes cn ON cn.credit_note_id = r.credit_note_id
-                WHERE r.invoice_id = ${id}`.execute(trx),
+                 LEFT JOIN users u ON u.user_id = r.created_by
+                WHERE r.invoice_id = ${id} ORDER BY r.created_at`.execute(trx),
+      // Section 64 — who created, changed, finalised or voided this bill, and when.
+      sql<any>`SELECT a.action, a.created_at, u.full_name AS user_name, a.new_value
+                 FROM audit_log a LEFT JOIN users u ON u.user_id = a.user_id
+                WHERE a.entity_type = 'invoices' AND a.entity_id = ${id}
+                ORDER BY a.created_at`.execute(trx),
     ]);
 
     return {
       ...invoice,
-      lines: maskCost(lines.rows, showCost, { keepRate: true }),
+      lines: maskCost(lines, showCost, { keepRate: true }),
       payments: payments.rows,
       returns: returns.rows,
+      history: audits.rows,
     };
   }));
 
@@ -149,37 +620,17 @@ export default async function billingRoutes(app: FastifyInstance) {
              c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
              c.address AS customer_address, c.company_name AS customer_company,
              c.state AS customer_state, c.state_code AS customer_state_code,
-             eu.full_name AS sold_by_name
+             eu.full_name AS sold_by_name, qt.quotation_number
         FROM invoices i JOIN branches b ON b.branch_id = i.branch_id
         LEFT JOIN customers c ON c.customer_id = i.customer_id
         LEFT JOIN employees e ON e.employee_id = i.sold_by_employee_id
         LEFT JOIN users eu ON eu.user_id = e.user_id
+        LEFT JOIN quotations qt ON qt.quotation_id = i.source_quotation_id
        WHERE i.invoice_id = ${id}
     `.execute(trx)).rows[0];
     if (!invoice) throw notFound('Invoice not found.');
 
-    const lines = (await sql<any>`
-      SELECT il.*, p.name AS product_name, p.sku, p.hsn_code,
-             COALESCE(pu.unit_label, p.base_unit::text) AS unit_label,
-             sb.batch_number,
-             tr.base_shade, tr.tint_formula,
-             -- The rate that applied on the billing date, not today's (2.7).
-             COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
-             (SELECT string_agg(ss.serial_number, ', ') FROM stock_serials ss
-               WHERE ss.invoice_line_id = il.line_id) AS serial_numbers
-        FROM invoice_lines il
-        JOIN products p ON p.product_id = il.product_id
-        LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
-        LEFT JOIN stock_batches sb ON sb.batch_id = il.batch_id
-        LEFT JOIN paint_tint_records tr ON tr.invoice_line_id = il.line_id
-        LEFT JOIN LATERAL (
-            SELECT gst_rate_pct FROM hsn_tax_rates
-             WHERE hsn_code = p.hsn_code
-               AND daterange(effective_from, effective_to, '[)') @> ${invoice.server_received_at}::date
-             LIMIT 1
-        ) htr ON TRUE
-       WHERE il.invoice_id = ${id} ORDER BY il.line_id
-    `.execute(trx)).rows;
+    const lines = await invoiceLineRows(trx, id, invoice.server_received_at);
     const payments = (await sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx)).rows;
 
     const pdf = await buildInvoicePdf(trx, invoice, lines, payments);
@@ -211,7 +662,7 @@ export default async function billingRoutes(app: FastifyInstance) {
   async function commitSale(
     ctx: { session: Session; db: Tx },
     body: Record<string, any>,
-    opts: { draftId?: string } = {},
+    opts: { draftId?: string; sourceQuotationId?: string | null } = {},
   ) {
     const { session, db: trx } = ctx;
     const branchId = writeBranch(session, body.branch_id);
@@ -239,12 +690,18 @@ export default async function billingRoutes(app: FastifyInstance) {
     if (customerId) {
       customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
       if (!customer) throw notFound('Customer not found.');
+      if (!customer.is_active) {
+        throw badRequest(`${customer.name}'s account is inactive. Reactivate it under Customers, or bill as a walk-in.`);
+      }
     }
 
     // 12.1.1 / 15 — interstate movement attracts IGST instead of CGST+SGST. The
-    // place of supply is the customer's state when we know it, else the branch's.
-    const placeOfSupply = optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 })
+    // place of supply is what the bill says it is; failing that, the registered
+    // buyer's state; failing that, the branch's own state.
+    const placeOfSupply = optionalStateCode(body.place_of_supply_state_code, 'Place of supply')
+      ?? (invoiceType === 'GST' && customer?.state_code ? customer.state_code : null)
       ?? branch.state_code;
+    const docFields = parseDocFields(body);
 
     // ── Price each line ─────────────────────────────────────────────────────
     // Shared with the draft path, so a reviewed bill and a straight-to-final bill
@@ -283,20 +740,54 @@ export default async function billingRoutes(app: FastifyInstance) {
       }
     }
 
+    // ── The estimate this bill comes from (Section 21) ──────────────────────
+    // Locked so two clerks billing the same estimate at once serialise here and
+    // the second is refused. Its stock hold is released BEFORE the stock check:
+    // the goods it reserved are exactly the goods this sale is about to take, and
+    // leaving them reserved would make the sale look short of its own stock.
+    let sourceQuotation: any = null;
+    if (opts.sourceQuotationId) {
+      sourceQuotation = (await sql<any>`
+        SELECT * FROM quotations WHERE quotation_id = ${opts.sourceQuotationId} FOR UPDATE
+      `.execute(trx)).rows[0];
+      if (!sourceQuotation) throw notFound('The estimate this bill was made from no longer exists.');
+      if (sourceQuotation.status === 'CONVERTED') {
+        throw conflict(`Estimate ${sourceQuotation.quotation_number} has already been billed.`);
+      }
+      if (sourceQuotation.status === 'CANCELLED') {
+        throw badRequest(`Estimate ${sourceQuotation.quotation_number} was cancelled and cannot be billed.`);
+      }
+      if (sourceQuotation.stock_reserved) {
+        await sql`
+          UPDATE branch_stock bs SET reserved_qty = GREATEST(bs.reserved_qty - ql.qty, 0), updated_at = now()
+            FROM (SELECT product_id, SUM(qty_base_unit) AS qty FROM quotation_lines
+                   WHERE quotation_id = ${sourceQuotation.quotation_id} GROUP BY product_id) ql
+           WHERE bs.product_id = ql.product_id AND bs.branch_id = ${sourceQuotation.branch_id}
+        `.execute(trx);
+      }
+    }
+
     // ── Stock check (3.8 / 3.5.1) ───────────────────────────────────────────
     const conflicts: Array<{ product_id: string; product_name: string; requested: number; available: number }> = [];
+    // Required quantity per PRODUCT, not per line: 1 KG and 250 G of the same
+    // putty are two lines drawing on one sack. Rows are locked in product-id order
+    // so two tills selling overlapping baskets cannot deadlock each other.
+    const required = new Map<string, { name: string; qty: number }>();
     for (const line of prepared) {
+      const r = required.get(line.product_id) ?? { name: line.product_name, qty: 0 };
+      r.qty = Math.round((r.qty + line.computed.base_unit_qty) * 10000) / 10000;
+      required.set(line.product_id, r);
+    }
+    for (const productId of [...required.keys()].sort()) {
+      const need = required.get(productId)!;
       const stock = (await sql<any>`
         SELECT base_unit_qty, reserved_qty FROM branch_stock
-         WHERE branch_id = ${branchId} AND product_id = ${line.product_id}
+         WHERE branch_id = ${branchId} AND product_id = ${productId}
          FOR UPDATE
       `.execute(trx)).rows[0];
       const available = Number(stock?.base_unit_qty ?? 0) - Number(stock?.reserved_qty ?? 0);
-      if (available < line.computed.base_unit_qty) {
-        conflicts.push({
-          product_id: line.product_id, product_name: line.product_name,
-          requested: line.computed.base_unit_qty, available,
-        });
+      if (available + 1e-9 < need.qty) {
+        conflicts.push({ product_id: productId, product_name: need.name, requested: need.qty, available });
       }
     }
 
@@ -428,14 +919,36 @@ export default async function billingRoutes(app: FastifyInstance) {
         SELECT employee_id FROM employees WHERE user_id = ${session.user_id} LIMIT 1
       `.execute(trx)).rows[0]?.employee_id ?? null;
     }
-    const tillSessionId = optionalUuid(body.till_session_id, 'till_session_id');
-
+    // 3.3.1 — which drawer the cash on this bill went into. An explicit till must
+    // be OPEN and at THIS branch (a till id is just a UUID in the body; nothing
+    // else would stop cash being booked into another branch's drawer). With none
+    // named, the cashier's own open till at this branch is used, because cash that
+    // lands in no drawer is cash the close-of-day count can never explain.
+    let tillSessionId = optionalUuid(body.till_session_id, 'Till session');
+    let tillNote: string | null = null;
     if (tillSessionId) {
       const till = (await sql<any>`
         SELECT status, branch_id FROM till_sessions WHERE session_id = ${tillSessionId}
       `.execute(trx)).rows[0];
       if (!till) throw notFound('That till session does not exist.');
-      if (till.status !== 'OPEN') throw badRequest('That till session is already closed. Open a new one before billing.');
+      if (till.branch_id !== branchId) throw badRequest('That till belongs to a different branch.');
+      if (till.status !== 'OPEN') {
+        // An offline sale replayed after the shift closed must still be recorded —
+        // refusing it would lose a sale that really happened. Its cash is left
+        // out of the closed drawer's history and the response says so.
+        if (!isOfflineSale) throw badRequest('That till session is already closed. Open a new one before billing.');
+        tillSessionId = null;
+        tillNote = 'The till this offline sale was rung on has since been closed, so its cash is not in any drawer count.';
+      }
+    } else if (!isOfflineSale) {
+      tillSessionId = (await sql<{ session_id: string }>`
+        SELECT session_id FROM till_sessions
+         WHERE branch_id = ${branchId} AND cashier_user_id = ${session.user_id} AND status = 'OPEN'
+         ORDER BY opened_at DESC LIMIT 1
+      `.execute(trx)).rows[0]?.session_id ?? null;
+    }
+    if (!tillSessionId && !tillNote && payments.some((p) => p.method === 'CASH' && p.amount > 0)) {
+      tillNote = 'No till was open for you at this branch, so this cash is not in any drawer count. Open a till before taking cash.';
     }
 
     // 3.6 — the number is drawn here, inside the transaction, at the moment the
@@ -483,6 +996,9 @@ export default async function billingRoutes(app: FastifyInstance) {
                is_offline_conflict = ${conflicts.length > 0 && isOfflineSale},
                sold_by_employee_id = ${soldBy},
                notes = ${optionalStr(body.notes, 'Notes', { max: 1000 })},
+               due_date = ${docFields.due_date ?? null}, order_no = ${docFields.order_no ?? null},
+               challan_no = ${docFields.challan_no ?? null}, challan_date = ${docFields.challan_date ?? null},
+               vehicle_no = ${docFields.vehicle_no ?? null}, place_of_delivery = ${docFields.place_of_delivery ?? null},
                server_received_at = now(), updated_at = now()
          WHERE invoice_id = ${opts.draftId} AND status = 'DRAFT'
         RETURNING *
@@ -493,22 +1009,25 @@ export default async function billingRoutes(app: FastifyInstance) {
         INSERT INTO invoices (invoice_number, branch_id, till_session_id, customer_id, invoice_type, status,
                               subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
                               round_off, place_of_supply_state_code, client_txn_id, device_created_at,
-                              is_offline_conflict, created_by, sold_by_employee_id, notes)
+                              is_offline_conflict, created_by, sold_by_employee_id, notes,
+                              due_date, order_no, challan_no, challan_date, vehicle_no, place_of_delivery)
         VALUES (${invoiceNumber}, ${branchId}, ${tillSessionId}, ${customerId}, ${invoiceType}::invoice_type, 'FINAL',
                 ${totals.subtotal}, ${totals.discount_total}, ${totals.cgst_total}, ${totals.sgst_total},
                 ${totals.igst_total}, ${totals.grand_total}, ${totals.round_off}, ${placeOfSupply},
                 ${clientTxnId}, ${deviceCreatedAt}, ${conflicts.length > 0 && isOfflineSale},
-                ${session.user_id}, ${soldBy}, ${optionalStr(body.notes, 'Notes', { max: 1000 })})
+                ${session.user_id}, ${soldBy}, ${optionalStr(body.notes, 'Notes', { max: 1000 })},
+                ${docFields.due_date ?? null}, ${docFields.order_no ?? null}, ${docFields.challan_no ?? null},
+                ${docFields.challan_date ?? null}, ${docFields.vehicle_no ?? null}, ${docFields.place_of_delivery ?? null})
         RETURNING *
       `.execute(trx)).rows[0];
     }
 
-    for (const line of prepared) {
+    for (const [index, line] of prepared.entries()) {
       const inserted = (await sql<any>`
-        INSERT INTO invoice_lines (invoice_id, product_id, product_unit_id, qty_in_sale_unit, base_unit_qty,
+        INSERT INTO invoice_lines (invoice_id, line_no, product_id, product_unit_id, qty_in_sale_unit, base_unit_qty,
                                    price_type, rate_locked_at_scan, discount_amount, taxable_value,
                                    cgst_amount, sgst_amount, igst_amount, batch_id)
-        VALUES (${invoice.invoice_id}, ${line.product_id}, ${line.product_unit_id}, ${line.qty_in_sale_unit},
+        VALUES (${invoice.invoice_id}, ${index + 1}, ${line.product_id}, ${line.product_unit_id}, ${line.qty_in_sale_unit},
                 ${line.computed.base_unit_qty}, ${line.price_type}::price_type, ${line.rate_locked_at_scan},
                 ${line.computed.discount_amount}, ${line.computed.taxable_value}, ${line.computed.cgst_amount},
                 ${line.computed.sgst_amount}, ${line.computed.igst_amount}, ${line.batch_id})
@@ -633,8 +1152,10 @@ export default async function billingRoutes(app: FastifyInstance) {
         await sql`UPDATE customers SET loyalty_points_balance = ${balance} WHERE customer_id = ${customer.customer_id}`.execute(trx);
       }
 
-      // Requirement #4 — queued, so an internet outage never blocks the counter.
-      if (customer.phone) {
+      // Only when the business has switched automatic sending on: by default a bill
+      // is shared by the cashier from the screen, never sent unasked. Queued, so an
+      // internet outage never blocks the counter.
+      if (customer.phone && settings.auto_whatsapp_documents) {
         await queueMessage(trx, {
           to_phone: customer.phone,
           customer_id: customer.customer_id,
@@ -649,10 +1170,23 @@ export default async function billingRoutes(app: FastifyInstance) {
         { after: { discount_pct: round2(discountPct), limit: discountLimit, approved_by: discountApprovedBy } });
     }
 
+    // The estimate is marked billed only now, in the same transaction as the bill
+    // itself: a draft that is later discarded leaves the estimate convertible.
+    if (sourceQuotation) {
+      await sql`
+        UPDATE quotations SET status = 'CONVERTED', stock_reserved = FALSE, reservation_hold_until = NULL,
+               converted_invoice_id = ${invoice.invoice_id}, updated_at = now()
+         WHERE quotation_id = ${sourceQuotation.quotation_id}
+      `.execute(trx);
+      await audit(trx, session, 'QUOTATION_CONVERTED', 'quotations', sourceQuotation.quotation_id,
+        { after: { invoice_id: invoice.invoice_id, invoice_number: invoiceNumber } }, { branchId });
+    }
+
     await audit(trx, session, 'INVOICE_FINALIZED', 'invoices', invoice.invoice_id, {
       after: { invoice_number: invoiceNumber, grand_total: totals.grand_total,
-               payable: totals.payable, from_draft: Boolean(opts.draftId) },
-             });
+               payable: totals.payable, from_draft: Boolean(opts.draftId),
+               payments: payments.filter((p) => p.amount > 0).map((p) => `${p.method} ${p.amount}`) },
+             }, { branchId });
 
     // What the customer actually settled, read back from the rows that were just
     // written rather than recomputed from the request. The receipt screen and the
@@ -677,9 +1211,17 @@ export default async function billingRoutes(app: FastifyInstance) {
         on_credit: creditAmount,
         status: creditAmount <= 0 ? 'PAID' : settledAmount > 0 ? 'PARTIALLY_PAID' : 'ON_CREDIT',
       },
-      warning: conflicts.length
-        ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.'
-        : null,
+      amount: totals.payable,
+      till_session_id: tillSessionId,
+      customer: customer ? {
+        customer_id: customer.customer_id, name: customer.name, phone: customer.phone,
+        whatsapp: customer.whatsapp,
+      } : null,
+      branch_name: branch.name,
+      warning: [
+        conflicts.length ? 'This sale went through but stock was short. It has been flagged for the branch to resolve.' : null,
+        tillNote,
+      ].filter(Boolean).join(' ') || null,
       };
   }
 
@@ -707,225 +1249,6 @@ export default async function billingRoutes(app: FastifyInstance) {
   // "edit the bill" cannot become "edit the amount the customer is charged".
   // ══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * The draft row alone, with no pricing. Discarding a draft must not depend on
-   * whether its contents can still be priced.
-   */
-  async function loadDraftRow(trx: Tx, id: string) {
-    const row = (await sql<any>`
-      SELECT invoice_id, branch_id, status, created_by, grand_total, invoice_number
-        FROM invoices WHERE invoice_id = ${id}
-    `.execute(trx)).rows[0];
-    if (!row) throw notFound('That draft was not found at your branch.');
-    if (row.status !== 'DRAFT') {
-      throw badRequest(`Invoice ${row.invoice_number ?? ''} is ${row.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
-    }
-    return row;
-  }
-
-  /** Loads a draft with its lines and payments, re-priced from scratch. */
-  async function loadDraft(trx: Tx, id: string) {
-    const draft = (await sql<any>`
-      SELECT i.*, b.name AS branch_name, b.state_code AS branch_state_code, b.gstin AS branch_gstin,
-             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
-             c.credit_allowed, c.credit_limit, c.loyalty_points_balance,
-             u.full_name AS created_by_name
-        FROM invoices i
-        JOIN branches b ON b.branch_id = i.branch_id
-        LEFT JOIN customers c ON c.customer_id = i.customer_id
-        LEFT JOIN users u ON u.user_id = i.created_by
-       WHERE i.invoice_id = ${id}
-    `.execute(trx)).rows[0];
-    if (!draft) throw notFound('That draft was not found at your branch.');
-    if (draft.status !== 'DRAFT') {
-      throw badRequest(`Invoice ${draft.invoice_number ?? ''} is ${draft.status}, not a draft. A finalised invoice cannot be edited — use a return, a credit note or a void instead.`);
-    }
-
-    // Availability is read alongside the lines so the review screen can warn about
-    // short stock BEFORE the cashier tells the customer the bill is done. The
-    // binding check still happens under a row lock at finalisation — this is an
-    // early warning, not the enforcement.
-    const storedLines = (await sql<any>`
-      SELECT il.*, p.name AS product_name, p.sku,
-             COALESCE(bs.base_unit_qty, 0) - COALESCE(bs.reserved_qty, 0) AS available_qty
-        FROM invoice_lines il
-        JOIN products p ON p.product_id = il.product_id
-        LEFT JOIN branch_stock bs ON bs.product_id = il.product_id AND bs.branch_id = ${trx ? sql`(SELECT branch_id FROM invoices WHERE invoice_id = ${id})` : sql`NULL`}
-       WHERE il.invoice_id = ${id} ORDER BY il.line_id
-    `.execute(trx)).rows;
-    const payments = (await sql<any>`
-      SELECT method, amount, ref_no FROM invoice_payments WHERE invoice_id = ${id}
-    `.execute(trx)).rows;
-
-    const settings = await loadSettings(trx, draft.branch_id);
-    // Re-priced, never read back as stored: the stored figures are a cache of the
-    // last computation, and this is the recomputation that makes them trustworthy.
-    // Pricing can legitimately fail on an OLD draft — the clearest case being a
-    // product retired from the catalog while the bill sat open at the counter.
-    // Letting that throw made the draft unreadable, uneditable AND undiscardable:
-    // the cashier was left with a dead bill on screen and no way out of it. The
-    // failure is reported instead, so the screen can name the offending line and
-    // the cashier can remove it or throw the draft away.
-    let priced: PricedBasket | null = null;
-    let pricingError: string | null = null;
-    if (storedLines.length) {
-      try {
-        priced = await priceBasket(trx, {
-          branchId: draft.branch_id,
-          invoiceType: draft.invoice_type,
-          rawLines: rawLinesFromStored(storedLines),
-          settings,
-          branchStateCode: draft.branch_state_code,
-          placeOfSupplyStateCode: draft.place_of_supply_state_code,
-          applyCashRounding: Number(draft.round_off) !== 0,
-        });
-      } catch (err) {
-        pricingError = err instanceof Error ? err.message : 'This draft can no longer be priced.';
-      }
-    }
-
-    return { draft, storedLines, payments, settings, priced, pricingError };
-  }
-
-  /** Writes a priced basket over a draft's lines, and refreshes its totals. */
-  async function writeDraftContents(
-    trx: Tx, invoiceId: string, priced: PricedBasket, settings: Awaited<ReturnType<typeof loadSettings>>,
-    payments: ParsedPayment[],
-  ) {
-    await sql`DELETE FROM paint_tint_records WHERE invoice_line_id IN
-                (SELECT line_id FROM invoice_lines WHERE invoice_id = ${invoiceId})`.execute(trx);
-    await sql`DELETE FROM invoice_lines WHERE invoice_id = ${invoiceId}`.execute(trx);
-    await sql`DELETE FROM invoice_payments WHERE invoice_id = ${invoiceId}`.execute(trx);
-
-    for (const line of priced.lines) {
-      const inserted = (await sql<any>`
-        INSERT INTO invoice_lines (invoice_id, product_id, product_unit_id, qty_in_sale_unit, base_unit_qty,
-                                   price_type, rate_locked_at_scan, discount_amount, taxable_value,
-                                   cgst_amount, sgst_amount, igst_amount, batch_id)
-        VALUES (${invoiceId}, ${line.product_id}, ${line.product_unit_id}, ${line.qty_in_sale_unit},
-                ${line.computed.base_unit_qty}, ${line.price_type}::price_type, ${line.rate_locked_at_scan},
-                ${line.computed.discount_amount}, ${line.computed.taxable_value}, ${line.computed.cgst_amount},
-                ${line.computed.sgst_amount}, ${line.computed.igst_amount}, ${line.batch_id})
-        RETURNING line_id
-      `.execute(trx)).rows[0];
-      if (line.tint && (line.tint.base_shade || line.tint.tint_formula) && settings.enable_tinting_records) {
-        await sql`
-          INSERT INTO paint_tint_records (invoice_line_id, base_shade, tint_formula)
-          VALUES (${inserted.line_id}, ${line.tint.base_shade ?? null}, ${line.tint.tint_formula ?? null})
-        `.execute(trx);
-      }
-    }
-
-    // Intended payments are kept alongside the draft so a half-taken split payment
-    // survives a page reload. They post nothing until finalisation.
-    for (const p of payments) {
-      if (p.amount <= 0) continue;
-      await sql`
-        INSERT INTO invoice_payments (invoice_id, method, amount, ref_no)
-        VALUES (${invoiceId}, ${p.method}::payment_method, ${p.amount}, ${p.ref_no})
-      `.execute(trx);
-    }
-
-    await sql`
-      UPDATE invoices
-         SET subtotal = ${priced.totals.subtotal}, discount_total = ${priced.totals.discount_total},
-             cgst_total = ${priced.totals.cgst_total}, sgst_total = ${priced.totals.sgst_total},
-             igst_total = ${priced.totals.igst_total}, grand_total = ${priced.totals.grand_total},
-             round_off = ${priced.totals.round_off}, updated_at = now()
-       WHERE invoice_id = ${invoiceId}
-    `.execute(trx);
-  }
-
-  function parsePayments(body: Record<string, any>, { required = true } = {}): ParsedPayment[] {
-    return arrayOf(body.payments ?? [], 'payments', (p) => ({
-      method: oneOf(p.method, 'payments[].method', PAYMENT_METHODS),
-      amount: num(p.amount, 'payments[].amount', { min: 0, max: 1e9 }),
-      ref_no: optionalStr(p.ref_no, 'payments[].ref_no', { max: 80 }) }), { min: required ? 1 : 0, max: 6,
-    });
-  }
-
-  /**
-   * What this session is allowed to change on a draft (Section 7.1 field-level
-   * permissions). Returned with every draft so the review screen can grey out
-   * what the person cannot touch, while the server still enforces it.
-   */
-  function draftPermissions(session: Session, settings: Awaited<ReturnType<typeof loadSettings>>) {
-    const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
-    return {
-      edit_lines: true,
-      edit_quantity: true,
-      edit_customer: true,
-      edit_invoice_type: true,
-      edit_discount: true,
-      edit_notes: true,
-      edit_payment: true,
-      // A cashier may lower a rate, but only inside the staff ceiling; past that
-      // the server demands a manager grant at finalisation (3.4).
-      override_price: true,
-      discount_limit_pct: manager ? 100 : Number(settings.staff_discount_limit_pct),
-      needs_approval_beyond_limit: !manager,
-      finalize: true,
-      discard_any_draft: manager,
-    };
-  }
-
-  const draftView = (loaded: Awaited<ReturnType<typeof loadDraft>>, session: Session) => ({
-    ...loaded.draft,
-    // Non-null when the stored lines can no longer be priced. The screen shows it
-    // and offers the two ways out: drop the offending line, or discard the draft.
-    pricing_error: loaded.pricingError,
-    unpriced_lines: loaded.pricingError
-      ? loaded.storedLines.map((l: any) => ({
-          product_id: l.product_id, product_name: l.product_name, sku: l.sku,
-          qty_in_sale_unit: Number(l.qty_in_sale_unit),
-          rate_locked_at_scan: Number(l.rate_locked_at_scan),
-        }))
-      : [],
-    // The server's arithmetic, not the client's. This is the figure the review
-    // screen must display and the figure finalisation will charge.
-    totals: loaded.priced?.totals ?? {
-      subtotal: 0, discount_total: 0, cgst_total: 0, sgst_total: 0, igst_total: 0,
-      tax_total: 0, grand_total: 0, round_off: 0, payable: 0,
-    },
-    lines: (loaded.priced?.lines ?? []).map((l, i) => ({
-      ...l.computed,
-      product_id: l.product_id,
-      product_name: l.product_name,
-      sku: loaded.storedLines[i]?.sku ?? null,
-      available_qty: Number(loaded.storedLines[i]?.available_qty ?? 0),
-      short_by: Math.max(round2(l.computed.base_unit_qty - Number(loaded.storedLines[i]?.available_qty ?? 0)), 0),
-      hsn_code: l.hsn_code,
-      unit_label: l.unit_label,
-      qty_in_sale_unit: l.qty_in_sale_unit,
-      product_unit_id: l.product_unit_id,
-      price_type: l.price_type,
-      rate_locked_at_scan: l.rate_locked_at_scan,
-      catalog_rate: l.catalog_rate,
-      // Shown on the review screen so the cashier can see at a glance which lines
-      // are being sold below catalog and by how much.
-      price_changed_since_scan: round2(l.catalog_rate - l.rate_locked_at_scan) !== 0,
-      implied_discount: l.implied_discount,
-      gst_rate_pct: l.gst_rate_pct,
-      batch_id: l.batch_id,
-      line_total: l.computed.line_total,
-    })),
-    payments: loaded.payments,
-    catalog_value: loaded.priced?.catalog_value ?? 0,
-    given_away: loaded.priced?.given_away ?? 0,
-    discount_pct: round2(loaded.priced?.discount_pct ?? 0),
-    interstate: loaded.priced?.interstate ?? false,
-    permissions: draftPermissions(session, loaded.settings),
-    // Surfaced as a whole-document flag so the review screen can say plainly that
-    // finalising will be refused (or need a manager PIN) before it is attempted.
-    stock_warnings: (loaded.priced?.lines ?? []).map((l, i) => ({
-      product_name: l.product_name,
-      requested: l.computed.base_unit_qty,
-      available: Number(loaded.storedLines[i]?.available_qty ?? 0) })).filter((w) => w.available < w.requested),
-    payment_shortfall: round2(
-      (loaded.priced?.totals.payable ?? 0) -
-      loaded.payments.reduce((s: number, p: any) => s + Number(p.amount), 0),
-    ) });
-
   // ── List drafts ───────────────────────────────────────────────────────────
   app.get('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) => {
     const q = (req.query ?? {}) as Record<string, string | undefined>;
@@ -949,62 +1272,12 @@ export default async function billingRoutes(app: FastifyInstance) {
   }));
 
   // ── Open a draft ──────────────────────────────────────────────────────────
-  app.post('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) => {
-    const body = (req.body ?? {}) as Record<string, any>;
-    const branchId = writeBranch(session, body.branch_id);
-    const settings = await loadSettings(trx, branchId);
-    const invoiceType = oneOf(body.invoice_type ?? 'GST', 'Invoice type', INVOICE_TYPES);
-    const customerId = optionalUuid(body.customer_id, 'customer_id');
+  app.post('/drafts', guarded('create_invoice', async ({ session, db: trx, req }) =>
+    createDraft(trx, session, (req.body ?? {}) as Record<string, any>)));
 
-    const branch = (await sql<any>`SELECT * FROM branches WHERE branch_id = ${branchId}`.execute(trx)).rows[0];
-    if (!branch) throw notFound('Branch not found.');
-    if (customerId) {
-      const customer = (await sql<any>`SELECT customer_id FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
-      if (!customer) throw notFound('Customer not found.');
-    }
-
-    // A draft may legitimately start empty — the cashier opens the bill first and
-    // scans into it — so `lines` is optional here in a way it never is for a sale.
-    const rawLines = body.lines === undefined
-      ? []
-      : arrayOf(body.lines, 'lines', (l) => l, { min: 0, max: 200 });
-    const placeOfSupply = optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 })
-      ?? branch.state_code;
-    const applyCashRounding = bool(body.apply_cash_rounding, 'apply_cash_rounding', false);
-
-    const priced = rawLines.length
-      ? await priceBasket(trx, {
-          branchId, invoiceType, rawLines, settings,
-          branchStateCode: branch.state_code,
-          placeOfSupplyStateCode: placeOfSupply,
-          applyCashRounding })
-      : null;
-
-    // No invoice_number: the CHECK constraint on `invoices` permits NULL only
-    // while the row is not FINAL, which is exactly the guarantee wanted here —
-    // a draft physically cannot hold a number from the gapless series (3.6).
-    const draft = (await sql<any>`
-      INSERT INTO invoices (invoice_number, branch_id, customer_id, invoice_type, status,
-                            subtotal, discount_total, cgst_total, sgst_total, igst_total, grand_total,
-                            round_off, place_of_supply_state_code, device_created_at, created_by, notes)
-      VALUES (NULL, ${branchId}, ${customerId}, ${invoiceType}::invoice_type, 'DRAFT',
-              ${priced?.totals.subtotal ?? 0}, ${priced?.totals.discount_total ?? 0},
-              ${priced?.totals.cgst_total ?? 0}, ${priced?.totals.sgst_total ?? 0},
-              ${priced?.totals.igst_total ?? 0}, ${priced?.totals.grand_total ?? 0},
-              ${priced?.totals.round_off ?? 0}, ${placeOfSupply}, now(), ${session.user_id},
-              ${optionalStr(body.notes, 'Notes', { max: 1000 })})
-      RETURNING invoice_id
-    `.execute(trx)).rows[0];
-
-    if (priced) {
-      await writeDraftContents(trx, draft.invoice_id, priced, settings,
-        parsePayments(body, { required: false }));
-    }
-    await audit(trx, session, 'INVOICE_DRAFT_CREATED', 'invoices', draft.invoice_id,
-      { after: { lines: rawLines.length, invoice_type: invoiceType } });
-
-    return draftView(await loadDraft(trx, draft.invoice_id), session);
-  }));
+  /** Opens an estimate as a draft bill — see createDraftFromQuotation. */
+  app.post('/drafts/from-quotation/:quotationId', guarded('convert_quotation', async ({ session, db: trx, req }) =>
+    createDraftFromQuotation(trx, session, uuid((req.params as any).quotationId, 'Estimate'))));
 
   // ── Read a draft (always server-recomputed) ───────────────────────────────
   app.get('/drafts/:id', guarded('create_invoice', async ({ session, db: trx, req }) => {
@@ -1035,14 +1308,23 @@ export default async function billingRoutes(app: FastifyInstance) {
       : oneOf(body.invoice_type, 'Invoice type', INVOICE_TYPES);
     const customerId = body.customer_id === undefined
       ? draft.customer_id
-      : optionalUuid(body.customer_id, 'customer_id');
+      : optionalUuid(body.customer_id, 'Customer');
+    let customer: any = null;
     if (customerId) {
-      const customer = (await sql<any>`SELECT customer_id FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
+      customer = (await sql<any>`
+        SELECT customer_id, name, state_code, is_active FROM customers WHERE customer_id = ${customerId}
+      `.execute(trx)).rows[0];
       if (!customer) throw notFound('Customer not found.');
+      if (!customer.is_active && customerId !== draft.customer_id) throw badRequest(`${customer.name}'s account is inactive.`);
     }
-    const placeOfSupply = body.place_of_supply_state_code === undefined
-      ? draft.place_of_supply_state_code
-      : (optionalStr(body.place_of_supply_state_code, 'place_of_supply_state_code', { max: 4 }) ?? draft.branch_state_code);
+    // Changing the customer re-derives the place of supply from their state, so a
+    // bill moved to an out-of-state buyer picks up IGST without anyone remembering to.
+    const placeOfSupply = body.place_of_supply_state_code !== undefined
+      ? (optionalStateCode(body.place_of_supply_state_code, 'Place of supply') ?? draft.branch_state_code)
+      : (body.customer_id !== undefined || body.invoice_type !== undefined)
+        ? ((invoiceType === 'GST' && customer?.state_code) ? customer.state_code : draft.branch_state_code)
+        : draft.place_of_supply_state_code;
+    const doc = parseDocFields(body);
 
     const rawLines = body.lines === undefined
       ? rawLinesFromStored(loaded.storedLines)
@@ -1077,6 +1359,12 @@ export default async function billingRoutes(app: FastifyInstance) {
          SET invoice_type = ${invoiceType}::invoice_type, customer_id = ${customerId},
              place_of_supply_state_code = ${placeOfSupply},
              notes = ${body.notes === undefined ? draft.notes : optionalStr(body.notes, 'Notes', { max: 1000 })},
+             due_date = ${doc.due_date === undefined ? draft.due_date : doc.due_date},
+             order_no = ${doc.order_no === undefined ? draft.order_no : doc.order_no},
+             challan_no = ${doc.challan_no === undefined ? draft.challan_no : doc.challan_no},
+             challan_date = ${doc.challan_date === undefined ? draft.challan_date : doc.challan_date},
+             vehicle_no = ${doc.vehicle_no === undefined ? draft.vehicle_no : doc.vehicle_no},
+             place_of_delivery = ${doc.place_of_delivery === undefined ? draft.place_of_delivery : doc.place_of_delivery},
              updated_at = now()
        WHERE invoice_id = ${id} AND status = 'DRAFT'
     `.execute(trx);
@@ -1156,6 +1444,9 @@ export default async function billingRoutes(app: FastifyInstance) {
       place_of_supply_state_code: loaded.draft.place_of_supply_state_code,
       apply_cash_rounding: Number(loaded.draft.round_off) !== 0,
       notes: loaded.draft.notes,
+      due_date: loaded.draft.due_date, order_no: loaded.draft.order_no,
+      challan_no: loaded.draft.challan_no, challan_date: loaded.draft.challan_date,
+      vehicle_no: loaded.draft.vehicle_no, place_of_delivery: loaded.draft.place_of_delivery,
       // Straight from the database — the authoritative copy of what was reviewed.
       lines: rawLinesFromStored(loaded.storedLines),
       payments,
@@ -1164,6 +1455,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       discount_approval_id: body.discount_approval_id,
       negative_stock_approval_id: body.negative_stock_approval_id,
       credit_approval_id: body.credit_approval_id }, { draftId: id,
+      sourceQuotationId: loaded.draft.source_quotation_id ?? null,
     });
   }));
 
@@ -1316,21 +1608,26 @@ export default async function billingRoutes(app: FastifyInstance) {
              u.full_name AS cashier_name, ts.cashier_user_id, ts.opening_float,
              ts.opened_at, ts.closed_at, ts.closing_counted_cash, ts.status,
              COALESCE(ev.cash_sales, 0) AS cash_sales,
+             COALESCE(ev.cash_receipts, 0) AS cash_receipts,
              COALESCE(ev.cash_drops, 0) AS cash_drops,
              COALESCE(ev.petty, 0) AS petty_expenses,
-             ts.opening_float + COALESCE(ev.cash_sales, 0) - COALESCE(ev.cash_drops, 0) - COALESCE(ev.petty, 0) AS expected_drawer_cash
+             ts.opening_float + COALESCE(ev.cash_sales, 0) + COALESCE(ev.cash_receipts, 0)
+               - COALESCE(ev.cash_drops, 0) - COALESCE(ev.petty, 0) AS expected_drawer_cash,
+             ts.closing_counted_cash - (ts.opening_float + COALESCE(ev.cash_sales, 0) + COALESCE(ev.cash_receipts, 0)
+               - COALESCE(ev.cash_drops, 0) - COALESCE(ev.petty, 0)) AS variance
         FROM till_sessions ts
         JOIN branches b ON b.branch_id = ts.branch_id
         JOIN users u ON u.user_id = ts.cashier_user_id
         LEFT JOIN LATERAL (
             SELECT SUM(amount) FILTER (WHERE event_type = 'CASH_SALE') AS cash_sales,
+                   SUM(amount) FILTER (WHERE event_type = 'CASH_RECEIPT') AS cash_receipts,
                    SUM(amount) FILTER (WHERE event_type = 'CASH_DROP') AS cash_drops,
                    SUM(amount) FILTER (WHERE event_type = 'PETTY_EXPENSE_PAYOUT') AS petty
               FROM till_events WHERE session_id = ts.session_id
         ) ev ON TRUE
        WHERE 1=1
          ${branchId ? sql`AND ts.branch_id = ${branchId}` : sql``}
-         ${q.status ? sql`AND ts.status = ${q.status}` : sql``}
+         ${q.status ? sql`AND ts.status = ${oneOf(q.status, 'status', ['OPEN', 'CLOSED'] as const)}` : sql``}
          ${q.mine === 'true' ? sql`AND ts.cashier_user_id = ${session.user_id}` : sql``}
        ORDER BY ts.opened_at DESC
        LIMIT ${clampLimit(q.limit, 50, 200)}
@@ -1351,11 +1648,21 @@ export default async function billingRoutes(app: FastifyInstance) {
     `.execute(trx)).rows[0];
     if (openAtCounter) throw conflict(`${counterId} already has an open till session. Close it before opening a new one.`);
 
+    // One open till per cashier per branch as well: two drawers open under one
+    // person makes "whose cash is this" unanswerable at close.
+    const mine = (await sql<any>`
+      SELECT counter_id FROM till_sessions
+       WHERE branch_id = ${branchId} AND cashier_user_id = ${session.user_id} AND status = 'OPEN'
+    `.execute(trx)).rows[0];
+    if (mine) throw conflict(`You already have ${mine.counter_id} open. Close it before opening another till.`);
+
     const row = (await sql<any>`
       INSERT INTO till_sessions (branch_id, counter_id, cashier_user_id, opening_float)
-      VALUES (${branchId}, ${counterId}, ${session.user_id}, ${num(body.opening_float, 'Opening float', { min: 0 })})
+      VALUES (${branchId}, ${counterId}, ${session.user_id}, ${num(body.opening_float, 'Opening cash', { min: 0, max: 10_000_000 })})
       RETURNING *
     `.execute(trx)).rows[0];
+    await audit(trx, session, 'TILL_OPENED', 'till_sessions', row.session_id,
+      { after: { counter_id: counterId, opening_float: row.opening_float } }, { branchId });
     return row;
   }));
 
@@ -1408,6 +1715,9 @@ export default async function billingRoutes(app: FastifyInstance) {
               ${optionalStr(body.note, 'Note', { max: 300 })}, ${acknowledgedBy})
       RETURNING *
     `.execute(trx)).rows[0];
+    await audit(trx, session, eventType === 'CASH_DROP' ? 'CASH_DROP' : 'PETTY_CASH', 'till_sessions', id,
+      { after: { amount, note: row.note, acknowledged_by: acknowledgedBy, expense_id: expenseId } },
+      { branchId: till.branch_id });
     return row;
   }));
 
@@ -1431,12 +1741,13 @@ export default async function billingRoutes(app: FastifyInstance) {
       .reduce((s: number, e: any) => s + Number(e.amount), 0));
 
     const cashSales = sum('CASH_SALE');
+    const cashReceipts = sum('CASH_RECEIPT');
     const cashDrops = sum('CASH_DROP');
     const petty = sum('PETTY_EXPENSE_PAYOUT');
     // 3.3.1 — the formula, verbatim. Only the variance against this expected figure
     // is flagged; the raw open-vs-close difference would call every legitimate
     // cash drop a shortage.
-    const expected = round2(Number(till.opening_float) + cashSales - cashDrops - petty);
+    const expected = round2(Number(till.opening_float) + cashSales + cashReceipts - cashDrops - petty);
     const counted = till.closing_counted_cash === null ? null : Number(till.closing_counted_cash);
 
     const nonCash = (await sql<any>`
@@ -1449,7 +1760,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     return {
       session: till, events,
       opening_float: Number(till.opening_float),
-      cash_sales: cashSales, cash_drops: cashDrops, petty_expenses: petty,
+      cash_sales: cashSales, cash_receipts: cashReceipts, cash_drops: cashDrops, petty_expenses: petty,
       expected_drawer_cash: expected,
       counted_cash: counted,
       variance: counted === null ? null : round2(counted - expected),
@@ -1459,11 +1770,17 @@ export default async function billingRoutes(app: FastifyInstance) {
 
   app.post('/till-sessions/:id/close', guarded('manage_till', async ({ session, db: trx, req }) => {
     const id = uuid((req.params as any).id, 'session_id');
-    const counted = num((req.body as any)?.closing_counted_cash, 'Counted cash', { min: 0 });
+    const counted = num((req.body as any)?.closing_counted_cash, 'Counted cash', { min: 0, max: 10_000_000 });
 
-    const till = (await sql<any>`SELECT * FROM till_sessions WHERE session_id = ${id}`.execute(trx)).rows[0];
+    const till = (await sql<any>`SELECT * FROM till_sessions WHERE session_id = ${id} FOR UPDATE`.execute(trx)).rows[0];
     if (!till) throw notFound('Till session not found.');
     if (till.status === 'CLOSED') throw badRequest('That till session is already closed.');
+    // A cashier closes their own drawer; a manager can close anyone's (the
+    // cashier went home without counting). Nobody else can sign off someone's cash.
+    const manager = session.role === 'OWNER_ADMIN' || session.role === 'BRANCH_MANAGER';
+    if (!manager && till.cashier_user_id !== session.user_id) {
+      throw forbidden('Only the cashier who opened this till, or a manager, can close it.');
+    }
 
     await sql`
       UPDATE till_sessions SET status = 'CLOSED', closed_at = now(), closing_counted_cash = ${counted}
@@ -1478,13 +1795,14 @@ export default async function billingRoutes(app: FastifyInstance) {
       SELECT event_type, SUM(amount) AS total FROM till_events WHERE session_id = ${id} GROUP BY event_type
     `.execute(trx)).rows;
     const pick = (t: string) => Number(events.find((e: any) => e.event_type === t)?.total ?? 0);
-    const expected = round2(Number(till.opening_float) + pick('CASH_SALE') - pick('CASH_DROP') - pick('PETTY_EXPENSE_PAYOUT'));
+    const expected = round2(Number(till.opening_float) + pick('CASH_SALE') + pick('CASH_RECEIPT')
+      - pick('CASH_DROP') - pick('PETTY_EXPENSE_PAYOUT'));
     const variance = round2(counted - expected);
 
-    if (Math.abs(variance) > 0.01) {
-      await audit(trx, session, 'STOCK_ADJUSTMENT', 'till_sessions', id,
-        { after: { expected, counted, variance } });
-    }
+    // Every close is recorded, not only the ones that did not balance: "who
+    // counted the drawer and what did they find" is asked of the good days too.
+    await audit(trx, session, 'TILL_CLOSED', 'till_sessions', id,
+      { after: { counter_id: till.counter_id, expected, counted, variance } }, { branchId: till.branch_id });
     return { ok: true, expected_drawer_cash: expected, counted_cash: counted, variance };
   }));
 
