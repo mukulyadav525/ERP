@@ -2164,6 +2164,15 @@ BEGIN
 END;
 $$;
 
+-- The sign-up form is shown BEFORE anyone is signed in, so it cannot read `branches`
+-- (row-level security hides every row from an anonymous connection). This exposes
+-- exactly the id, name and code of active branches and nothing else.
+CREATE OR REPLACE FUNCTION auth_public_branches()
+RETURNS TABLE (branch_id UUID, name TEXT, code TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+    SELECT b.branch_id, b.name, b.code FROM branches b WHERE b.is_active ORDER BY b.name
+$$;
+
 -- The branches a user may act at: an Owner every active branch; anyone else their
 -- home branch plus any granted in user_branch_access. The API calls this before it
 -- honours a requested active branch, so a branch id in a request header is a

@@ -263,8 +263,10 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.get('/branches/public', async () => {
     // The signup form needs branch names to pick from; nothing else is exposed.
-    const rows = await sql<{ branch_id: string; name: string }>`
-      SELECT branch_id, name FROM branches WHERE is_active ORDER BY name
+    // Anonymous connection: row-level security hides `branches`, so this goes through
+    // a definer function that exposes only the id, name and code of active branches.
+    const rows = await sql<{ branch_id: string; name: string; code: string }>`
+      SELECT branch_id, name, code FROM auth_public_branches()
     `.execute(db);
     return rows.rows;
   });
