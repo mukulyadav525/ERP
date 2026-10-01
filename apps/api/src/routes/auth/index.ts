@@ -263,8 +263,10 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.get('/branches/public', async () => {
     // The signup form needs branch names to pick from; nothing else is exposed.
-    const rows = await sql<{ branch_id: string; name: string }>`
-      SELECT branch_id, name FROM branches WHERE is_active ORDER BY name
+    // Anonymous connection: row-level security hides `branches`, so this goes through
+    // a definer function that exposes only the id, name and code of active branches.
+    const rows = await sql<{ branch_id: string; name: string; code: string }>`
+      SELECT branch_id, name, code FROM auth_public_branches()
     `.execute(db);
     return rows.rows;
   });
@@ -495,8 +497,8 @@ export default async function authRoutes(app: FastifyInstance) {
                          password_hash, pin_hash, must_change_password)
       VALUES (${branchId}, ${role}::user_role, ${fullName}, ${phone}, ${email},
               ${optionalStr(body.language_pref, 'language') ?? 'en'},
-              ${password ? sql`crypt(${password}, gen_salt('bf', 12))` : null},
-              ${pin ? sql`crypt(${pin}, gen_salt('bf', 12))` : null},
+              ${password ? sql`erp_hash_secret(${password})` : null},
+              ${pin ? sql`erp_hash_secret(${pin})` : null},
               ${!password})
       RETURNING user_id
     `.execute(trx);
@@ -509,6 +511,7 @@ export default async function authRoutes(app: FastifyInstance) {
       await sql`
         INSERT INTO employees (user_id, branch_id, designation)
         VALUES (${userId}, ${branchId}, ${optionalStr(body.designation, 'designation') ?? role})
+        ON CONFLICT (user_id) DO UPDATE SET branch_id = EXCLUDED.branch_id
       `.execute(trx);
     }
     await audit(trx, session, 'USER_CREATED', 'users', userId, { after: { role, branch_id: branchId, full_name: fullName } });
@@ -520,8 +523,21 @@ export default async function authRoutes(app: FastifyInstance) {
     const userId = uuid(id, 'user_id');
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    const before = (await sql<any>`SELECT user_id, role, branch_id, is_active, full_name FROM users WHERE user_id = ${userId}`.execute(trx)).rows[0];
+    const before = (await sql<any>`SELECT user_id, role, branch_id, is_active, full_name, phone, email FROM users WHERE user_id = ${userId}`.execute(trx)).rows[0];
     if (!before) throw notFound('User not found.');
+
+    // Contact details and a new password, for when something was entered wrong.
+    const phone = body.phone === undefined ? before.phone : str(body.phone, 'Phone number', { max: 20 }).replace(/\s+/g, '');
+    if (phone !== before.phone && phone.replace(/\D/g, '').length < 10) throw badRequest('Enter a 10-digit phone number.');
+    const email = body.email === undefined ? before.email
+      : (optionalStr(body.email, 'Email', { max: 254 })?.toLowerCase() || null);
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Please enter a valid email address.');
+    const password = optionalStr(body.password, 'Password', { max: 256 });
+    if (password && password.length < 8) throw badRequest('A password needs at least 8 characters.');
+    if (phone !== before.phone || (email ?? null) !== (before.email ?? null)) {
+      const clash = await sql<{ id: string | null }>`SELECT auth_contact_taken(${userId}, ${phone}, ${email}) AS id`.execute(trx);
+      if (clash.rows[0]?.id) throw badRequest('Another user already has that phone number or email.');
+    }
 
     const role = body.role === undefined ? before.role : oneOf(body.role, 'Role', ALL_ROLES);
     const branchId = role === 'OWNER_ADMIN'
@@ -544,6 +560,8 @@ export default async function authRoutes(app: FastifyInstance) {
     await sql`
       UPDATE users SET role = ${role}::user_role, branch_id = ${branchId}, is_active = ${isActive},
              full_name = ${optionalStr(body.full_name, 'Full name', { max: 120 }) ?? before.full_name},
+             phone = ${phone}, email = ${email},
+             password_hash = ${password ? sql`erp_hash_secret(${password})` : sql`password_hash`},
              locked_until = ${body.unlock ? null : sql`locked_until`},
              failed_attempts = ${body.unlock ? 0 : sql`failed_attempts`}
        WHERE user_id = ${userId}
@@ -554,9 +572,8 @@ export default async function authRoutes(app: FastifyInstance) {
     if (branchId) {
       await sql`
         INSERT INTO employees (user_id, branch_id, designation) VALUES (${userId}, ${branchId}, ${role})
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (user_id) DO UPDATE SET branch_id = EXCLUDED.branch_id
       `.execute(trx);
-      await sql`UPDATE employees SET branch_id = ${branchId} WHERE user_id = ${userId}`.execute(trx);
     }
 
     const accessChanged = role === 'OWNER_ADMIN'
@@ -569,12 +586,13 @@ export default async function authRoutes(app: FastifyInstance) {
 
     // A deactivated or re-roled user must not keep an open session with their old
     // privileges until it happens to expire — nor one scoped to a branch they lost.
-    if (!isActive || role !== before.role || branchId !== before.branch_id || accessChanged) {
+    if (!isActive || role !== before.role || branchId !== before.branch_id || accessChanged || (password && userId !== session.user_id)) {
       await sql`SELECT auth_revoke_user_sessions(${userId})`.execute(trx);
     }
 
     await audit(trx, session, role !== before.role ? 'ROLE_CHANGE' : 'USER_UPDATED', 'users', userId,
-      { before, after: { role, branch_id: branchId, is_active: isActive } });
+      { before, after: { role, branch_id: branchId, is_active: isActive, phone, email } });
+    if (password) await audit(trx, session, 'PASSWORD_RESET', 'users', userId);
     return { ok: true };
   }));
 
@@ -604,7 +622,7 @@ export default async function authRoutes(app: FastifyInstance) {
     const newUserId = res.rows[0].auth_approve_registration;
 
     if (branchId) {
-      await sql`INSERT INTO employees (user_id, branch_id, designation) VALUES (${newUserId}, ${branchId}, ${role}) ON CONFLICT DO NOTHING`.execute(trx);
+      await sql`INSERT INTO employees (user_id, branch_id, designation) VALUES (${newUserId}, ${branchId}, ${role}) ON CONFLICT (user_id) DO NOTHING`.execute(trx);
     }
     await audit(trx, session, 'REGISTRATION_APPROVED', 'registration_requests', requestId, { after: { user_id: newUserId, role } });
     return { ok: true, user_id: newUserId };

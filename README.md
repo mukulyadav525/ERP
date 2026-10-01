@@ -20,7 +20,7 @@ requirements document.
 | `tests/uitest.mjs` | a real browser: every page, 390px layout, keyboard-only billing, search focus, offline sale and sync, roles, Hindi, themes, dead controls | 90 |
 | `tests/viewports.mjs` | 12 widths (320 → 2560px) × the routes × both themes: overflow, clipped controls, touch targets | 35 |
 
-See `docs/REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping, `docs/PRODUCTION_AUDIT.md` for the defects found and fixed, and `docs/OPERATIONS.md` for running it.
+See `docs/REQUIREMENTS_CHECKLIST.md` for the requirement-by-requirement mapping, `docs/PRODUCTION_AUDIT.md` for the defects found and fixed, `docs/OPERATIONS.md` for running it, and `docs/ROLES.md` for who can do what and how each mistake is fixed.
 
 ## Stack
 
@@ -79,6 +79,7 @@ erp-project/
 │   ├── uitest.mjs              ← browser checks (Playwright)
 │   └── viewports.mjs           ← responsive sweep, every supported width
 ├── docs/OPERATIONS.md          ← install, backups, restore test, disaster recovery
+├── docs/ROLES.md               ← who can do what; how each kind of mistake is fixed
 ├── docs/REQUIREMENTS_CHECKLIST.md, docs/PRODUCTION_AUDIT.md
 └── docker-compose.yml
 ```

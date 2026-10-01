@@ -9,7 +9,7 @@ import { sql } from 'kysely';
 import {
   guarded, uuid, optionalUuid, str, optionalStr, num, bool, oneOf, limit as clampLimit, writeBranch,
 } from '../../lib/http.js';
-import { badRequest, forbidden, notFound } from '../../lib/errors.js';
+import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { audit } from '../../lib/audit.js';
 import { loadSettings, canSeeCost } from '../../lib/settings.js';
 import { postVendor, vendorBalance } from '../../lib/ledger.js';
@@ -120,10 +120,12 @@ export default async function vendorsRoutes(app: FastifyInstance) {
          ORDER BY p.name
       `.execute(trx),
       showMoney ? sql<any>`
-        SELECT vp.*, b.name AS branch_name, u.full_name AS paid_by, g.grn_number, g.vendor_invoice_no
+        SELECT vp.*, b.name AS branch_name, u.full_name AS paid_by, g.grn_number, g.vendor_invoice_no,
+               pc.cancelled_at, pc.reason AS cancel_reason
           FROM vendor_payments vp JOIN branches b ON b.branch_id = vp.branch_id
           LEFT JOIN users u ON u.user_id = vp.created_by
           LEFT JOIN grn g ON g.grn_id = vp.grn_id
+          LEFT JOIN payment_cancellations pc ON pc.payment_table = 'vendor_payments' AND pc.payment_id = vp.payment_id
          WHERE vp.vendor_id = ${id} ORDER BY vp.created_at DESC LIMIT 100
       `.execute(trx) : Promise.resolve({ rows: [] as any[] }),
       sql<any>`
@@ -329,6 +331,32 @@ export default async function vendorsRoutes(app: FastifyInstance) {
       after: { payment_number: number, amount, method, reference, grn_id: grnId, balance: posted.balance_after },
     }, { branchId });
     return { ...payment, entry_id: posted.entry_id, amount, balance_after: posted.balance_after };
+  }));
+
+  /** Cancel a supplier payment recorded by mistake; what is payable goes back up. */
+  app.post('/payments/:paymentId/cancel', guarded('record_vendor_payment', async ({ session, db: trx, req }) => {
+    const paymentId = uuid((req.params as any).paymentId, 'payment_id');
+    const reason = str((req.body as any)?.reason, 'Reason', { max: 300 });
+    const payment = (await sql<any>`SELECT * FROM vendor_payments WHERE payment_id = ${paymentId}`.execute(trx)).rows[0];
+    if (!payment) throw notFound('Payment not found.');
+    const done = (await sql<any>`
+      SELECT 1 FROM payment_cancellations WHERE payment_table = 'vendor_payments' AND payment_id = ${paymentId}
+    `.execute(trx)).rows[0];
+    if (done) throw conflict(`Payment ${payment.payment_number} is already cancelled.`);
+    await sql`
+      INSERT INTO payment_cancellations (payment_table, payment_id, branch_id, reason, cancelled_by)
+      VALUES ('vendor_payments', ${paymentId}, ${payment.branch_id}, ${reason}, ${session.user_id})
+    `.execute(trx);
+    const amount = Number(payment.amount);
+    const posted = await postVendor(trx, {
+      vendorId: payment.vendor_id, branchId: payment.branch_id, entryType: 'ADJUSTMENT',
+      amount, refTable: 'vendor_payments', refId: paymentId,
+    });
+    await audit(trx, session, 'PAYMENT_CANCELLED', 'vendor_payments', paymentId, {
+      before: { payment_number: payment.payment_number, amount, method: payment.method },
+      after: { reason, balance: posted.balance_after },
+    }, { branchId: payment.branch_id });
+    return { ok: true, balance_after: posted.balance_after };
   }));
 
   app.get('/outstanding/list', guarded('view_financial_reports', async ({ db: trx }) =>

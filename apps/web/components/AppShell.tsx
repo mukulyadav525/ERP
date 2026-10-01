@@ -10,6 +10,7 @@ import { fetcher } from '../lib/api';
 import { BranchFilter } from './ui';
 import { Icon } from './icons';
 import CommandPalette from './CommandPalette';
+import MyAccount from './MyAccount';
 
 type Theme = 'light' | 'dark' | 'system';
 const THEME_KEY = 'erp_theme';
@@ -67,6 +68,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const { t, lang, setLang } = useI18n();
   const [theme, setTheme] = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const title = usePageTitle();
 
@@ -157,13 +159,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </nav>
 
           <div className="sidebar-footer">
-            <div className="sidebar-user">
+            <button type="button" className="sidebar-user" onClick={() => setAccountOpen(true)}
+                    title="My account — change password or PIN"
+                    style={{ width: '100%', background: 'none', border: 0, cursor: 'pointer', textAlign: 'left', color: 'inherit', font: 'inherit' }}>
               <span className="avatar" style={{ background: roleColor }} aria-hidden>{initials}</span>
               <span className="who">
                 <b>{user?.full_name}</b>
-                <span>{roleLabel}</span>
+                <span>{roleLabel} · My account</span>
               </span>
-            </div>
+            </button>
             <div className="row tight" style={{ padding: '0 8px' }}>
               <button className="pill" style={{ flex: 1 }}
                       onClick={() => setLang(lang === 'en' ? 'hi' : 'en')}
@@ -202,6 +206,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <MyAccount open={accountOpen} onClose={() => setAccountOpen(false)} />
     </>
   );
 }

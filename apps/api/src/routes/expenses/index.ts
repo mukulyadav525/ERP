@@ -176,12 +176,29 @@ export default async function expensesRoutes(app: FastifyInstance) {
   app.get('/categories', guarded(null, async ({ db: trx }) =>
     (await sql<any>`SELECT * FROM expense_categories ORDER BY name`.execute(trx)).rows));
 
-  app.post('/categories', guarded('manage_master_data', async ({ session, db: trx, req }) => {
+  // Expense categories belong to whoever records expenses (Owner, manager,
+  // accountant) — not to inventory staff, who cannot see expenses at all.
+  app.post('/categories', guarded('create_expense', async ({ session, db: trx, req }) => {
     const name = str((req.body as any)?.name, 'Category name', { max: 100 });
     const dup = (await sql<any>`SELECT name FROM expense_categories WHERE lower(btrim(name)) = lower(btrim(${name}))`.execute(trx)).rows[0];
     if (dup) throw conflict(`An expense category called "${dup.name}" already exists.`);
     const row = (await sql<any>`INSERT INTO expense_categories (name) VALUES (${name}) RETURNING *`.execute(trx)).rows[0];
     await audit(trx, session, 'MASTER_DATA_CHANGE', 'expense_categories', row.category_id, { after: row });
+    return row;
+  }));
+
+  /** Rename a category that was typed wrongly. Past expenses follow the new name. */
+  app.put('/categories/:id', guarded('create_expense', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'category_id');
+    const name = str((req.body as any)?.name, 'Category name', { max: 100 });
+    const before = (await sql<any>`SELECT * FROM expense_categories WHERE category_id = ${id}`.execute(trx)).rows[0];
+    if (!before) throw notFound('Expense category not found.');
+    const dup = (await sql<any>`
+      SELECT name FROM expense_categories WHERE lower(btrim(name)) = lower(btrim(${name})) AND category_id <> ${id}
+    `.execute(trx)).rows[0];
+    if (dup) throw conflict(`An expense category called "${dup.name}" already exists.`);
+    const row = (await sql<any>`UPDATE expense_categories SET name = ${name} WHERE category_id = ${id} RETURNING *`.execute(trx)).rows[0];
+    await audit(trx, session, 'MASTER_DATA_CHANGE', 'expense_categories', id, { before, after: row });
     return row;
   }));
 

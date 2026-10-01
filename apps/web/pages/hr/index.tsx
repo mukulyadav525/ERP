@@ -1,7 +1,7 @@
 // Section 10 — HR / Staff.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import useSWR from 'swr';
-import { apiPost, downloadCsv, fetcher, formatDate, formatDateTime, inr, num, withBranch } from '../../lib/api';
+import { apiDelete, apiPost, apiPut, businessToday, downloadCsv, fetcher, formatDate, formatDateTime, inr, num, withBranch } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
 import { useToast } from '../../lib/ToastContext';
@@ -45,12 +45,21 @@ function HrScreen() {
   );
 }
 
+/** Designations default to the role code (BRANCH_MANAGER); show those as words. */
+const designation = (d?: string | null) => (d && /^[A-Z_]+$/.test(d)
+  ? d.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase()) : d ?? '');
+
 function StaffTab() {
   const { can, activeBranchId } = useAuth();
   const toast = useToast();
+  const { user } = useAuth();
   const [newOpen, setNewOpen] = useState(false);
+  const [editing, setEditing] = useState<any | null>(null);
   const { data, error, isLoading, mutate } = useSWR<any[]>(
     withBranch('/api/hr/employees', activeBranchId), fetcher);
+  // The Owner edits anyone; a manager edits their counter, inventory and accounts staff.
+  const mayEdit = (e: any) => can('manage_staff')
+    && (user?.role === 'OWNER_ADMIN' || ['CASHIER', 'INVENTORY_STAFF', 'ACCOUNTANT'].includes(e.role));
 
   return (
     <>
@@ -63,9 +72,10 @@ function StaffTab() {
           empty={<EmptyState icon="staff" title="No staff yet" />}>
           {(rows) => (
             <DataTable rows={rows} footer={`${rows.length} staff member(s)`}
+              onRowClick={(e: any) => { if (mayEdit(e)) setEditing(e); }}
               columns={[
                 { key: 'n', header: 'Name', render: (e: any) => (
-                  <div>{e.full_name}<div className="muted small">{e.designation}</div></div>
+                  <div>{e.full_name}<div className="muted small">{designation(e.designation)}</div></div>
                 ) },
                 { key: 'r', header: 'Role', render: (e: any) => <Badge tone="neutral">{e.role.replace(/_/g, ' ').toLowerCase()}</Badge> },
                 { key: 'b', header: 'Branch', render: (e: any) => e.branch_name },
@@ -77,18 +87,23 @@ function StaffTab() {
                   </Badge>
                 ) },
                 { key: 's', header: '', render: (e: any) => e.is_active ? null : <Badge tone="critical">inactive</Badge> },
+                { key: 'e', header: '', align: 'right', render: (e: any) => (mayEdit(e)
+                  ? <Button size="sm" onClick={(ev) => { ev.stopPropagation(); setEditing(e); }}>Edit</Button> : null) },
               ]} />
           )}
         </AsyncSection>
       </Card>
       <NewStaffModal open={newOpen} onClose={() => setNewOpen(false)}
         onCreated={() => { setNewOpen(false); void mutate(); }} />
+      <EditStaffModal staff={editing} onClose={() => setEditing(null)}
+        onSaved={() => { setEditing(null); void mutate(); }} />
     </>
   );
 }
 
 function NewStaffModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
   const toast = useToast();
+  const { user } = useAuth();
   const [form, setForm] = useState({ full_name: '', phone: '', email: '', role: 'CASHIER', designation: '', pin: '' });
 
   async function submit() {
@@ -124,7 +139,7 @@ function NewStaffModal({ open, onClose, onCreated }: { open: boolean; onClose: (
             <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
               <option value="CASHIER">Cashier / Sales staff</option>
               <option value="INVENTORY_STAFF">Inventory staff</option>
-              <option value="BRANCH_MANAGER">Branch manager</option>
+              {user?.role === 'OWNER_ADMIN' && <option value="BRANCH_MANAGER">Branch manager</option>}
               <option value="ACCOUNTANT">Accountant</option>
             </select>
           </Field>
@@ -287,26 +302,153 @@ function ShiftsTab() {
   const { can, activeBranchId } = useAuth();
   const toast = useToast();
   const { data: shifts, mutate } = useSWR<any[]>(withBranch('/api/hr/shifts', activeBranchId), fetcher);
-  const { data: roster } = useSWR<any[]>(withBranch('/api/hr/roster', activeBranchId), fetcher);
+  const { data: roster, mutate: mutateRoster } = useSWR<any[]>(withBranch('/api/hr/roster', activeBranchId), fetcher);
+  const { data: staff } = useSWR<any[]>(can('manage_staff') ? withBranch('/api/hr/employees', activeBranchId) : null, fetcher);
+  const [shiftForm, setShiftForm] = useState<any | null>(null);
+  const [assign, setAssign] = useState<{ employee_id: string; shift_id: string; work_date: string } | null>(null);
+  const manage = can('manage_staff');
+
+  async function saveShift() {
+    try {
+      const body = { name: shiftForm.name, start_time: shiftForm.start_time, end_time: shiftForm.end_time };
+      if (shiftForm.shift_id) await apiPut(`/api/hr/shifts/${shiftForm.shift_id}`, body);
+      else await apiPost('/api/hr/shifts', body);
+      toast.success('Shift saved'); setShiftForm(null); void mutate(); void mutateRoster();
+    } catch (err) { toast.error(err); }
+  }
+  async function saveAssign() {
+    try { await apiPost('/api/hr/roster', assign); toast.success('Shift assigned'); setAssign(null); void mutateRoster(); }
+    catch (err) { toast.error(err); }
+  }
+  async function unassign(r: any) {
+    if (!window.confirm(`Remove ${r.full_name} from ${r.shift_name} on ${formatDate(r.work_date)}?`)) return;
+    try { await apiDelete(`/api/hr/roster/${r.id}`); toast.success('Removed from the roster'); void mutateRoster(); }
+    catch (err) { toast.error(err); }
+  }
 
   return (
-    <div className="grid cols-2">
-      <Card flush title="Shift definitions">
-        <DataTable rows={shifts ?? []} emptyText="No shifts defined."
-          columns={[
-            { key: 'n', header: 'Shift', render: (s: any) => s.name },
-            { key: 'b', header: 'Branch', render: (s: any) => s.branch_name },
-            { key: 't', header: 'Hours', render: (s: any) => `${s.start_time} – ${s.end_time}` },
-          ]} />
-      </Card>
-      <Card flush title="Roster" description="Next 14 days">
-        <DataTable rows={roster ?? []} emptyText="Nothing rostered."
-          columns={[
-            { key: 'd', header: 'Date', nowrap: true, render: (r: any) => formatDate(r.work_date) },
-            { key: 'n', header: 'Name', render: (r: any) => r.full_name },
-            { key: 's', header: 'Shift', render: (r: any) => `${r.shift_name} (${r.start_time}–${r.end_time})` },
-          ]} />
-      </Card>
-    </div>
+    <>
+      {manage && (
+        <div className="row" style={{ marginBottom: 14 }}>
+          <div className="spacer" />
+          <Button onClick={() => setShiftForm({ name: '', start_time: '09:00', end_time: '18:00' })}>+ Shift</Button>
+          <Button variant="primary" disabled={!(shifts ?? []).length}
+            onClick={() => setAssign({ employee_id: '', shift_id: '', work_date: businessToday() })}>Assign a shift</Button>
+        </div>
+      )}
+      <div className="grid cols-2">
+        <Card flush title="Shift definitions">
+          <DataTable rows={shifts ?? []} emptyText="No shifts defined."
+            columns={[
+              { key: 'n', header: 'Shift', render: (x: any) => x.name },
+              { key: 'b', header: 'Branch', render: (x: any) => x.branch_name },
+              { key: 't', header: 'Hours', render: (x: any) => `${String(x.start_time).slice(0, 5)} – ${String(x.end_time).slice(0, 5)}` },
+              ...(manage ? [{ key: 'e', header: '', align: 'right' as const, render: (x: any) => (
+                <Button size="sm" onClick={() => setShiftForm({ shift_id: x.shift_id, name: x.name,
+                  start_time: String(x.start_time).slice(0, 5), end_time: String(x.end_time).slice(0, 5) })}>Edit</Button>) }] : []),
+            ]} />
+        </Card>
+        <Card flush title="Roster" description="Next 14 days">
+          <DataTable rows={roster ?? []} emptyText="Nothing rostered."
+            columns={[
+              { key: 'd', header: 'Date', nowrap: true, render: (r: any) => formatDate(r.work_date) },
+              { key: 'n', header: 'Name', render: (r: any) => r.full_name },
+              { key: 's', header: 'Shift', render: (r: any) => `${r.shift_name} (${String(r.start_time).slice(0, 5)}–${String(r.end_time).slice(0, 5)})` },
+              ...(manage ? [{ key: 'x', header: '', align: 'right' as const, render: (r: any) => (
+                <Button size="sm" variant="ghost" onClick={() => void unassign(r)}>Remove</Button>) }] : []),
+            ]} />
+        </Card>
+      </div>
+
+      <Modal open={Boolean(shiftForm)} onClose={() => setShiftForm(null)} title={shiftForm?.shift_id ? 'Edit shift' : 'New shift'}
+        footer={<><Button onClick={() => setShiftForm(null)}>Cancel</Button>
+          <Button variant="primary" disabled={!shiftForm?.name?.trim()} onClick={() => void saveShift()}>Save</Button></>}>
+        {shiftForm && (
+          <div className="grid cols-3">
+            <Field label="Name" required><input value={shiftForm.name} onChange={(e) => setShiftForm({ ...shiftForm, name: e.target.value })} /></Field>
+            <Field label="Starts"><input type="time" value={shiftForm.start_time} onChange={(e) => setShiftForm({ ...shiftForm, start_time: e.target.value })} /></Field>
+            <Field label="Ends"><input type="time" value={shiftForm.end_time} onChange={(e) => setShiftForm({ ...shiftForm, end_time: e.target.value })} /></Field>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={Boolean(assign)} onClose={() => setAssign(null)} title="Assign a shift"
+        footer={<><Button onClick={() => setAssign(null)}>Cancel</Button>
+          <Button variant="primary" disabled={!assign?.employee_id || !assign?.shift_id || !assign?.work_date} onClick={() => void saveAssign()}>Assign</Button></>}>
+        {assign && (
+          <div className="grid cols-3">
+            <Field label="Staff member" required>
+              <select value={assign.employee_id} onChange={(e) => setAssign({ ...assign, employee_id: e.target.value })}>
+                <option value="">Choose…</option>
+                {(staff ?? []).filter((x: any) => x.is_active).map((x: any) => <option key={x.employee_id} value={x.employee_id}>{x.full_name}</option>)}
+              </select>
+            </Field>
+            <Field label="Shift" required>
+              <select value={assign.shift_id} onChange={(e) => setAssign({ ...assign, shift_id: e.target.value })}>
+                <option value="">Choose…</option>
+                {(shifts ?? []).map((x: any) => <option key={x.shift_id} value={x.shift_id}>{x.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Date" required><input type="date" value={assign.work_date} onChange={(e) => setAssign({ ...assign, work_date: e.target.value })} /></Field>
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+
+/** Correct a staff member's details. Role and branch changes are the Owner's, in Admin → Users. */
+function EditStaffModal({ staff, onClose, onSaved }: { staff: any | null; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const [form, setForm] = useState({ full_name: '', phone: '', email: '', designation: '', joined_at: '', is_active: true, pin: '' });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!staff) return;
+    setForm({ full_name: staff.full_name ?? '', phone: staff.phone ?? '', email: staff.email ?? '', designation: designation(staff.designation),
+      joined_at: String(staff.joined_at ?? '').slice(0, 10), is_active: Boolean(staff.is_active), pin: '' });
+  }, [staff]);
+
+  async function save() {
+    if (!form.full_name.trim() || form.phone.replace(/\D/g, '').length < 10) { toast.error(new Error('Enter the name and a 10-digit phone number.')); return; }
+    if (form.pin && !/^\d{4,6}$/.test(form.pin)) { toast.error(new Error('A PIN is 4 to 6 digits.')); return; }
+    setBusy(true);
+    try {
+      await apiPut(`/api/hr/employees/${staff.employee_id}`, {
+        full_name: form.full_name.trim(), phone: form.phone.trim(), email: form.email.trim(),
+        designation: form.designation.trim(), joined_at: form.joined_at || undefined,
+        is_active: form.is_active, pin: form.pin || undefined,
+      });
+      toast.success('Staff member updated', form.full_name.trim());
+      onSaved();
+    } catch (err) { toast.error(err); } finally { setBusy(false); }
+  }
+
+  return (
+    <Modal open={Boolean(staff)} onClose={onClose} title={staff ? `Edit ${staff.full_name}` : ''}
+      footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>Save</Button></>}>
+      {staff && (
+        <div className="stack">
+          <div className="grid cols-2">
+            <Field label="Full name" required><input value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} /></Field>
+            <Field label="Phone" required><input type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+          </div>
+          <div className="grid cols-2">
+            <Field label="Email"><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+            <Field label="Designation"><input value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} /></Field>
+          </div>
+          <div className="grid cols-2">
+            <Field label="Joined on"><input type="date" value={form.joined_at} onChange={(e) => setForm({ ...form, joined_at: e.target.value })} /></Field>
+            <Field label="New PIN" hint="Leave blank to keep the current one">
+              <input type="password" inputMode="numeric" maxLength={6} value={form.pin} autoComplete="new-password"
+                onChange={(e) => setForm({ ...form, pin: e.target.value.replace(/\D/g, '') })} /></Field>
+          </div>
+          <label className="checkbox">
+            <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} />
+            Can sign in (untick when someone leaves — their past bills stay)
+          </label>
+          <span className="muted small">Role ({String(staff.role).replace(/_/g, ' ').toLowerCase()}) and branch are changed by the Owner in Admin → Users.</span>
+        </div>
+      )}
+    </Modal>
   );
 }

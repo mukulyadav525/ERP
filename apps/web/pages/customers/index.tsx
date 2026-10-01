@@ -36,7 +36,8 @@ const ENTRY_LABEL: Record<string, string> = {
   OPENING_BALANCE: 'Opening balance', SALE_ON_CREDIT: 'Sale on credit', PAYMENT_RECEIVED: 'Payment received',
   REFUND_ADJUSTMENT: 'Return / credit note', ADJUSTMENT: 'Adjustment', CREDIT_SALE_REVERSAL: 'Bill voided',
 };
-const entryLabel = (t: string) => ENTRY_LABEL[t] ?? t.replace(/_/g, ' ').toLowerCase();
+const entryLabel = (t: string, refTable?: string | null) => (t === 'ADJUSTMENT' && refTable === 'customer_payments'
+  ? 'Receipt cancelled' : ENTRY_LABEL[t] ?? t.replace(/_/g, ' ').toLowerCase());
 const decimalOnly = (v: string) => v.replace(/[^\d.]/g, '');
 
 function CustomersScreen() {
@@ -191,6 +192,17 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
   const { data: c, error, mutate } = useSWR<any>(id ? `/api/customers/${id}` : null, fetcher);
   useEffect(() => { setInner(can('view_customer_outstanding') ? 'statement' : 'invoices'); }, [id, can]);
 
+  async function cancelReceipt(r: any) {
+    const reason = window.prompt(`Cancel receipt ${r.receipt_number} for ${inr(r.amount, { decimals: true })}? The customer will owe this amount again.\n\nReason (required):`);
+    if (reason === null) return;
+    if (!reason.trim()) { toast.error(new Error('Give a reason for cancelling.')); return; }
+    try {
+      const res = await apiPost<any>(`/api/customers/payments/${r.payment_id}/cancel`, { reason: reason.trim() });
+      toast.success(`Receipt ${r.receipt_number} cancelled`, res.till_note ?? `Balance now ${inr(res.balance_owed, { decimals: true })}`);
+      void mutate(); onChanged();
+    } catch (err) { toast.error(err); }
+  }
+
   async function toggleActive() {
     if (!c) return;
     const next = !c.is_active;
@@ -271,7 +283,12 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
                 { key: 'm', header: 'Method', render: (r: any) => `${r.method.replace('_', ' ').toLowerCase()}${r.reference ? ` · ${r.reference}` : ''}` },
                 { key: 'b', header: 'Branch', render: (r: any) => r.branch_name },
                 { key: 'u', header: 'Received by', render: (r: any) => r.received_by ?? '—' },
-                { key: 'a', header: 'Amount', align: 'right', render: (r: any) => inr(r.amount, { decimals: true }) },
+                { key: 'a', header: 'Amount', align: 'right', render: (r: any) => (r.cancelled_at
+                  ? <span><s className="muted">{inr(r.amount, { decimals: true })}</s> <Badge tone="critical">cancelled</Badge>
+                      <div className="muted small">{r.cancel_reason}</div></span>
+                  : inr(r.amount, { decimals: true })) },
+                ...(can('cancel_customer_payment') ? [{ key: 'x', header: '', align: 'right' as const, render: (r: any) => (r.cancelled_at ? null
+                  : <Button size="sm" variant="ghost" onClick={() => void cancelReceipt(r)}>Cancel</Button>) }] : []),
               ]} />
           )}
           {inner === 'returns' && (
@@ -319,7 +336,7 @@ function Statement({ customerId, name }: { customerId: string; name: string }) {
         <Button size="sm" disabled={!data?.entries?.length} onClick={() => downloadCsv([
           { date: data.from, entry: 'Opening balance', reference: '', debit: '', credit: '', balance: data.opening_balance },
           ...data.entries.map((e: any) => ({
-            date: formatDate(e.created_at), entry: entryLabel(e.entry_type), reference: e.reference ?? '', branch: e.branch_name,
+            date: formatDate(e.created_at), entry: entryLabel(e.entry_type, e.ref_table), reference: e.reference ?? '', branch: e.branch_name,
             debit: Number(e.amount) > 0 ? e.amount : '', credit: Number(e.amount) < 0 ? -e.amount : '', balance: e.balance_after,
           })),
           { date: data.to, entry: 'Closing balance', reference: '', debit: '', credit: '', balance: data.closing_balance },
@@ -338,7 +355,7 @@ function Statement({ customerId, name }: { customerId: string; name: string }) {
           <DataTable rows={data.entries} emptyText="No account activity in this period." rowKey={(e: any) => e.entry_id}
             columns={[
               { key: 'd', header: 'Date', nowrap: true, render: (e: any) => formatDateTime(e.created_at) },
-              { key: 't', header: 'Entry', render: (e: any) => entryLabel(e.entry_type) },
+              { key: 't', header: 'Entry', render: (e: any) => entryLabel(e.entry_type, e.ref_table) },
               { key: 'r', header: 'Document', render: (e: any) => (e.reference ? <span className="mono small">{e.reference}</span> : <span className="muted">—</span>) },
               { key: 'b', header: 'Branch', render: (e: any) => e.branch_name ?? '—' },
               { key: 'dr', header: 'Debit', align: 'right', render: (e: any) => (Number(e.amount) > 0 ? inr(e.amount, { decimals: true }) : '') },

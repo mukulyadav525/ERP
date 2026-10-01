@@ -38,7 +38,7 @@ function ExpensesScreen() {
   const { t } = useI18n();
   const toast = useToast();
   const router = useRouter();
-  const [tab, setTab] = useState<'list' | 'summary'>('list');
+  const [tab, setTab] = useState<'list' | 'summary' | 'categories'>('list');
   const [query, setQuery] = useState('');
   const search = useDebounced(query, 300);
   const [status, setStatus] = useState('');
@@ -96,7 +96,9 @@ function ExpensesScreen() {
         <StatTile label="This month (approved)" value={inr(months.find((m) => m.month === businessToday().slice(0, 7))?.total ?? 0)} />
       </div>
 
-      <Tabs active={tab} onChange={(k) => setTab(k as any)} tabs={[{ key: 'list', label: 'Expenses' }, { key: 'summary', label: 'Summary' }]} />
+      <Tabs active={tab} onChange={(k) => setTab(k as any)} tabs={[{ key: 'list', label: 'Expenses' }, { key: 'summary', label: 'Summary' }, ...(can('create_expense') ? [{ key: 'categories', label: 'Categories' }] : [])]} />
+
+      {tab === 'categories' && <CategoriesTab categories={categories ?? []} onChanged={() => { void mutateCategories(); void mutate(); }} />}
 
       {tab === 'list' && (
         <>
@@ -299,10 +301,40 @@ function ExpenseForm({ expense, categories, onCategoryAdded, onClose, onSaved }:
             <div className="span-2"><Field label="Receipt link (optional)" hint="A link to the scanned bill, or its reference number">
               <input value={form.receipt_url} onChange={(e) => set('receipt_url', e.target.value)} maxLength={500} placeholder="https://…" /></Field></div>
           </div>
-          {can('manage_master_data') && <div><Button size="sm" variant="ghost" onClick={() => void addCategory()}><Icon name="plus" size={13} /> New category</Button></div>}
+          {can('create_expense') && <div><Button size="sm" variant="ghost" onClick={() => void addCategory()}><Icon name="plus" size={13} /> New category</Button></div>}
           <p className="muted small" style={{ margin: 0 }}>Amounts above the approval limit wait for a manager. Petty cash paid out of the till is recorded from the Till screen instead.</p>
         </form>
       </BranchGate>
     </Modal>
+  );
+}
+
+/** Expense categories: add, and rename one that was typed wrongly. */
+function CategoriesTab({ categories, onChanged }: { categories: any[]; onChanged: () => void }) {
+  const toast = useToast();
+  async function rename(c: any) {
+    const name = window.prompt('Rename this category:', c.name);
+    if (!name || !name.trim() || name.trim() === c.name) return;
+    try { await apiPut(`/api/expenses/categories/${c.category_id}`, { name: name.trim() }); toast.success('Category renamed', name.trim()); onChanged(); }
+    catch (err) { toast.error(err); }
+  }
+  async function add() {
+    const name = window.prompt('New expense category:');
+    if (!name || !name.trim()) return;
+    try { await apiPost('/api/expenses/categories', { name: name.trim() }); toast.success('Category added', name.trim()); onChanged(); }
+    catch (err) { toast.error(err); }
+  }
+  return (
+    <>
+      <div className="table-toolbar"><span className="muted small">Renaming a category also renames it on past expenses.</span><div className="spacer" />
+        <Button variant="primary" onClick={() => void add()}><Icon name="plus" size={14} /> New category</Button></div>
+      <Card flush>
+        <DataTable rows={categories} emptyText="No categories yet — add Rent, Electricity, Salaries…" rowKey={(c: any) => c.category_id}
+          columns={[
+            { key: 'n', header: 'Category', render: (c: any) => c.name },
+            { key: 'e', header: '', align: 'right', render: (c: any) => <Button size="sm" onClick={() => void rename(c)}>Rename</Button> },
+          ]} />
+      </Card>
+    </>
   );
 }

@@ -45,18 +45,23 @@ export default async function hrRoutes(app: FastifyInstance) {
     const branchId = writeBranch(session, body.branch_id as string);
     const role = oneOf(body.role ?? 'CASHIER', 'Role',
       ['BRANCH_MANAGER', 'CASHIER', 'INVENTORY_STAFF', 'ACCOUNTANT'] as const);
-    const phone = str(body.phone, 'Phone number', { max: 20 });
+    if (role === 'BRANCH_MANAGER' && session.role !== 'OWNER_ADMIN') {
+      throw forbidden('Only the Owner can add a branch manager.');
+    }
+    const phone = str(body.phone, 'Phone number', { max: 20 }).replace(/\s+/g, '');
+    if (phone.replace(/\D/g, '').length < 10) throw badRequest('Enter a 10-digit phone number.');
     const pin = optionalStr(body.pin, 'PIN', { max: 6 });
     if (pin && !/^[0-9]{4,6}$/.test(pin)) throw badRequest('A PIN must be 4 to 6 digits.');
 
-    const existing = (await sql<any>`SELECT user_id FROM users WHERE phone = ${phone}`.execute(trx)).rows[0];
-    if (existing) throw badRequest('Someone is already registered with that phone number.');
+    const email = optionalStr(body.email, 'Email', { max: 254 })?.toLowerCase() || null;
+    const taken = (await sql<{ id: string | null }>`SELECT auth_contact_taken(NULL, ${phone}, ${email}) AS id`.execute(trx)).rows[0];
+    if (taken?.id) throw badRequest('Someone is already registered with that phone number or email.');
 
     const user = (await sql<any>`
       INSERT INTO users (branch_id, role, full_name, phone, email, pin_hash, language_pref, must_change_password)
       VALUES (${branchId}, ${role}::user_role, ${str(body.full_name, 'Full name', { max: 120 })}, ${phone},
-              ${optionalStr(body.email, 'Email', { max: 254 })},
-              ${pin ? sql`crypt(${pin}, gen_salt('bf', 12))` : null},
+              ${email},
+              ${pin ? sql`erp_hash_secret(${pin})` : null},
               ${optionalStr(body.language_pref, 'language') ?? 'en'}, TRUE)
       RETURNING user_id, full_name, role
     `.execute(trx)).rows[0];
@@ -70,6 +75,88 @@ export default async function hrRoutes(app: FastifyInstance) {
 
     await audit(trx, session, 'USER_CREATED', 'employees', employee.employee_id, { after: { role, branchId } });
     return { ...employee, full_name: user.full_name, role: user.role };
+  }));
+
+  /**
+   * Correct a staff member's details: name, phone, email, designation, joining
+   * date, active or not, and a new PIN. Role and branch changes stay with the
+   * Owner (Admin → Users). A Branch Manager may edit only the counter, inventory
+   * and accounts staff of their own branch — row-level security enforces the same.
+   */
+  app.put('/employees/:id', guarded('manage_staff', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'employee_id');
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const before = (await sql<any>`
+      SELECT e.employee_id, e.user_id, e.branch_id, e.designation, e.joined_at,
+             u.full_name, u.phone, u.email, u.role, u.is_active
+        FROM employees e JOIN users u ON u.user_id = e.user_id
+       WHERE e.employee_id = ${id}
+    `.execute(trx)).rows[0];
+    if (!before) throw notFound('Staff member not found.');
+    if (session.role !== 'OWNER_ADMIN') {
+      if (!['CASHIER', 'INVENTORY_STAFF', 'ACCOUNTANT'].includes(before.role)) {
+        throw forbidden('Only the Owner can change a manager\'s or owner\'s details.');
+      }
+    }
+
+    const fullName = body.full_name === undefined ? before.full_name : str(body.full_name, 'Full name', { max: 120 });
+    const phone = body.phone === undefined ? before.phone : str(body.phone, 'Phone number', { max: 20 }).replace(/\s+/g, '');
+    if (phone !== before.phone && phone.replace(/\D/g, '').length < 10) throw badRequest('Enter a 10-digit phone number.');
+    const email = body.email === undefined ? before.email
+      : (optionalStr(body.email, 'Email', { max: 254 })?.toLowerCase() || null);
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Please enter a valid email address.');
+    const isActive = body.is_active === undefined ? before.is_active : Boolean(body.is_active);
+    if (!isActive && before.user_id === session.user_id) throw badRequest('You cannot deactivate your own account.');
+    const pin = optionalStr(body.pin, 'PIN', { max: 6 });
+    if (pin && !/^[0-9]{4,6}$/.test(pin)) throw badRequest('A PIN must be 4 to 6 digits.');
+
+    if (phone !== before.phone || (email ?? null) !== (before.email ?? null)) {
+      const clash = await sql<{ user_id: string }>`
+        SELECT auth_contact_taken(${before.user_id}, ${phone}, ${email}) AS user_id
+      `.execute(trx);
+      if (clash.rows[0]?.user_id) throw badRequest('Another user already has that phone number or email.');
+    }
+
+    await sql`
+      UPDATE users SET full_name = ${fullName}, phone = ${phone}, email = ${email}, is_active = ${isActive},
+             pin_hash = ${pin ? sql`erp_hash_secret(${pin})` : sql`pin_hash`},
+             failed_attempts = ${pin ? 0 : sql`failed_attempts`}, locked_until = ${pin ? null : sql`locked_until`}
+       WHERE user_id = ${before.user_id}
+    `.execute(trx);
+    await sql`
+      UPDATE employees SET
+        designation = ${body.designation === undefined ? before.designation : (optionalStr(body.designation, 'Designation', { max: 100 }) ?? null)},
+        joined_at = ${body.joined_at === undefined ? sql`joined_at` : sql`${str(body.joined_at, 'Joining date', { max: 10 })}::date`}
+       WHERE employee_id = ${id}
+    `.execute(trx);
+    if (!isActive && before.is_active) await sql`SELECT auth_revoke_user_sessions(${before.user_id})`.execute(trx);
+
+    await audit(trx, session, 'USER_UPDATED', 'employees', id,
+      { before, after: { full_name: fullName, phone, email, is_active: isActive } }, { branchId: before.branch_id });
+    if (pin) await audit(trx, session, 'PIN_RESET', 'users', before.user_id, undefined, { branchId: before.branch_id });
+    return { ok: true };
+  }));
+
+  /** Rename a shift or change its hours. */
+  app.put('/shifts/:id', guarded('manage_staff', async ({ db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'shift_id');
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const row = (await sql<any>`
+      UPDATE shifts SET name = ${str(body.name, 'Shift name', { max: 60 })},
+             start_time = ${str(body.start_time, 'Start time', { max: 8 })}::time,
+             end_time = ${str(body.end_time, 'End time', { max: 8 })}::time
+       WHERE shift_id = ${id} RETURNING *
+    `.execute(trx)).rows[0];
+    if (!row) throw notFound('Shift not found.');
+    return row;
+  }));
+
+  /** Take a rostered shift off the plan (a wrong day or the wrong person). */
+  app.delete('/roster/:id', guarded('manage_staff', async ({ db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'roster entry');
+    const res = await sql`DELETE FROM employee_shifts WHERE id = ${id}`.execute(trx);
+    if (!Number(res.numAffectedRows ?? 0)) throw notFound('Roster entry not found.');
+    return { ok: true };
   }));
 
   // ── Attendance (10.1) ─────────────────────────────────────────────────────
@@ -89,6 +176,18 @@ export default async function hrRoutes(app: FastifyInstance) {
          ${q.to ? sql`AND a.work_date <= ${q.to}::date` : sql``}
        ORDER BY a.work_date DESC, u.full_name LIMIT ${clampLimit(q.limit, 200, 1000)}
     `.execute(trx)).rows;
+  }));
+
+  /** My own day: today's check-in/out and my leave requests ("My account"). */
+  app.get('/me', guarded('mark_attendance', async ({ session, db: trx }) => {
+    const employee = (await sql<any>`SELECT employee_id FROM employees WHERE user_id = ${session.user_id}`.execute(trx)).rows[0];
+    if (!employee) return { employee_id: null, today: null, leave: [] };
+    const [today, leave] = await Promise.all([
+      sql<any>`SELECT check_in, check_out FROM attendance WHERE employee_id = ${employee.employee_id} AND work_date = CURRENT_DATE`.execute(trx),
+      sql<any>`SELECT id, from_date, to_date, status FROM leave_requests WHERE employee_id = ${employee.employee_id}
+                ORDER BY from_date DESC LIMIT 10`.execute(trx),
+    ]);
+    return { employee_id: employee.employee_id, today: today.rows[0] ?? null, leave: leave.rows };
   }));
 
   /** Every role can mark their own attendance; only a manager can mark someone else's. */

@@ -175,9 +175,11 @@ export default async function customersRoutes(app: FastifyInstance) {
       `.execute(trx),
       sql<any>`
         SELECT cp.payment_id, cp.receipt_number, cp.amount, cp.method, cp.reference, cp.notes, cp.created_at,
-               b.name AS branch_name, u.full_name AS received_by
+               b.name AS branch_name, u.full_name AS received_by,
+               pc.cancelled_at, pc.reason AS cancel_reason
           FROM customer_payments cp JOIN branches b ON b.branch_id = cp.branch_id
           LEFT JOIN users u ON u.user_id = cp.created_by
+          LEFT JOIN payment_cancellations pc ON pc.payment_table = 'customer_payments' AND pc.payment_id = cp.payment_id
          WHERE cp.customer_id = ${id} ORDER BY cp.created_at DESC LIMIT 100
       `.execute(trx),
       sql<any>`
@@ -249,7 +251,7 @@ export default async function customersRoutes(app: FastifyInstance) {
                   THEN b.name ELSE 'Another branch' END AS branch_name,
              CASE WHEN ${own} OR l.branch_id IS NOT DISTINCT FROM ${session.branch_id}
                   THEN COALESCE(i.invoice_number, cp.receipt_number, cn.credit_note_number) END AS reference,
-             cp.method AS payment_method
+             l.ref_table, cp.method AS payment_method
         FROM customer_credit_ledger l
         LEFT JOIN branches b ON b.branch_id = l.branch_id
         LEFT JOIN invoices i ON l.ref_table = 'invoices' AND i.invoice_id = l.ref_id
@@ -476,6 +478,56 @@ export default async function customersRoutes(app: FastifyInstance) {
       till_note: method === 'CASH' && !tillSessionId
         ? 'No till was open for you, so this cash is not in any drawer count.' : null,
     };
+  }));
+
+  /**
+   * Cancel a receipt recorded by mistake. The receipt stays on file marked
+   * cancelled; the customer's balance goes back up by the amount, and cash taken
+   * into a till that is still open comes back out of the expected drawer cash.
+   */
+  app.post('/payments/:paymentId/cancel', guarded('cancel_customer_payment', async ({ session, db: trx, req }) => {
+    const paymentId = uuid((req.params as any).paymentId, 'payment_id');
+    const reason = str((req.body as any)?.reason, 'Reason', { max: 300 });
+    const payment = (await sql<any>`
+      SELECT cp.*, c.name AS customer_name FROM customer_payments cp JOIN customers c ON c.customer_id = cp.customer_id
+       WHERE cp.payment_id = ${paymentId}
+    `.execute(trx)).rows[0];
+    if (!payment) throw notFound('Receipt not found.');
+    const done = (await sql<any>`
+      SELECT 1 FROM payment_cancellations WHERE payment_table = 'customer_payments' AND payment_id = ${paymentId}
+    `.execute(trx)).rows[0];
+    if (done) throw conflict(`Receipt ${payment.receipt_number} is already cancelled.`);
+
+    const cancellation = (await sql<any>`
+      INSERT INTO payment_cancellations (payment_table, payment_id, branch_id, reason, cancelled_by)
+      VALUES ('customer_payments', ${paymentId}, ${payment.branch_id}, ${reason}, ${session.user_id})
+      RETURNING *
+    `.execute(trx)).rows[0];
+    const amount = Number(payment.amount);
+    const posted = await postCredit(trx, {
+      customerId: payment.customer_id, branchId: payment.branch_id, entryType: 'ADJUSTMENT',
+      amount, refTable: 'customer_payments', refId: paymentId,
+    });
+
+    let tillNote: string | null = null;
+    if (payment.till_session_id) {
+      const till = (await sql<any>`SELECT status FROM till_sessions WHERE session_id = ${payment.till_session_id}`.execute(trx)).rows[0];
+      if (till && till.status === 'OPEN') {
+        await sql`
+          INSERT INTO till_events (session_id, event_type, amount, ref_table, ref_id, note)
+          VALUES (${payment.till_session_id}, 'CASH_RECEIPT', ${-amount}, 'payment_cancellations', ${cancellation.cancellation_id},
+                  ${'Receipt ' + payment.receipt_number + ' cancelled'})
+        `.execute(trx);
+      } else {
+        tillNote = 'That till is already closed, so its cash count is not changed. Hand the cash back or record it separately.';
+      }
+    }
+
+    await audit(trx, session, 'PAYMENT_CANCELLED', 'customer_payments', paymentId, {
+      before: { receipt_number: payment.receipt_number, amount, method: payment.method },
+      after: { reason, balance: posted.balance_after },
+    }, { branchId: payment.branch_id });
+    return { ok: true, balance_owed: posted.balance_after, till_note: tillNote };
   }));
 
   /** 6.2 — outstanding list with ageing, which is what the reminders run off. */

@@ -1107,6 +1107,21 @@ CREATE TABLE customer_payments (
 );
 CREATE INDEX idx_customer_payments_customer ON customer_payments(customer_id, created_at DESC);
 
+-- A receipt or supplier payment recorded by mistake (wrong amount, wrong customer)
+-- is CANCELLED, never edited or deleted: the payment row stays, this row records
+-- who cancelled it and why, and a reversing ADJUSTMENT goes to the ledger. Every
+-- total that sums payments excludes cancelled ones.
+CREATE TABLE payment_cancellations (
+    cancellation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    payment_table   TEXT NOT NULL CHECK (payment_table IN ('customer_payments', 'vendor_payments')),
+    payment_id      UUID NOT NULL,
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    reason          TEXT NOT NULL,
+    cancelled_by    UUID REFERENCES users(user_id),
+    cancelled_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (payment_table, payment_id)
+);
+
 CREATE TABLE paint_tint_records (     -- 2.3
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_line_id UUID NOT NULL REFERENCES invoice_lines(line_id),
@@ -1330,7 +1345,7 @@ CREATE TABLE expenses (
 
 CREATE TABLE employees (
     employee_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID NOT NULL REFERENCES users(user_id),
+    user_id         UUID NOT NULL UNIQUE REFERENCES users(user_id),   -- one staff record per person
     branch_id       UUID NOT NULL REFERENCES branches(branch_id),
     designation     TEXT,
     joined_at       DATE NOT NULL DEFAULT CURRENT_DATE
@@ -1523,13 +1538,17 @@ LANGUAGE sql STABLE AS $$
         SELECT g.grn_id, g.vendor_id, g.received_at,
                g.grand_total - COALESCE((SELECT SUM(dn.total_amount) FROM vendor_debit_notes dn
                                           WHERE dn.grn_id = g.grn_id), 0) AS net_amount,
-               COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp WHERE vp.grn_id = g.grn_id), 0) AS paid_direct
+               COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp WHERE vp.grn_id = g.grn_id
+                          AND NOT EXISTS (SELECT 1 FROM payment_cancellations pc
+                                           WHERE pc.payment_table = 'vendor_payments' AND pc.payment_id = vp.payment_id)), 0) AS paid_direct
           FROM grn g
          WHERE p_vendor_id IS NULL OR g.vendor_id = p_vendor_id
     ), pool AS (
         SELECT v.vendor_id,
                GREATEST(COALESCE((SELECT SUM(vp.amount) FROM vendor_payments vp
-                                   WHERE vp.vendor_id = v.vendor_id AND vp.grn_id IS NULL), 0)
+                                   WHERE vp.vendor_id = v.vendor_id AND vp.grn_id IS NULL
+                                     AND NOT EXISTS (SELECT 1 FROM payment_cancellations pc
+                                                      WHERE pc.payment_table = 'vendor_payments' AND pc.payment_id = vp.payment_id)), 0)
                         - GREATEST(v.opening_balance, 0), 0) AS on_account
           FROM vendors v
          WHERE p_vendor_id IS NULL OR v.vendor_id = p_vendor_id
@@ -1709,6 +1728,8 @@ CREATE POLICY delivery_challans_rls ON delivery_challans USING (erp_branch_ok(br
 ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
 CREATE POLICY expenses_rls ON expenses USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
 ALTER TABLE employees ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_cancellations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY payment_cancellations_rls ON payment_cancellations USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
 CREATE POLICY employees_rls ON employees USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
 ALTER TABLE shifts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY shifts_rls ON shifts USING (erp_branch_ok(branch_id)) WITH CHECK (erp_branch_ok(branch_id));
@@ -1827,9 +1848,14 @@ CREATE POLICY stock_transfers_rls ON stock_transfers
 -- Users: Owner sees the chain, a Branch Manager sees their own branch's staff,
 -- and everyone can always read their own row (needed for /me).
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+-- Writes: the Owner anywhere; a Branch Manager only for counter, inventory and
+-- accounts staff of their own branch (the Staff screen) — never a manager or an
+-- owner, so a manager cannot promote anyone, themselves included.
 CREATE POLICY users_rls ON users
     USING (erp_is_admin() OR user_id = erp_user_id() OR (branch_id IS NOT NULL AND branch_id = erp_branch_id()))
-    WITH CHECK (erp_is_admin());
+    WITH CHECK (erp_is_admin()
+                OR (erp_role() = 'BRANCH_MANAGER' AND branch_id IS NOT NULL AND branch_id = erp_branch_id()
+                    AND role IN ('CASHIER', 'INVENTORY_STAFF', 'ACCOUNTANT')));
 
 -- Auth-plumbing tables are touched ONLY by the SECURITY DEFINER functions below,
 -- which run as the table owner and therefore bypass RLS. No policy is granted to
@@ -2162,6 +2188,36 @@ BEGIN
      WHERE s.token_hash = p_token_hash
        AND s.revoked_at IS NULL AND s.expires_at > now() AND u.is_active;
 END;
+$$;
+
+-- Hashes a new password or PIN for the API (user creation and Owner resets). The
+-- running app role may not be able to see pgcrypto directly (Supabase keeps it in
+-- an `extensions` schema the app role has no USAGE on), so hashing goes through
+-- this definer function, with the same bcrypt cost as every other credential.
+CREATE OR REPLACE FUNCTION erp_hash_secret(p_secret TEXT)
+RETURNS TEXT LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+    SELECT crypt(p_secret, gen_salt('bf', 12))
+$$;
+
+-- Is this phone or email already used by ANOTHER user, anywhere in the chain?
+-- Row-level security hides other branches' staff from a Branch Manager, so the
+-- check runs as definer; it returns only an id, never the other person's details.
+CREATE OR REPLACE FUNCTION auth_contact_taken(p_user_id UUID, p_phone TEXT, p_email TEXT)
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+    SELECT user_id FROM users
+     WHERE user_id IS DISTINCT FROM p_user_id
+       AND ((p_phone IS NOT NULL AND phone = p_phone)
+            OR (p_email IS NOT NULL AND lower(email) = lower(p_email)))
+     LIMIT 1
+$$;
+
+-- The sign-up form is shown BEFORE anyone is signed in, so it cannot read `branches`
+-- (row-level security hides every row from an anonymous connection). This exposes
+-- exactly the id, name and code of active branches and nothing else.
+CREATE OR REPLACE FUNCTION auth_public_branches()
+RETURNS TABLE (branch_id UUID, name TEXT, code TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+    SELECT b.branch_id, b.name, b.code FROM branches b WHERE b.is_active ORDER BY b.name
 $$;
 
 -- The branches a user may act at: an Owner every active branch; anyone else their
@@ -2603,7 +2659,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO erp_app;
 REVOKE DELETE, UPDATE ON audit_log, stock_ledger, login_attempts FROM erp_app;
 REVOKE INSERT, UPDATE, DELETE ON backups FROM erp_app;
 -- Money vouchers are corrected by a reversing entry, never edited or removed.
-REVOKE UPDATE, DELETE ON customer_payments, vendor_payments, stock_adjustments FROM erp_app;
+REVOKE UPDATE, DELETE ON customer_payments, vendor_payments, stock_adjustments, payment_cancellations FROM erp_app;
 -- The app role must not be able to reach auth message bodies by any route.
 REVOKE ALL ON auth_message_outbox FROM erp_app;
 REVOKE ALL ON override_approvals FROM erp_app;

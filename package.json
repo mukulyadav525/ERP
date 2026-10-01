@@ -14,7 +14,7 @@
     "typecheck": "npm run typecheck --workspace=apps/api && npm run typecheck --workspace=apps/web",
     "smoke": "node apps/api/scripts/smoke-test.mjs",
     "lint": "npm run lint --workspace=apps/api && npm run lint --workspace=apps/web",
-    "test": "node tests/tax-properties.mjs && node apps/api/scripts/smoke-test.mjs && node tests/regression.mjs && node tests/workflows.mjs && node tests/final-pass.mjs && node tests/working-day.mjs && node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
+    "test": "node tests/tax-properties.mjs && node apps/api/scripts/smoke-test.mjs && node tests/regression.mjs && node tests/workflows.mjs && node tests/final-pass.mjs && node tests/working-day.mjs && node tests/edits-and-roles.mjs && node tests/pdf-matrix.mjs && node tests/pdf-geometry.mjs",
     "test:unit": "node tests/tax-properties.mjs",
     "test:api": "node apps/api/scripts/smoke-test.mjs",
     "test:regression": "node tests/regression.mjs",
@@ -27,7 +27,8 @@
     "backup:restore-test": "node apps/api/scripts/restore-test.mjs",
     "create-owner": "node apps/api/scripts/create-owner.mjs",
     "test:final": "node tests/final-pass.mjs",
-    "test:day": "node tests/working-day.mjs"
+    "test:day": "node tests/working-day.mjs",
+    "test:edits": "node tests/edits-and-roles.mjs"
   },
   "devDependencies": {
     "kysely-codegen": "^0.20.0",

@@ -410,7 +410,7 @@ function UsersTab() {
         <Button variant="primary" onClick={() => setNewOpen(true)}>+ User</Button>
       </div>
 
-      <Card flush title="Users">
+      <Card flush title="Users" description="Click Edit (or a row) to change details, role, branch, password or PIN.">
         <DataTable rows={users ?? []} onRowClick={(u) => setEditing(u)} emptyText="No users."
           columns={[
             { key: 'n', header: 'Name', render: (u: any) => (
@@ -438,6 +438,9 @@ function UsersTab() {
               u.is_locked ? <Badge tone="critical">locked</Badge>
               : u.is_active ? <Badge tone="good">active</Badge>
               : <Badge tone="neutral">disabled</Badge> },
+            { key: 'e', header: '', render: (u: any) => (
+              <Button size="sm" onClick={(e) => { e.stopPropagation(); setEditing(u); }}>Edit</Button>
+            ) },
           ]} />
       </Card>
 
@@ -519,19 +522,26 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
   const [extra, setExtra] = useState<string[]>([]);
   const [active, setActive] = useState(true);
   const [pin, setPin] = useState('');
+  const [password, setPassword] = useState('');
+  const [details, setDetails] = useState({ full_name: '', phone: '', email: '' });
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!user) return;
-    setRole(user.role); setBranchId(user.branch_id ?? ''); setActive(Boolean(user.is_active)); setPin('');
+    setRole(user.role); setBranchId(user.branch_id ?? ''); setActive(Boolean(user.is_active)); setPin(''); setPassword('');
+    setDetails({ full_name: user.full_name ?? '', phone: user.phone ?? '', email: user.email ?? '' });
     setExtra((user.extra_branches ?? []).map((b: any) => b.branch_id));
   }, [user]);
 
   async function save() {
     if (role !== 'OWNER_ADMIN' && !branchId) { toast.error(new Error('Choose the branch this person works at.')); return; }
     if (pin && !/^\d{4,6}$/.test(pin)) { toast.error(new Error('A PIN is 4 to 6 digits.')); return; }
+    if (!details.full_name.trim() || details.phone.replace(/\D/g, '').length < 10) { toast.error(new Error('Enter the name and a 10-digit phone number.')); return; }
+    if (password && password.length < 8) { toast.error(new Error('A password needs at least 8 characters.')); return; }
     setBusy(true);
     try {
       await apiPut(`/api/auth/users/${user.user_id}`, {
+        full_name: details.full_name.trim(), phone: details.phone.trim(), email: details.email.trim(),
+        password: password || undefined,
         role, branch_id: role === 'OWNER_ADMIN' ? null : branchId, is_active: active, unlock: user.is_locked || undefined,
         extra_branch_ids: role === 'OWNER_ADMIN' ? [] : extra.filter((id) => id !== branchId),
       });
@@ -547,7 +557,12 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
       {user && (
         <div className="stack">
           {user.is_locked && <Alert tone="critical" title="This account is locked">Too many failed sign-in attempts. Saving unlocks it.</Alert>}
-          <KeyValue items={[['Phone', user.phone], ['Email', user.email || '—'], ['Last seen', user.last_login_at ? formatDateTime(user.last_login_at) : 'never']]} />
+          <div className="form-grid">
+            <Field label="Full name" required><input value={details.full_name} onChange={(e) => setDetails({ ...details, full_name: e.target.value })} /></Field>
+            <Field label="Phone" required><input type="tel" value={details.phone} onChange={(e) => setDetails({ ...details, phone: e.target.value })} /></Field>
+            <div className="span-2"><Field label="Email" hint="Used to sign in with a password or Google"><input type="email" value={details.email} onChange={(e) => setDetails({ ...details, email: e.target.value })} /></Field></div>
+          </div>
+          <KeyValue items={[['Last seen', user.last_login_at ? formatDateTime(user.last_login_at) : 'never']]} />
           <Field label="Role"><select value={role} onChange={(e) => setRole(e.target.value)}>{ROLE_OPTIONS}</select></Field>
           {role !== 'OWNER_ADMIN' && (
             <>
@@ -561,6 +576,9 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
             </>
           )}
           <Switch checked={active} onChange={setActive} label="Account is active" />
+          <Field label="Set a new password" hint="Leave blank to keep the current one. At least 8 characters.">
+            <input type="password" value={password} autoComplete="new-password" onChange={(e) => setPassword(e.target.value)} />
+          </Field>
           <Field label="Reset their PIN" hint="Leave blank to keep the current one. 4 to 6 digits.">
             <input type="password" inputMode="numeric" maxLength={6} value={pin} autoComplete="new-password"
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} />

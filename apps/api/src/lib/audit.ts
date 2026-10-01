@@ -11,7 +11,7 @@ export type AuditAction =
   | 'EXPENSE_APPROVED' | 'EXPENSE_REJECTED' | 'INVOICE_VOIDED' | 'CUSTOMER_MERGED'
   | 'LOYALTY_ADJUSTMENT' | 'NEGATIVE_STOCK_OVERRIDE' | 'BACKUP_RESTORED'
   | 'PII_EXPORTED' | 'REGISTRATION_APPROVED' | 'REGISTRATION_REJECTED'
-  | 'STOCK_CONFLICT_RESOLVED' | 'PIN_RESET' | 'WARRANTY_CLAIM_UPDATED'
+  | 'STOCK_CONFLICT_RESOLVED' | 'PIN_RESET' | 'PASSWORD_RESET' | 'WARRANTY_CLAIM_UPDATED'
   // Draft billing (3.x, editable-before-final). A draft is a working document, so
   // only the transitions that change what the customer is asked to pay are logged:
   // the edit itself, the discard, and the moment it becomes a commercial document.
@@ -22,7 +22,7 @@ export type AuditAction =
   | 'CUSTOMER_CREATED' | 'CUSTOMER_UPDATED' | 'VENDOR_CREATED' | 'VENDOR_UPDATED'
   | 'BRANCH_ACCESS_CHANGE'
   // Money in and out (Sections 24, 26, 27, 36, 37).
-  | 'CUSTOMER_PAYMENT' | 'VENDOR_PAYMENT' | 'OPENING_BALANCE'
+  | 'CUSTOMER_PAYMENT' | 'VENDOR_PAYMENT' | 'PAYMENT_CANCELLED' | 'OPENING_BALANCE'
   | 'EXPENSE_CREATED' | 'TILL_OPENED' | 'TILL_CLOSED' | 'CASH_DROP' | 'PETTY_CASH'
   // Procurement and stock (Sections 28–32).
   | 'PURCHASE_ORDER_CREATED' | 'PURCHASE_ORDER_CANCELLED' | 'GRN_CREATED'

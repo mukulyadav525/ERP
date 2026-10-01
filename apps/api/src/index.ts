@@ -155,6 +155,8 @@ app.setErrorHandler((thrown, req, reply) => {
   if (pgCode === '23514') {
     return reply.code(400).send({ error: CHECK_MESSAGES[constraint] ?? 'That change is not allowed by a data rule.' });
   }
+  if (pgCode === '42501') return reply.code(403).send({ error: 'Your role is not allowed to make that change.' });
+  if (pgCode === '23P01') return reply.code(409).send({ error: 'That overlaps an existing record for the same dates.' });
   if (pgCode === '23502') return reply.code(400).send({ error: 'A required value is missing.' });
   if (pgCode === '22P02' || pgCode === '22007' || pgCode === '22008') {
     return reply.code(400).send({ error: 'One of the values entered is not in a valid format.' });

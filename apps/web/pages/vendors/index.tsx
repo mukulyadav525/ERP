@@ -33,6 +33,8 @@ export default function VendorsPage() {
 const ENTRY_LABEL: Record<string, string> = {
   OPENING_BALANCE: 'Opening balance', GRN_PAYABLE: 'Purchase bill', PAYMENT_MADE: 'Payment', DEBIT_NOTE: 'Debit note (return)', ADJUSTMENT: 'Adjustment',
 };
+const vendorEntryLabel = (e: any) => (e.entry_type === 'ADJUSTMENT' && e.ref_table === 'vendor_payments'
+  ? 'Payment cancelled' : ENTRY_LABEL[e.entry_type] ?? e.entry_type);
 const decimalOnly = (v: string) => v.replace(/[^\d.]/g, '');
 
 function VendorsScreen() {
@@ -145,6 +147,17 @@ function VendorDetail({ id, onClose, onEdit, onChanged }: { id: string | null; o
   const { data: v, error, mutate } = useSWR<any>(id ? `/api/vendors/${id}` : null, fetcher);
   useEffect(() => setInner('bills'), [id]);
 
+  async function cancelPayment(p: any) {
+    const reason = window.prompt(`Cancel payment ${p.payment_number} of ${inr(p.amount, { decimals: true })}? It will be owed to the supplier again.\n\nReason (required):`);
+    if (reason === null) return;
+    if (!reason.trim()) { toast.error(new Error('Give a reason for cancelling.')); return; }
+    try {
+      const res = await apiPost<any>(`/api/vendors/payments/${p.payment_id}/cancel`, { reason: reason.trim() });
+      toast.success(`Payment ${p.payment_number} cancelled`, `Now payable: ${inr(res.balance_after, { decimals: true })}`);
+      void mutate(); onChanged();
+    } catch (err) { toast.error(err); }
+  }
+
   async function toggleActive() {
     if (!v) return;
     if (v.is_active && !window.confirm(`Mark ${v.name} inactive? They will not be offered for new purchases. History and balance are kept.`)) return;
@@ -216,7 +229,12 @@ function VendorDetail({ id, onClose, onEdit, onChanged }: { id: string | null; o
                 { key: 'm', header: 'Method', render: (p: any) => `${String(p.method).replace('_', ' ').toLowerCase()}${p.reference ? ` · ${p.reference}` : ''}` },
                 { key: 'g', header: 'Against bill', render: (p: any) => (p.grn_number ? `${p.grn_number}${p.vendor_invoice_no ? ` (${p.vendor_invoice_no})` : ''}` : 'On account') },
                 { key: 'u', header: 'By', render: (p: any) => p.paid_by ?? '—' },
-                { key: 'a', header: 'Amount', align: 'right', render: (p: any) => inr(p.amount, { decimals: true }) },
+                { key: 'a', header: 'Amount', align: 'right', render: (p: any) => (p.cancelled_at
+                  ? <span><s className="muted">{inr(p.amount, { decimals: true })}</s> <Badge tone="critical">cancelled</Badge>
+                      <div className="muted small">{p.cancel_reason}</div></span>
+                  : inr(p.amount, { decimals: true })) },
+                ...(can('record_vendor_payment') ? [{ key: 'x', header: '', align: 'right' as const, render: (p: any) => (p.cancelled_at ? null
+                  : <Button size="sm" variant="ghost" onClick={() => void cancelPayment(p)}>Cancel</Button>) }] : []),
               ]} />
           )}
           {inner === 'statement' && <VendorStatement vendorId={v.vendor_id} name={v.name} />}
@@ -264,7 +282,7 @@ function VendorStatement({ vendorId, name }: { vendorId: string; name: string })
         <Button size="sm" disabled={!data?.entries?.length} onClick={() => downloadCsv([
           { date: data.from, entry: 'Opening balance', reference: '', debit: '', credit: '', balance: data.opening_balance },
           ...data.entries.map((e: any) => ({
-            date: formatDate(e.created_at), entry: ENTRY_LABEL[e.entry_type] ?? e.entry_type, reference: e.reference ?? '',
+            date: formatDate(e.created_at), entry: vendorEntryLabel(e), reference: e.reference ?? '',
             payment: e.payment_method ? `${e.payment_method}${e.payment_reference ? ` ${e.payment_reference}` : ''}` : '',
             bill_amount: Number(e.amount) > 0 ? e.amount : '', paid_or_returned: Number(e.amount) < 0 ? -e.amount : '', balance: e.balance_after,
           })),
@@ -283,7 +301,7 @@ function VendorStatement({ vendorId, name }: { vendorId: string; name: string })
           <DataTable rows={data.entries} emptyText="No activity in this period." rowKey={(e: any) => e.entry_id}
             columns={[
               { key: 'd', header: 'Date', nowrap: true, render: (e: any) => formatDateTime(e.created_at) },
-              { key: 't', header: 'Entry', render: (e: any) => ENTRY_LABEL[e.entry_type] ?? e.entry_type },
+              { key: 't', header: 'Entry', render: (e: any) => vendorEntryLabel(e) },
               { key: 'r', header: 'Document', render: (e: any) => (e.reference ? <span className="mono small">{e.reference}</span> : '—') },
               { key: 'p', header: 'Paid by', render: (e: any) => (e.payment_method ? `${String(e.payment_method).replace('_', ' ').toLowerCase()}${e.payment_reference ? ` · ${e.payment_reference}` : ''}` : '') },
               { key: 'dr', header: 'Bill', align: 'right', render: (e: any) => (Number(e.amount) > 0 ? inr(e.amount, { decimals: true }) : '') },
