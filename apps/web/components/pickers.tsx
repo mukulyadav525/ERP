@@ -174,7 +174,7 @@ export function QuickCustomerModal({ initial, onClose, onCreated }: {
     } catch (err) { toast.error(err); } finally { setBusy(false); }
   }
   return (
-    <Modal open onClose={onClose} title="New customer"
+    <Modal guardUnsaved open onClose={onClose} title="New customer"
       footer={<>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" busy={busy} disabled={!form.name.trim() || !form.phone.trim()} onClick={() => void save()}>Add customer</Button>
@@ -195,29 +195,83 @@ export function QuickCustomerModal({ initial, onClose, onCreated }: {
   );
 }
 
-// ── Vendor ───────────────────────────────────────────────────────────────────
+// ── Vendor (with inline create) ──────────────────────────────────────────────
 export function VendorPicker({ value, onSelect, placeholder = 'Vendor name, phone or GSTIN', id }: {
   value: VendorHit | null; onSelect: (v: VendorHit | null) => void; placeholder?: string; id?: string;
 }) {
+  const { can } = useAuth();
+  const [creating, setCreating] = useState<string | null>(null);
+  // A new supplier is added on the spot: leaving a half-typed purchase bill to go
+  // to the Vendors screen would lose every line entered so far.
+  const mayCreate = can('edit_vendor');
   return (
-    <Combobox<VendorHit>
-      id={id}
-      value={value}
-      placeholder={placeholder}
-      ariaLabel="Vendor"
-      minChars={0}
-      search={(q) => apiGet<VendorHit[]>(`/api/vendors?limit=12${q ? `&q=${encodeURIComponent(q)}` : ''}`)}
-      getKey={(v) => v.vendor_id}
-      getLabel={(v) => v.name}
-      onSelect={onSelect}
-      emptyText="No vendor found. Add vendors on the Vendors screen."
-      renderItem={(v) => (
-        <span className="opt-main">
-          <span className="opt-title">{v.name}</span>
-          <span className="opt-sub">{[v.phone, v.gstin].filter(Boolean).join(' · ')}</span>
-        </span>
+    <>
+      <Combobox<VendorHit>
+        id={id}
+        value={value}
+        placeholder={placeholder}
+        ariaLabel="Vendor"
+        minChars={0}
+        search={(q) => apiGet<VendorHit[]>(`/api/vendors?limit=12${q ? `&q=${encodeURIComponent(q)}` : ''}`)}
+        getKey={(v) => v.vendor_id}
+        getLabel={(v) => v.name}
+        onSelect={onSelect}
+        onCreate={mayCreate ? (text) => setCreating(text) : undefined}
+        createLabel={(text) => `Add new supplier “${text}”`}
+        emptyText={mayCreate ? 'No supplier found.' : 'No supplier found. Ask a manager to add it.'}
+        renderItem={(v) => (
+          <span className="opt-main">
+            <span className="opt-title">{v.name}</span>
+            <span className="opt-sub">{[v.phone, v.gstin].filter(Boolean).join(' · ')}</span>
+          </span>
+        )}
+      />
+      {creating !== null && (
+        <QuickVendorModal initial={creating} onClose={() => setCreating(null)}
+          onCreated={(v) => { setCreating(null); onSelect(v); }} />
       )}
-    />
+    </>
+  );
+}
+
+/** Adds a supplier without leaving the purchase entry or product form. */
+export function QuickVendorModal({ initial, onClose, onCreated }: {
+  initial: string; onClose: () => void; onCreated: (v: VendorHit) => void;
+}) {
+  const toast = useToast();
+  const [form, setForm] = useState({ name: initial.trim(), contact_person: '', phone: '', gstin: '', state_code: '', payment_terms_days: '' });
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    setBusy(true);
+    try {
+      const v = await apiPost<VendorHit>('/api/vendors', {
+        name: form.name.trim(), contact_person: form.contact_person || undefined, phone: form.phone || undefined,
+        gstin: form.gstin || undefined, state_code: form.state_code || undefined,
+        payment_terms_days: form.payment_terms_days ? Number(form.payment_terms_days) : undefined,
+      });
+      toast.success('Supplier added', v.name);
+      onCreated(v);
+    } catch (err) { toast.error(err); } finally { setBusy(false); }
+  }
+  return (
+    <Modal guardUnsaved open onClose={onClose} title="New supplier"
+      footer={<>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="primary" busy={busy} disabled={!form.name.trim()} onClick={() => void save()}>Add supplier</Button>
+      </>}>
+      <form className="form-grid" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+        <Field label="Name" required><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+        <Field label="Contact person"><input value={form.contact_person} onChange={(e) => setForm({ ...form, contact_person: e.target.value })} /></Field>
+        <Field label="Phone"><input type="tel" inputMode="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+        <Field label="GSTIN" hint="Their state is read from it">
+          <input value={form.gstin} onChange={(e) => setForm({ ...form, gstin: e.target.value.toUpperCase() })} maxLength={15} />
+        </Field>
+        <Field label="State" hint="Decides CGST+SGST or IGST on their bills"><StateSelect value={form.state_code} onChange={(v) => setForm({ ...form, state_code: v })} /></Field>
+        <Field label="Payment terms (days)"><input inputMode="numeric" value={form.payment_terms_days} onChange={(e) => setForm({ ...form, payment_terms_days: e.target.value.replace(/\D/g, '') })} /></Field>
+        <span className="muted small span-2">Bank details, address and an opening balance can be added later on the Vendors screen.</span>
+        <button type="submit" hidden />
+      </form>
+    </Modal>
   );
 }
 

@@ -69,10 +69,11 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
     ? actions.map((a) => ({ key: a.href, go: a.href }))
     : hits.map((h) => ({ key: `${h.type}:${h.id}`, go: h.href }));
 
+  // Focus is taken as the input mounts (autoFocus below), in the same commit that
+  // opens the palette. A timer here lost whatever was typed in its first 20 ms —
+  // Ctrl+K then "putty" arrived as "utty".
   useEffect(() => {
-    if (!open) { setQuery(''); setHits([]); setCursor(0); setFailed(null); return; }
-    const id = window.setTimeout(() => inputRef.current?.focus(), 20);
-    return () => window.clearTimeout(id);
+    if (!open) { setQuery(''); setHits([]); setCursor(0); setFailed(null); }
   }, [open]);
 
   // Debounced so a fast typist makes one request per pause rather than one per key.
@@ -113,6 +114,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
           <Icon name="search" size={17} />
           <input
             ref={inputRef}
+            autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}

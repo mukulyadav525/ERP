@@ -35,6 +35,7 @@ import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import { buildInvoicePdf } from '../../lib/pdf/index.js';
 import type { Tx } from '../../lib/db.js';
+import { lockKey } from '../../lib/db.js';
 import type { Session } from '../../lib/session.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
 import { optionalStateCode } from '../../lib/units.js';
@@ -510,29 +511,22 @@ export default async function billingRoutes(app: FastifyInstance) {
     const payStatus = q.payment_status
       ? oneOf(q.payment_status, 'Payment status', ['PAID', 'PARTIALLY_PAID', 'CREDIT'] as const) : null;
     const method = q.payment_method ? oneOf(q.payment_method, 'Payment method', PAYMENT_METHODS) : null;
+    // The page of bills is chosen FIRST (filters, order, limit — all index-served),
+    // and only those 50 are then decorated with their payments, customer and
+    // returns. Decorating every bill in the database and then keeping 50 took
+    // seconds once a shop had a few hundred thousand bills.
+    const payLateral = sql`LEFT JOIN LATERAL (
+        SELECT string_agg(DISTINCT ip.method::text, ', ') AS methods,
+               SUM(ip.amount) FILTER (WHERE ip.method <> 'CREDIT') AS settled,
+               SUM(ip.amount) FILTER (WHERE ip.method = 'CREDIT') AS on_credit
+          FROM invoice_payments ip WHERE ip.invoice_id = i.invoice_id
+    ) pay ON TRUE`;
+    const like = search ? '%' + search + '%' : null;
     const rows = await sql<any>`
-      SELECT * FROM (
-        SELECT i.invoice_id, i.invoice_number, i.branch_id, b.name AS branch_name, i.invoice_type,
-               i.status, i.subtotal, i.discount_total, i.cgst_total, i.sgst_total, i.igst_total,
-               i.grand_total, i.round_off,
-               -- What the customer was asked to pay: the tax total plus cash rounding.
-               round(i.grand_total + i.round_off, 2) AS amount,
-               i.server_received_at, i.is_offline_conflict, i.due_date,
-               c.customer_id, c.name AS customer_name, c.phone AS customer_phone,
-               u.full_name AS created_by_name,
-               pay.methods AS payment_methods, pay.settled, pay.on_credit,
-               ${PAYMENT_STATUS_SQL} AS payment_status,
-               EXISTS (SELECT 1 FROM sales_returns r WHERE r.invoice_id = i.invoice_id) AS has_returns
+      WITH page AS (
+        SELECT i.invoice_id, i.server_received_at
           FROM invoices i
-          JOIN branches b ON b.branch_id = i.branch_id
-          LEFT JOIN customers c ON c.customer_id = i.customer_id
-          LEFT JOIN users u ON u.user_id = i.created_by
-          LEFT JOIN LATERAL (
-              SELECT string_agg(DISTINCT ip.method::text, ', ') AS methods,
-                     SUM(ip.amount) FILTER (WHERE ip.method <> 'CREDIT') AS settled,
-                     SUM(ip.amount) FILTER (WHERE ip.method = 'CREDIT') AS on_credit
-                FROM invoice_payments ip WHERE ip.invoice_id = i.invoice_id
-          ) pay ON TRUE
+          ${payStatus ? payLateral : sql``}
          WHERE 1=1
            ${branchId ? sql`AND i.branch_id = ${branchId}` : sql``}
            ${q.status ? sql`AND i.status = ${oneOf(q.status, 'status', ['DRAFT', 'FINAL', 'VOID'] as const)}::invoice_status` : sql`AND i.status <> 'DRAFT'`}
@@ -540,15 +534,59 @@ export default async function billingRoutes(app: FastifyInstance) {
            ${q.customer_id ? sql`AND i.customer_id = ${uuid(q.customer_id, 'customer_id')}` : sql``}
            ${from ? sql`AND i.server_received_at >= ${from}::date` : sql``}
            ${to ? sql`AND i.server_received_at < (${to}::date + 1)` : sql``}
-           ${search ? sql`AND (i.invoice_number ILIKE ${'%' + search + '%'} OR c.name ILIKE ${'%' + search + '%'} OR c.phone ILIKE ${'%' + search + '%'})` : sql``}
-      ) x
-      WHERE 1=1
-        ${payStatus ? sql`AND x.payment_status = ${payStatus}` : sql``}
-        ${method ? sql`AND x.invoice_id IN (SELECT invoice_id FROM invoice_payments WHERE method = ${method}::payment_method)` : sql``}
-      ORDER BY x.server_received_at DESC
-      LIMIT ${clampLimit(q.limit, 50, 500)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
+           ${like ? sql`AND (i.invoice_number ILIKE ${like}
+                             OR i.customer_id IN (SELECT cs.customer_id FROM customers cs
+                                                   WHERE cs.name ILIKE ${like} OR cs.phone ILIKE ${like}))` : sql``}
+           ${method ? sql`AND EXISTS (SELECT 1 FROM invoice_payments m WHERE m.invoice_id = i.invoice_id AND m.method = ${method}::payment_method)` : sql``}
+           ${payStatus ? sql`AND (${PAYMENT_STATUS_SQL}) = ${payStatus}` : sql``}
+         ORDER BY i.server_received_at DESC
+         LIMIT ${clampLimit(q.limit, 50, 500)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
+      )
+      SELECT i.invoice_id, i.invoice_number, i.branch_id, b.name AS branch_name, i.invoice_type,
+             i.status, i.subtotal, i.discount_total, i.cgst_total, i.sgst_total, i.igst_total,
+             i.grand_total, i.round_off,
+             -- What the customer was asked to pay: the tax total plus cash rounding.
+             round(i.grand_total + i.round_off, 2) AS amount,
+             i.server_received_at, i.is_offline_conflict, i.due_date,
+             c.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+             u.full_name AS created_by_name,
+             pay.methods AS payment_methods, pay.settled, pay.on_credit,
+             ${PAYMENT_STATUS_SQL} AS payment_status,
+             EXISTS (SELECT 1 FROM sales_returns r WHERE r.invoice_id = i.invoice_id) AS has_returns
+        FROM page p
+        JOIN invoices i ON i.invoice_id = p.invoice_id
+        JOIN branches b ON b.branch_id = i.branch_id
+        LEFT JOIN customers c ON c.customer_id = i.customer_id
+        LEFT JOIN users u ON u.user_id = i.created_by
+        ${payLateral}
+       ORDER BY p.server_received_at DESC
     `.execute(trx);
     return rows.rows;
+  }));
+
+  /**
+   * What each of these products was last sold to this customer at — the rate a
+   * regular (often a contractor) expects to be charged again. Row-level security
+   * keeps it to bills the user's branch can see.
+   */
+  app.get('/last-rates', guarded('create_invoice', async ({ db: trx, req }) => {
+    const q = (req.query ?? {}) as Record<string, string | undefined>;
+    const customerId = uuid(q.customer_id, 'customer_id');
+    const ids = String(q.product_ids ?? '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 100)
+      .map((id, i) => uuid(id, `product_ids[${i}]`));
+    if (!ids.length) return [];
+    return (await sql<any>`
+      SELECT DISTINCT ON (il.product_id)
+             il.product_id, il.rate_locked_at_scan AS rate_per_base_unit, il.price_type,
+             round(il.rate_locked_at_scan * COALESCE(pu.multiplier_to_base, 1), 2) AS rate_per_sale_unit,
+             u.print_label AS unit_label, i.invoice_number, i.server_received_at AS sold_at
+        FROM invoice_lines il
+        JOIN invoices i ON i.invoice_id = il.invoice_id
+        LEFT JOIN product_units pu ON pu.product_unit_id = il.product_unit_id
+        LEFT JOIN units u ON u.unit_code = pu.unit_label
+       WHERE i.customer_id = ${customerId} AND i.status = 'FINAL' AND il.product_id = ANY(${ids}::uuid[])
+       ORDER BY il.product_id, i.server_received_at DESC
+    `.execute(trx)).rows;
   }));
 
   app.get('/invoices/:id', guarded('view_billing', async ({ session, db: trx, req }) => {
@@ -673,6 +711,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     // instead of billing the customer a second time.
     const clientTxnId = optionalUuid(body.client_txn_id, 'client_txn_id');
     if (clientTxnId) {
+      await lockKey(trx, `invoice:${clientTxnId}`);
       const existing = (await sql<any>`
         SELECT invoice_id, invoice_number, grand_total, status FROM invoices WHERE client_txn_id = ${clientTxnId}
       `.execute(trx)).rows[0];
@@ -1129,7 +1168,16 @@ export default async function billingRoutes(app: FastifyInstance) {
     }
 
     if (customer) {
-      let balance = Number(customer.loyalty_points_balance);
+      // Re-read under the row lock: the customer was loaded unlocked at the top,
+      // and another counter may have earned or spent points since. Writing back a
+      // balance computed from that stale read loses one sale's points, or lets
+      // the same points be spent twice.
+      let balance = Number((await sql<any>`
+        SELECT loyalty_points_balance FROM customers WHERE customer_id = ${customer.customer_id} FOR UPDATE
+      `.execute(trx)).rows[0]?.loyalty_points_balance ?? 0);
+      if (pointsRedeemed > balance) {
+        throw conflict(`${customer.name} now has ${balance} points — fewer than the ${pointsRedeemed} being redeemed. They were used on another bill a moment ago.`);
+      }
       if (pointsRedeemed > 0) {
         balance -= pointsRedeemed;
         await sql`

@@ -74,14 +74,18 @@ let onUnauthorized: (() => void) | null = null;
  *  instead of each call site inventing its own redirect. */
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn; }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, opts: { branch?: string | null } = {}): Promise<T> {
+  // `opts.branch` pins the branch for this one call (an offline sale replays at
+  // the branch it was rung up at, whatever the top bar says now). `null` means
+  // "the user's home branch": no header at all.
+  const branchHeader = opts.branch !== undefined ? opts.branch : activeBranchHeader;
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method,
       headers: {
         ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
-        ...(activeBranchHeader ? { 'X-Branch-Id': activeBranchHeader } : {}),
+        ...(branchHeader ? { 'X-Branch-Id': branchHeader } : {}),
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -121,6 +125,9 @@ export const apiGet    = <T = any>(path: string) => request<T>('GET', path);
 export const apiPost   = <T = any>(path: string, body?: unknown) => request<T>('POST', path, body ?? {});
 export const apiPut    = <T = any>(path: string, body?: unknown) => request<T>('PUT', path, body ?? {});
 export const apiDelete = <T = any>(path: string) => request<T>('DELETE', path);
+/** POST at a specific branch, regardless of the branch picked in the top bar. */
+export const apiPostAt = <T = any>(path: string, body: unknown, branchId: string | null) =>
+  request<T>('POST', path, body ?? {}, { branch: branchId });
 
 /** SWR fetcher. */
 export const fetcher = <T = any>(path: string) => apiGet<T>(path);
@@ -226,6 +233,26 @@ export function downloadCsv(rows: Record<string, unknown>[], filename: string): 
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
+}
+
+/** The most rows an Export button asks the server for in one file. */
+export const EXPORT_MAX = 5000;
+
+/**
+ * Exports every row the list's current filters select — not just the page of
+ * rows loaded on screen, which is what a "download what I see" export would
+ * silently do once a shop has more than a hundred products or customers.
+ */
+export async function exportRows<T = any>(
+  path: string, map: (row: T) => Record<string, unknown>, filename: string,
+): Promise<{ rows: number; capped: boolean }> {
+  const [base, query = ''] = path.split('?');
+  const params = new URLSearchParams(query);
+  params.set('limit', String(EXPORT_MAX));
+  params.delete('offset');
+  const rows = await apiGet<T[]>(`${base}?${params}`);
+  downloadCsv(rows.map(map), filename);
+  return { rows: rows.length, capped: rows.length >= EXPORT_MAX };
 }
 
 // ── Formatting helpers, shared so every screen renders money the same way ────

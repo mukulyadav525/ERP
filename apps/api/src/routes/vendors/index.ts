@@ -13,6 +13,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { audit } from '../../lib/audit.js';
 import { loadSettings, canSeeCost } from '../../lib/settings.js';
 import { postVendor, vendorBalance } from '../../lib/ledger.js';
+import { lockKey } from '../../lib/db.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { round2 } from '../../lib/tax.js';
 import { GST_STATES, optionalGstin, optionalStateCode } from '../../lib/units.js';
@@ -81,7 +82,7 @@ export default async function vendorsRoutes(app: FastifyInstance) {
                              ${digits.length >= 3 ? sql`OR v.phone LIKE ${'%' + digits + '%'}` : sql``})` : sql``}
          ${q.has_balance === 'true' ? sql`AND COALESCE(bal.balance_after, 0) > 0` : sql``}
        ORDER BY ${q.sort === 'balance' ? sql`COALESCE(bal.balance_after, 0) DESC,` : sql``} v.name
-       LIMIT ${clampLimit(q.limit, 100, 300)}
+       LIMIT ${clampLimit(q.limit, 100, 5000)}
     `.execute(trx)).rows;
     return showMoney ? rows : rows.map(({ balance_owed, opening_balance, ...r }: any) => r);
   }));
@@ -293,10 +294,13 @@ export default async function vendorsRoutes(app: FastifyInstance) {
     if (paidOn > businessToday()) throw badRequest('A payment cannot be dated in the future.');
 
     if (clientTxnId) {
+      await lockKey(trx, `vendor-payment:${clientTxnId}`);
       const dup = (await sql<any>`SELECT * FROM vendor_payments WHERE client_txn_id = ${clientTxnId}`.execute(trx)).rows[0];
       if (dup) return { ...dup, duplicate: true, balance_after: await vendorBalance(trx, id) };
     }
-    const vendor = (await sql<any>`SELECT vendor_id, name FROM vendors WHERE vendor_id = ${id}`.execute(trx)).rows[0];
+    // Locked before the balance is read, so two payments made together cannot both
+    // pass the "not more than is owed" check against the same balance.
+    const vendor = (await sql<any>`SELECT vendor_id, name FROM vendors WHERE vendor_id = ${id} FOR UPDATE`.execute(trx)).rows[0];
     if (!vendor) throw notFound('Vendor not found.');
 
     const current = await vendorBalance(trx, id);

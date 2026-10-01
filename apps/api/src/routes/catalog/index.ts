@@ -10,7 +10,7 @@ import {
   guarded, uuid, optionalUuid, str, optionalStr, num, bool, oneOf,
   resolveBranchScope, limit as clampLimit,
 } from '../../lib/http.js';
-import { badRequest, forbidden, notFound, conflict } from '../../lib/errors.js';
+import { badRequest, forbidden, notFound, conflict, HttpError } from '../../lib/errors.js';
 import { loadSettings, canSeeCost, maskCost, maskCostOne } from '../../lib/settings.js';
 import { audit } from '../../lib/audit.js';
 import { round2 } from '../../lib/tax.js';
@@ -169,7 +169,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
                                   WHERE pb.product_id = p.product_id AND pb.barcode = ${search})) DESC,
                               (p.name ILIKE ${search + '%'}) DESC,
                               similarity(p.name, ${search}) DESC,` : sql``} p.name
-       LIMIT ${clampLimit(q.limit, 200, 500)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
+       LIMIT ${clampLimit(q.limit, 200, 5000)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
     `.execute(trx);
 
     return maskCost(rows.rows, showCost, { keepRate: true });
@@ -289,6 +289,22 @@ export default async function catalogRoutes(app: FastifyInstance) {
 
     const dup = await sql<{ name: string }>`SELECT name FROM products WHERE upper(sku) = ${sku}`.execute(trx);
     if (dup.rows[0]) throw conflict(`SKU ${sku} is already used by "${dup.rows[0].name}".`);
+
+    // The same name under a second SKU splits one item's stock and sales across two
+    // records. Not always wrong (a different pack, a different supplier), so it is
+    // a question the person answers, not a refusal.
+    if (body.confirm_duplicate_name !== true) {
+      const twin = (await sql<{ sku: string; name: string }>`
+        SELECT sku, name FROM products
+         WHERE is_active AND lower(regexp_replace(btrim(name), '\s+', ' ', 'g'))
+                           = lower(regexp_replace(btrim(${name}), '\s+', ' ', 'g'))
+         LIMIT 1
+      `.execute(trx)).rows[0];
+      if (twin) {
+        throw new HttpError(409, `A product called "${twin.name}" already exists (SKU ${twin.sku}). Create another with the same name?`,
+          { code: 'DUPLICATE_NAME', sku: twin.sku });
+      }
+    }
 
     const barcodes = Array.isArray(body.barcodes)
       ? [...new Set((body.barcodes as unknown[]).filter((b) => b !== null && b !== undefined && String(b).trim() !== '').map(barcodeValue))]

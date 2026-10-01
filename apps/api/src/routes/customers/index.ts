@@ -18,6 +18,7 @@ import { round2 } from '../../lib/tax.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
 import { creditBalance, postCredit } from '../../lib/ledger.js';
+import { lockKey } from '../../lib/db.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { GST_STATES, optionalGstin, optionalStateCode } from '../../lib/units.js';
 import type { Tx } from '../../lib/db.js';
@@ -122,7 +123,7 @@ export default async function customersRoutes(app: FastifyInstance) {
       WHERE ${q.has_balance === 'true' ? sql`x.balance_owed > 0` : sql`TRUE`}
       ORDER BY ${search ? sql`(x.phone = ${digits || search}) DESC, similarity(x.name, ${search}) DESC,`
                  : sort === 'balance' ? sql`x.balance_owed DESC,` : sort === 'name' ? sql`x.name,` : sql``} x.created_at DESC
-      LIMIT ${clampLimit(q.limit, 50, 300)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
+      LIMIT ${clampLimit(q.limit, 50, 5000)} OFFSET ${Math.max(Number(q.offset) || 0, 0)}
     `.execute(trx)).rows.map((r: any) => ({
       ...r,
       credit_available: Math.max(Number(r.credit_limit) - Number(r.balance_owed), 0),
@@ -418,15 +419,19 @@ export default async function customersRoutes(app: FastifyInstance) {
     const branchId = writeBranch(session, body.branch_id as string);
     const clientTxnId = optionalUuid(body.client_txn_id, 'client_txn_id');
 
-    // Idempotent: the same form submitted twice records one receipt.
+    // Idempotent: the same form submitted twice records one receipt — even when
+    // the two submissions arrive at the same moment (they queue on the lock).
     if (clientTxnId) {
+      await lockKey(trx, `receipt:${clientTxnId}`);
       const dup = (await sql<any>`SELECT * FROM customer_payments WHERE client_txn_id = ${clientTxnId}`.execute(trx)).rows[0];
       if (dup) {
         return { ...dup, duplicate: true, balance_owed: await creditBalance(trx, id) };
       }
     }
 
-    const customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${id}`.execute(trx)).rows[0];
+    // Locked before the balance is read: two receipts arriving together must not
+    // both pass the "not more than is owed" check against the same balance.
+    const customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${id} FOR UPDATE`.execute(trx)).rows[0];
     if (!customer) throw notFound('Customer not found.');
 
     // An overpayment is refused unless it is explicitly taken as an ADVANCE —

@@ -83,6 +83,17 @@ app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, 
   void secureJsonParser(req, text, done);
 });
 
+// A slow request is logged as a warning in production without turning on debug
+// logging. The ROUTE pattern is logged, not the URL, so search terms (phone
+// numbers, names) in the query string never reach the log.
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS ?? 1500);
+app.addHook('onResponse', async (req, reply) => {
+  const ms = reply.elapsedTime;
+  if (ms > SLOW_REQUEST_MS) {
+    req.log.warn({ route: req.routeOptions?.url ?? 'unknown', method: req.method, ms: Math.round(ms), status: reply.statusCode }, 'slow request');
+  }
+});
+
 await app.register(helmet, {
   // The API serves JSON and PDFs, never HTML, so the strictest CSP is free here.
   contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } },

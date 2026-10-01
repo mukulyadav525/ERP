@@ -12,7 +12,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
-  apiDelete, apiPost, apiPut, businessToday, downloadCsv, fetcher, formatDate, inr, num, qtyWithUnit,
+  ApiError, apiDelete, apiPost, apiPut, businessToday, downloadCsv, fetcher, formatDate, inr, num, qtyWithUnit,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
@@ -23,6 +23,7 @@ import {
 } from '../../components/ui';
 import { VendorPicker, type VendorHit } from '../../components/pickers';
 import { Icon } from '../../components/icons';
+import ExportButton from '../../components/ExportButton';
 
 export default function CatalogPage() {
   return (
@@ -145,12 +146,12 @@ function ProductsTab({ master, onOpen }: { master: Master; onOpen: (id: string) 
           <option value="">Any stock</option><option value="low">Low stock</option><option value="out">Out of stock</option>
         </select>
         <div className="spacer" />
-        <Button onClick={() => downloadCsv((data ?? []).map((p) => ({
+        <ExportButton path={`/api/catalog/products?${params}`} filename="products.csv" map={(p: any) => ({
           sku: p.sku, name: p.name, category: p.category_name, brand: p.brand_name, base_unit: p.base_unit, hsn_code: p.hsn_code,
           gst_rate: p.gst_rate_pct, price_type: p.default_price_type, selling_price: p.selling_price, mrp: p.mrp, barcode: p.barcode,
           reorder_level: p.default_reorder_level, units: (p.units ?? []).filter((u: any) => !u.is_base).map((u: any) => `${u.unit_code}=${u.multiplier_to_base}`).join(' '),
           stock: p.base_unit_qty, active: p.is_active,
-        })), 'products.csv')} disabled={!data?.length}><Icon name="download" size={14} /> Export</Button>
+        })} />
       </div>
       <Card flush>
         <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
@@ -278,12 +279,23 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     };
     try {
       if (isNew) {
-        const res = await apiPost<any>('/api/catalog/products', {
+        const payload = {
           ...common, sku: form.sku.trim().toUpperCase(), base_unit: form.base_unit,
           selling_price: Number(form.selling_price), mrp: form.mrp === '' ? undefined : Number(form.mrp),
           units: newUnits.map((u) => ({ unit_code: u.unit_code, multiplier_to_base: u.size === '' ? undefined : Number(u.size), is_default: u.is_default })),
           barcodes,
-        });
+        };
+        let res: any;
+        try {
+          res = await apiPost<any>('/api/catalog/products', payload);
+        } catch (err: any) {
+          // Same name as an existing product: ask, don't refuse — a different pack
+          // size or supplier can legitimately share a name.
+          if (err instanceof ApiError && (err.details as any)?.code === 'DUPLICATE_NAME') {
+            if (!window.confirm(err.message)) return;
+            res = await apiPost<any>('/api/catalog/products', { ...payload, confirm_duplicate_name: true });
+          } else throw err;
+        }
         toast.success('Product created', `${res.sku} · ${res.name}`);
         onSaved(res.product_id);
       } else {
@@ -329,7 +341,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     && (u.dimension === 'PACK' || u.dimension === baseUnit?.dimension));
 
   return (
-    <Modal open={id !== null} onClose={onClose} wide title={title}
+    <Modal guardUnsaved open={id !== null} onClose={onClose} wide title={title}
       footer={mayEdit ? <>
         {!isNew && can('edit_pricing') && <Button onClick={() => setPriceOpen(true)}>Change price…</Button>}
         <span className="spacer" />
@@ -560,7 +572,7 @@ function PriceModal({ open, product, onClose, onDone }: { open: boolean; product
     } catch (err) { toast.error(err); }
   }
   return (
-    <Modal open={open} onClose={onClose} title={`Change price — ${product.name}`}
+    <Modal guardUnsaved open={open} onClose={onClose} title={`Change price — ${product.name}`}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={() => void save()}>Save new price</Button></>}>
       <div className="stack">
         <p className="muted" style={{ margin: 0 }}>Prices are per {product.base_unit_label}, {product.default_price_type === 'TAX_INCLUSIVE' ? 'including' : 'excluding'} GST. The old price is kept in the history.</p>

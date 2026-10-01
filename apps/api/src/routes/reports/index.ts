@@ -316,15 +316,13 @@ export default async function reportsRoutes(app: FastifyInstance) {
     // price would retroactively rewrite last month's margin. The movement is
     // matched per product per invoice and summed, so two lines of one product on
     // one bill are each costed once.
+    //
+    // The cost is looked up per sold line through the (ref_table, ref_id) index.
+    // Joining a whole-period aggregate of the stock ledger instead left the plan
+    // at the mercy of a row estimate: under row-level security the planner could
+    // decide to re-scan the ledger once per bill, and the report never finished.
     return (await sql<any>`
-      WITH sale_cost AS (
-        SELECT sl.ref_id AS invoice_id, sl.product_id,
-               SUM(-sl.base_unit_qty_change * COALESCE(sl.cost_at_movement, 0)) AS cogs
-          FROM stock_ledger sl
-         WHERE sl.movement_type = 'SALE' AND sl.ref_table = 'invoices'
-           AND ${inPeriod(sql.ref('sl.created_at'), { from: p.prev_from, to: p.to })}
-         GROUP BY sl.ref_id, sl.product_id
-      ), sold AS (
+      WITH sold AS (
         SELECT i.invoice_id, i.branch_id, il.product_id, SUM(il.taxable_value) AS revenue
           FROM invoice_lines il JOIN invoices i ON i.invoice_id = il.invoice_id
          WHERE i.status = 'FINAL' AND ${inPeriod(sql.ref('i.server_received_at'), p)}
@@ -343,7 +341,12 @@ export default async function reportsRoutes(app: FastifyInstance) {
         JOIN products p ON p.product_id = s.product_id
         JOIN branches b ON b.branch_id = s.branch_id
         LEFT JOIN categories c ON c.category_id = p.category_id
-        LEFT JOIN sale_cost sc ON sc.invoice_id = s.invoice_id AND sc.product_id = s.product_id
+        LEFT JOIN LATERAL (
+          SELECT SUM(-sl.base_unit_qty_change * COALESCE(sl.cost_at_movement, 0)) AS cogs
+            FROM stock_ledger sl
+           WHERE sl.ref_table = 'invoices' AND sl.ref_id = s.invoice_id
+             AND sl.product_id = s.product_id AND sl.movement_type = 'SALE'
+        ) sc ON TRUE
        GROUP BY 1 ORDER BY revenue DESC LIMIT 200
     `.execute(trx)).rows;
   }));

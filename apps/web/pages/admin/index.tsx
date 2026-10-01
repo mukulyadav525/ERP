@@ -10,6 +10,7 @@ import {
   KeyValue, Modal, PageHeader, RequirePermission, StatTile, StatusBadge,
   Switch, Tabs,
 } from '../../components/ui';
+import ExportButton from '../../components/ExportButton';
 import { StateSelect, stateName } from '../../components/pickers';
 
 export default function AdminPage() {
@@ -158,7 +159,7 @@ function BusinessProfileModal({ open, onClose, value, onSave, busy }: {
   const set = (k: string, v: string) => setDraft((d) => ({ ...d, [k]: v }));
 
   return (
-    <Modal open={open} onClose={onClose} wide title="Business profile — printed documents"
+    <Modal guardUnsaved open={open} onClose={onClose} wide title="Business profile — printed documents"
       footer={<>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" busy={busy} onClick={() => onSave({
@@ -552,7 +553,7 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
   }
 
   return (
-    <Modal open={Boolean(user)} onClose={onClose} title={user?.full_name ?? ''}
+    <Modal guardUnsaved open={Boolean(user)} onClose={onClose} title={user?.full_name ?? ''}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>Save</Button></>}>
       {user && (
         <div className="stack">
@@ -618,7 +619,7 @@ function NewUserModal({ open, onClose, onCreated }: { open: boolean; onClose: ()
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Create a user"
+    <Modal guardUnsaved open={open} onClose={onClose} title="Create a user"
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void submit()}>Create</Button></>}>
       <form className="stack" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
         <div className="form-grid">
@@ -698,7 +699,7 @@ function BranchesTab() {
             { key: 'a', header: '', render: (b: any) => <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); void toggle(b); }}>{b.is_active ? 'Close' : 'Re-open'}</Button> },
           ]} />
       </Card>
-      <Modal open={editing !== null} onClose={() => setEditing(null)} title={isNew ? 'Add a branch' : `Edit ${(editing as any)?.name ?? ''}`}
+      <Modal guardUnsaved open={editing !== null} onClose={() => setEditing(null)} title={isNew ? 'Add a branch' : `Edit ${(editing as any)?.name ?? ''}`}
         footer={<><Button onClick={() => setEditing(null)}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>{isNew ? 'Create' : 'Save'}</Button></>}>
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
           <div className="form-grid">
@@ -746,9 +747,8 @@ function AuditTab() {
         <input type="date" aria-label="From" value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" aria-label="To" value={to} onChange={(e) => setTo(e.target.value)} />
         <div className="spacer" />
-        <Button onClick={() => downloadCsv((data ?? []).map((a) => ({ when: a.created_at, who: a.user_name, role: a.user_role, action: a.action, on: a.entity_type,
-          entity_id: a.entity_id, branch: a.branch_name, before: JSON.stringify(a.old_value ?? null), after: JSON.stringify(a.new_value ?? null) })), 'audit-log.csv')}
-          disabled={!data?.length}>Export</Button>
+        <ExportButton path={`/api/admin/audit-log?${params}`} filename="audit-log.csv" map={(a: any) => ({ when: a.created_at, who: a.user_name, role: a.user_role, action: a.action, on: a.entity_type,
+          entity_id: a.entity_id, branch: a.branch_name, before: JSON.stringify(a.old_value ?? null), after: JSON.stringify(a.new_value ?? null) })} />
       </div>
       <Card flush title="Every sensitive action, with who and when"
         description="Sign-ins, price and stock changes, discounts and overrides, payments, refunds, voids, user and settings changes.">

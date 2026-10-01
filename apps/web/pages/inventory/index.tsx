@@ -26,6 +26,7 @@ import {
   type ProductHit, type UnitOption, type VendorHit,
 } from '../../components/pickers';
 import { Icon } from '../../components/icons';
+import ExportButton from '../../components/ExportButton';
 import { MiniBar } from '../../components/charts';
 
 export default function InventoryPage() {
@@ -697,7 +698,7 @@ function GrnModal({ open, onClose, onCreated, fromPo }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} wide title="Record a purchase (supplier bill)"
+    <Modal guardUnsaved open={open} onClose={onClose} wide title="Record a purchase (supplier bill)"
       footer={<>
         <span className="muted small">Bill total {inr(totals.grand, { decimals: true })}</span>
         <span className="spacer" />
@@ -852,7 +853,7 @@ function PurchaseReturnModal({ grn, onClose, onDone }: { grn: any | null; onClos
   }
 
   return (
-    <Modal open={Boolean(grn)} onClose={onClose} wide title={`Return goods to ${grn?.vendor_name ?? 'the supplier'}`}
+    <Modal guardUnsaved open={Boolean(grn)} onClose={onClose} wide title={`Return goods to ${grn?.vendor_name ?? 'the supplier'}`}
       footer={<><Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" busy={busy} disabled={!reason} onClick={() => void submit()}>Raise debit note</Button></>}>
       {grn && (
@@ -986,7 +987,7 @@ function AdjustmentModal({ open, onClose, onDone, productId }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Stock adjustment"
+    <Modal guardUnsaved open={open} onClose={onClose} title="Stock adjustment"
       footer={<><Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" busy={busy} disabled={!line} onClick={() => void submit()}>Record adjustment</Button></>}>
       <BranchGate what="this adjustment">
@@ -1229,7 +1230,7 @@ function NewTransferModal({ open, onClose, onCreated }: { open: boolean; onClose
   }
 
   return (
-    <Modal open={open} onClose={onClose} wide title={`New transfer from ${activeBranchName}`}
+    <Modal guardUnsaved open={open} onClose={onClose} wide title={`New transfer from ${activeBranchName}`}
       footer={<><Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" busy={busy} disabled={!toBranch || !lines.length} onClick={() => void submit()}>Create transfer</Button></>}>
       <BranchGate what="this transfer">
@@ -1423,7 +1424,7 @@ function WriteOffModal({ open, onClose, onDone }: { open: boolean; onClose: () =
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Write off stock"
+    <Modal guardUnsaved open={open} onClose={onClose} title="Write off stock"
       footer={<><Button onClick={onClose}>Cancel</Button>
         <Button variant="danger" busy={busy} disabled={!line} onClick={() => void submit()}>Write off</Button></>}>
       <div className="stack">
@@ -1538,10 +1539,10 @@ function LedgerTab({ product, onClearProduct }: { product: { id: string; name: s
         <input type="date" aria-label="From" value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" aria-label="To" value={to} onChange={(e) => setTo(e.target.value)} />
         <div className="spacer" />
-        <Button onClick={() => downloadCsv((data ?? []).map((l) => ({
+        <ExportButton path={withBranch(`/api/inventory/stock-ledger?${params}`, activeBranchId)} filename="stock-movements.csv" map={(l: any) => ({
           when: l.created_at, branch: l.branch_name, sku: l.sku, product: l.product_name, movement: l.movement_type,
           change: l.base_unit_qty_change, unit: l.base_unit_label, reference: l.reference, reason: l.reason_code, by: l.created_by_name,
-        })), 'stock-movements.csv')} disabled={!data?.length}><Icon name="download" size={14} /> Export</Button>
+        })} />
       </div>
       <Card flush title="Every stock movement, with its document and who made it">
         <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}

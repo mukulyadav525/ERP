@@ -184,6 +184,7 @@ function QuotationDetail({ id, onClose, onEdit, onChanged }: { id: string | null
         <Button onClick={() => printFile(pdf).catch((e) => toast.error(e))}><Icon name="print" size={14} /> Print</Button>
         <Button onClick={() => downloadFile(pdf, `Estimate-${q.quotation_number}.pdf`).catch((e) => toast.error(e))}><Icon name="download" size={14} /> PDF</Button>
         {editable && can('create_quotation') && <Button onClick={() => onEdit(q)}><Icon name="edit" size={14} /> Edit</Button>}
+        {can('create_quotation') && <Button onClick={() => onEdit({ ...q, __copy: true })} title="A new estimate with the same customer and items">Duplicate</Button>}
         {q.status === 'DRAFT' && can('approve_quotation') && <Button onClick={() => setApproving(true)}>Approve…</Button>}
         {['DRAFT', 'APPROVED'].includes(q.status) && can('convert_quotation') && (
           <Button variant="primary" busy={busy} onClick={() => void convert()}>{q.open_draft_id ? 'Continue the bill' : 'Convert to bill'}</Button>
@@ -274,7 +275,9 @@ function catalogBase(p: ProductHit, priceType: string, withGst: boolean): number
 function QuotationEditor({ quotation, onClose, onSaved }: { quotation: any | null | 'new'; onClose: () => void; onSaved: (id: string) => void }) {
   const toast = useToast();
   const { activeBranch } = useAuth();
-  const isNew = quotation === 'new';
+  // A duplicate is a NEW estimate pre-filled from an old one (__copy), saved as its own number.
+  const isCopy = Boolean(quotation && quotation !== 'new' && (quotation as any).__copy);
+  const isNew = quotation === 'new' || isCopy;
   const [customer, setCustomer] = useState<CustomerHit | null>(null);
   const [priceType, setPriceType] = useState<'TAX_EXCLUSIVE' | 'TAX_INCLUSIVE'>('TAX_EXCLUSIVE');
   const [withGst, setWithGst] = useState(true);
@@ -294,7 +297,11 @@ function QuotationEditor({ quotation, onClose, onSaved }: { quotation: any | nul
     }
     const q = quotation;
     setCustomer({ customer_id: q.customer_id, name: q.customer_name, phone: q.customer_phone, gstin: q.customer_gstin, state_code: q.customer_state_code });
-    setPriceType(q.price_type); setWithGst(q.with_gst !== false); setValidUntil(q.valid_until ?? ''); setNotes(q.notes ?? ''); setTerms(q.terms ?? '');
+    setPriceType(q.price_type); setWithGst(q.with_gst !== false); setNotes(q.notes ?? ''); setTerms(q.terms ?? '');
+    if (q.__copy) {
+      const d = new Date(`${businessToday()}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 15);
+      setValidUntil(d.toISOString().slice(0, 10));
+    } else setValidUntil(q.valid_until ?? '');
     const ids = [...new Set((q.lines ?? []).map((l: any) => l.product_id))];
     if (!ids.length) { setLines([]); return; }
     void apiGet<ProductHit[]>(`/api/catalog/products?ids=${ids.join(',')}&status=all&limit=200`).then((products) => {
@@ -362,7 +369,7 @@ function QuotationEditor({ quotation, onClose, onSaved }: { quotation: any | nul
   }
 
   return (
-    <Modal open={quotation !== null} onClose={onClose} wide title={isNew ? 'New estimate' : `Edit estimate ${(quotation as any)?.quotation_number ?? ''}`}
+    <Modal guardUnsaved open={quotation !== null} onClose={onClose} wide title={isCopy ? `New estimate — copy of ${(quotation as any)?.quotation_number ?? ''}` : isNew ? 'New estimate' : `Edit estimate ${(quotation as any)?.quotation_number ?? ''}`}
       footer={<>
         <span className="muted small">Total {inr(preview.grand, { decimals: true })} (preview)</span>
         <span className="spacer" />

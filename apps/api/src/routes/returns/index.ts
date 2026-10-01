@@ -463,7 +463,8 @@ export default async function returnsRoutes(app: FastifyInstance) {
     let pointsRevoked = 0, pointsRestored = 0, cashRefund = returnedValue, storeCredit = 0;
 
     if (invoice.customer_id) {
-      const customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${invoice.customer_id}`.execute(trx)).rows[0];
+      // Locked: points are written back as an absolute balance below.
+      const customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${invoice.customer_id} FOR UPDATE`.execute(trx)).rows[0];
       const share = Math.min(returnedValue / invoiceTotal, 1);
 
       const earned = Number((await sql<any>`

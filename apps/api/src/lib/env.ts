@@ -28,6 +28,12 @@ if (isProd && (!sessionSecret || sessionSecret.length < 32)) {
   throw new Error('SESSION_SECRET must be set to at least 32 characters in production.');
 }
 
+// In production the web app's address must be named: the localhost default would
+// make the browser's every request fail its CORS check.
+if (isProd && !process.env.CORS_ORIGINS) {
+  throw new Error('CORS_ORIGINS must be set in production to the web app address(es), e.g. https://shop.example.com');
+}
+
 export const env = {
   isProd,
   databaseUrl: required('DATABASE_URL'),
