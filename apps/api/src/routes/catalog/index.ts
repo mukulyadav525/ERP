@@ -748,6 +748,28 @@ export default async function catalogRoutes(app: FastifyInstance) {
     const effectiveFrom = str(body.effective_from, 'Effective from', { max: 10 });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) throw badRequest('Effective from must be a date (YYYY-MM-DD).');
 
+    const cess = body.cess_rate_pct === undefined ? 0 : num(body.cess_rate_pct, 'Cess rate', { min: 0, max: 100 });
+
+    // Same HSN, same start date: this is a correction of a rate entered wrongly,
+    // not a new rate. Bills already made keep the tax they were made with (each
+    // invoice line stores its own rate), so correcting the row is safe.
+    const same = (await sql<any>`
+      SELECT * FROM hsn_tax_rates WHERE hsn_code = ${hsn} AND effective_from = ${effectiveFrom}::date
+    `.execute(trx)).rows[0];
+    if (same) {
+      const row = (await sql<any>`
+        UPDATE hsn_tax_rates SET gst_rate_pct = ${rate}, cess_rate_pct = ${cess}
+         WHERE hsn_tax_rate_id = ${same.hsn_tax_rate_id} RETURNING *
+      `.execute(trx)).rows[0];
+      await audit(trx, session, 'SETTING_CHANGE', 'hsn_tax_rates', row.hsn_tax_rate_id,
+        { before: { rate: same.gst_rate_pct, cess: same.cess_rate_pct }, after: { hsn, rate, cess, effectiveFrom } });
+      return row;
+    }
+    const later = (await sql<any>`
+      SELECT effective_from FROM hsn_tax_rates WHERE hsn_code = ${hsn} AND effective_from > ${effectiveFrom}::date LIMIT 1
+    `.execute(trx)).rows[0];
+    if (later) throw badRequest(`HSN ${hsn} already has a rate starting later than that date. Enter a date on or after the latest rate.`);
+
     // A new rate closes the open one at the same instant it opens. The EXCLUDE
     // constraint in the schema then guarantees the ranges cannot overlap, which
     // is what keeps historical invoices reproducible.
@@ -757,8 +779,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
     `.execute(trx);
     const row = (await sql<any>`
       INSERT INTO hsn_tax_rates (hsn_code, gst_rate_pct, cess_rate_pct, effective_from)
-      VALUES (${hsn}, ${rate}, ${body.cess_rate_pct === undefined ? 0 : num(body.cess_rate_pct, 'Cess rate', { min: 0, max: 100 })},
-              ${effectiveFrom}::date)
+      VALUES (${hsn}, ${rate}, ${cess}, ${effectiveFrom}::date)
       RETURNING *
     `.execute(trx)).rows[0];
 

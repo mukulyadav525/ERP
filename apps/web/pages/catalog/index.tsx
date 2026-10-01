@@ -12,7 +12,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
-  apiDelete, apiPost, apiPut, downloadCsv, fetcher, formatDate, inr, num, qtyWithUnit,
+  apiDelete, apiPost, apiPut, businessToday, downloadCsv, fetcher, formatDate, inr, num, qtyWithUnit,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
@@ -717,17 +717,21 @@ function TaxTab({ rates, onChanged }: { rates: any[]; onChanged: () => void }) {
   const { can } = useAuth();
   const toast = useToast();
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ hsn_code: '', gst_rate_pct: '18', effective_from: '' });
+  const [form, setForm] = useState({ hsn_code: '', gst_rate_pct: '18', effective_from: '', cess_rate_pct: '0' });
+  const [correcting, setCorrecting] = useState(false);
   async function save() {
     if (!/^[0-9]{4,8}$/.test(form.hsn_code)) { toast.error(new Error('An HSN code is 4–8 digits.')); return; }
     if (!form.effective_from) { toast.error(new Error('Enter the date the rate applies from.')); return; }
-    try { await apiPost('/api/catalog/hsn-rates', { ...form, gst_rate_pct: Number(form.gst_rate_pct) }); toast.success('GST rate saved'); setOpen(false); onChanged(); }
+    try {
+      await apiPost('/api/catalog/hsn-rates', { ...form, gst_rate_pct: Number(form.gst_rate_pct), cess_rate_pct: Number(form.cess_rate_pct || 0) });
+      toast.success(correcting ? 'GST rate corrected' : 'GST rate saved'); setOpen(false); onChanged();
+    }
     catch (err) { toast.error(err); }
   }
   return (
     <>
       {can('manage_settings') && <div className="table-toolbar"><span className="muted small">A new rate closes the old one on its start date; past bills keep the rate they were made at.</span><div className="spacer" />
-        <Button variant="primary" onClick={() => { setForm({ hsn_code: '', gst_rate_pct: '18', effective_from: new Date().toISOString().slice(0, 10) }); setOpen(true); }}><Icon name="plus" size={14} /> Add / change rate</Button></div>}
+        <Button variant="primary" onClick={() => { setCorrecting(false); setForm({ hsn_code: '', gst_rate_pct: '18', effective_from: businessToday(), cess_rate_pct: '0' }); setOpen(true); }}><Icon name="plus" size={14} /> Add / change rate</Button></div>}
       <Card flush>
         <DataTable rows={rates} emptyText="No GST rates." rowKey={(r: any) => r.hsn_tax_rate_id ?? `${r.hsn_code}:${r.effective_from}`}
           columns={[
@@ -736,15 +740,23 @@ function TaxTab({ rates, onChanged }: { rates: any[]; onChanged: () => void }) {
             { key: 'c', header: 'Cess', align: 'right', render: (r: any) => `${num(r.cess_rate_pct ?? 0, 2)}%` },
             { key: 'f', header: 'From', render: (r: any) => formatDate(r.effective_from) },
             { key: 't', header: 'Until', render: (r: any) => (r.effective_to ? formatDate(r.effective_to) : <Badge tone="good">current</Badge>) },
+            ...(can('manage_settings') ? [{ key: 'e', header: '', render: (r: any) => (r.effective_to ? null : (
+              <Button size="sm" onClick={() => {
+                setCorrecting(true);
+                setForm({ hsn_code: r.hsn_code, gst_rate_pct: String(Number(r.gst_rate_pct)), effective_from: String(r.effective_from).slice(0, 10), cess_rate_pct: String(Number(r.cess_rate_pct ?? 0)) });
+                setOpen(true);
+              }}>Edit</Button>)) }] : []),
           ]} />
       </Card>
-      <Modal open={open} onClose={() => setOpen(false)} title="GST rate for an HSN code"
+      <Modal open={open} onClose={() => setOpen(false)} title={correcting ? `Correct the GST rate for HSN ${form.hsn_code}` : 'GST rate for an HSN code'}
         footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" onClick={() => void save()}>Save</Button></>}>
+        {correcting && <Alert tone="info">Keep the same date to correct a rate entered wrongly. Change the date to start a new rate from that day — bills before it keep the old rate.</Alert>}
         <div className="form-grid">
-          <Field label="HSN code" required><input className="mono" value={form.hsn_code} onChange={(e) => setForm({ ...form, hsn_code: e.target.value.replace(/\D/g, '') })} maxLength={8} /></Field>
+          <Field label="HSN code" required><input className="mono" value={form.hsn_code} disabled={correcting} onChange={(e) => setForm({ ...form, hsn_code: e.target.value.replace(/\D/g, '') })} maxLength={8} /></Field>
           <Field label="GST rate">
             <select value={form.gst_rate_pct} onChange={(e) => setForm({ ...form, gst_rate_pct: e.target.value })}>{GST_SLABS.map((g) => <option key={g} value={g}>{g}%</option>)}</select>
           </Field>
+          <Field label="Cess %"><input type="number" min={0} step="0.01" value={form.cess_rate_pct} onChange={(e) => setForm({ ...form, cess_rate_pct: e.target.value })} /></Field>
           <Field label="Applies from" required><input type="date" value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })} /></Field>
         </div>
       </Modal>

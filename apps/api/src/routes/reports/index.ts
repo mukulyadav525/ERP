@@ -522,7 +522,8 @@ export default async function reportsRoutes(app: FastifyInstance) {
              g.vendor_invoice_no, g.vendor_invoice_date, g.taxable_total, g.cgst_total, g.sgst_total, g.igst_total,
              g.round_off, g.grand_total,
              COALESCE((SELECT SUM(dn.total_amount) FROM vendor_debit_notes dn WHERE dn.grn_id = g.grn_id), 0) AS returned_value,
-             COALESCE((SELECT SUM(amount) FROM vendor_payments vp WHERE vp.grn_id = g.grn_id), 0) AS paid_against
+             COALESCE((SELECT SUM(amount) FROM vendor_payments vp WHERE vp.grn_id = g.grn_id
+                         AND NOT EXISTS (SELECT 1 FROM payment_cancellations pc WHERE pc.payment_table = 'vendor_payments' AND pc.payment_id = vp.payment_id)), 0) AS paid_against
         FROM grn g JOIN vendors v ON v.vendor_id = g.vendor_id JOIN branches b ON b.branch_id = g.branch_id
        WHERE ${inPeriod(sql.ref('g.received_at'), p)} ${branchId ? sql`AND g.branch_id = ${branchId}` : sql``}
          ${q.vendor_id ? sql`AND g.vendor_id = ${uuid(q.vendor_id, 'vendor_id')}` : sql``}
@@ -566,10 +567,12 @@ export default async function reportsRoutes(app: FastifyInstance) {
         SELECT 'RECEIPT', cp.created_at, b.name, cp.receipt_number, c.name, cp.method, cp.amount, 0, cp.reference
           FROM customer_payments cp JOIN branches b ON b.branch_id = cp.branch_id JOIN customers c ON c.customer_id = cp.customer_id
          WHERE ${inPeriod(sql.ref('cp.created_at'), p)} ${branchId ? sql`AND cp.branch_id = ${branchId}` : sql``}
+           AND NOT EXISTS (SELECT 1 FROM payment_cancellations pc WHERE pc.payment_table = 'customer_payments' AND pc.payment_id = cp.payment_id)
         UNION ALL
         SELECT 'VENDOR_PAYMENT', vp.created_at, b.name, vp.payment_number, v.name, vp.method, 0, vp.amount, vp.reference
           FROM vendor_payments vp JOIN branches b ON b.branch_id = vp.branch_id JOIN vendors v ON v.vendor_id = vp.vendor_id
          WHERE ${inPeriod(sql.ref('vp.created_at'), p)} ${branchId ? sql`AND vp.branch_id = ${branchId}` : sql``}
+           AND NOT EXISTS (SELECT 1 FROM payment_cancellations pc WHERE pc.payment_table = 'vendor_payments' AND pc.payment_id = vp.payment_id)
         UNION ALL
         SELECT 'REFUND', r.created_at, b.name, COALESCE(cn.credit_note_number, i.invoice_number), COALESCE(c.name, 'Walk-in'),
                r.refund_method::text, 0, r.refund_total, NULL

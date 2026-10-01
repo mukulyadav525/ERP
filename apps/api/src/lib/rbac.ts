@@ -66,6 +66,7 @@ export const PERMISSIONS: Record<string, UserRole[]> = {
   edit_customer:             ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER'],
   set_credit_limit:          ['OWNER_ADMIN'],              // 6.1: limit set by Admin
   record_customer_payment:   ['OWNER_ADMIN', 'BRANCH_MANAGER', 'CASHIER', 'ACCOUNTANT'],
+  cancel_customer_payment:   ['OWNER_ADMIN', 'BRANCH_MANAGER', 'ACCOUNTANT'],
   // Receivables are the accountant's job, and the vendor payables list is already
   // theirs. Leaving the customer side behind `view_customers` meant an accountant
   // could RECORD a payment against a customer but could not list who owed

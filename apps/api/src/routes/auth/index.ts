@@ -511,6 +511,7 @@ export default async function authRoutes(app: FastifyInstance) {
       await sql`
         INSERT INTO employees (user_id, branch_id, designation)
         VALUES (${userId}, ${branchId}, ${optionalStr(body.designation, 'designation') ?? role})
+        ON CONFLICT (user_id) DO UPDATE SET branch_id = EXCLUDED.branch_id
       `.execute(trx);
     }
     await audit(trx, session, 'USER_CREATED', 'users', userId, { after: { role, branch_id: branchId, full_name: fullName } });
@@ -534,12 +535,8 @@ export default async function authRoutes(app: FastifyInstance) {
     const password = optionalStr(body.password, 'Password', { max: 256 });
     if (password && password.length < 8) throw badRequest('A password needs at least 8 characters.');
     if (phone !== before.phone || (email ?? null) !== (before.email ?? null)) {
-      const clash = await sql<{ user_id: string }>`
-        SELECT user_id FROM users
-         WHERE user_id <> ${userId} AND (phone = ${phone} OR (${email}::text IS NOT NULL AND lower(email) = ${email}))
-         LIMIT 1
-      `.execute(trx);
-      if (clash.rows.length) throw badRequest('Another user already has that phone number or email.');
+      const clash = await sql<{ id: string | null }>`SELECT auth_contact_taken(${userId}, ${phone}, ${email}) AS id`.execute(trx);
+      if (clash.rows[0]?.id) throw badRequest('Another user already has that phone number or email.');
     }
 
     const role = body.role === undefined ? before.role : oneOf(body.role, 'Role', ALL_ROLES);
@@ -575,9 +572,8 @@ export default async function authRoutes(app: FastifyInstance) {
     if (branchId) {
       await sql`
         INSERT INTO employees (user_id, branch_id, designation) VALUES (${userId}, ${branchId}, ${role})
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (user_id) DO UPDATE SET branch_id = EXCLUDED.branch_id
       `.execute(trx);
-      await sql`UPDATE employees SET branch_id = ${branchId} WHERE user_id = ${userId}`.execute(trx);
     }
 
     const accessChanged = role === 'OWNER_ADMIN'
@@ -626,7 +622,7 @@ export default async function authRoutes(app: FastifyInstance) {
     const newUserId = res.rows[0].auth_approve_registration;
 
     if (branchId) {
-      await sql`INSERT INTO employees (user_id, branch_id, designation) VALUES (${newUserId}, ${branchId}, ${role}) ON CONFLICT DO NOTHING`.execute(trx);
+      await sql`INSERT INTO employees (user_id, branch_id, designation) VALUES (${newUserId}, ${branchId}, ${role}) ON CONFLICT (user_id) DO NOTHING`.execute(trx);
     }
     await audit(trx, session, 'REGISTRATION_APPROVED', 'registration_requests', requestId, { after: { user_id: newUserId, role } });
     return { ok: true, user_id: newUserId };
