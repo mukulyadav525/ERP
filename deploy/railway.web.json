@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "npm run build --workspace=apps/web",
+    "watchPatterns": ["apps/web/**", "package-lock.json"]
+  },
+  "deploy": {
+    "startCommand": "npm run start --workspace=apps/web",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}

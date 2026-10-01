@@ -1886,7 +1886,7 @@ CREATE OR REPLACE FUNCTION auth__issue_session(
     status TEXT, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_expires TIMESTAMPTZ := now() + make_interval(mins => p_ttl_minutes);
 BEGIN
     UPDATE users u SET failed_attempts = 0, locked_until = NULL, last_login_at = now()
@@ -1912,7 +1912,7 @@ $$;
 
 -- Records a failed attempt and locks the account once the policy limit is hit.
 CREATE OR REPLACE FUNCTION auth__fail(p_user_id UUID, p_identifier TEXT, p_ip INET)
-RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 BEGIN
     INSERT INTO login_attempts (identifier, ip_address, succeeded)
     VALUES (lower(p_identifier), p_ip, FALSE);
@@ -1939,7 +1939,7 @@ CREATE OR REPLACE FUNCTION auth_login_password(
     status TEXT, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_user users;
 BEGIN
     SELECT * INTO v_user FROM users u
@@ -1992,7 +1992,7 @@ CREATE OR REPLACE FUNCTION auth_login_pin(
     status TEXT, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_user users;
 BEGIN
     SELECT * INTO v_user FROM users u WHERE u.phone = trim(p_phone) LIMIT 1;
@@ -2039,7 +2039,7 @@ CREATE OR REPLACE FUNCTION auth_login_google(
     status TEXT, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_user users;
 BEGIN
     SELECT * INTO v_user FROM users u
@@ -2074,7 +2074,7 @@ $$;
 -- endpoint still reports success to the caller, again to prevent enumeration.
 CREATE OR REPLACE FUNCTION auth_otp_issue(
     p_phone TEXT, p_purpose TEXT, p_otp_plain TEXT, p_expiry_minutes INT DEFAULT 5
-) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_exists BOOLEAN;
 BEGIN
     SELECT TRUE INTO v_exists FROM users WHERE phone = trim(p_phone) AND is_active LIMIT 1;
@@ -2101,7 +2101,7 @@ CREATE OR REPLACE FUNCTION auth_otp_verify(
     status TEXT, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_otp otp_requests; v_user users;
 BEGIN
     SELECT * INTO v_otp FROM otp_requests o
@@ -2150,7 +2150,7 @@ RETURNS TABLE (
     session_id UUID, user_id UUID, role TEXT, branch_id UUID, full_name TEXT,
     email TEXT, phone TEXT, language_pref TEXT, must_change_password BOOLEAN,
     expires_at TIMESTAMPTZ
-) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 BEGIN
     UPDATE user_sessions s SET last_seen_at = now()
      WHERE s.token_hash = p_token_hash AND s.revoked_at IS NULL AND s.expires_at > now();
@@ -2170,7 +2170,7 @@ $$;
 -- REQUEST that the database has to agree to, never a fact the client asserts.
 CREATE OR REPLACE FUNCTION auth_user_branches(p_user_id UUID)
 RETURNS TABLE (branch_id UUID, name TEXT, code TEXT, is_home BOOLEAN)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     SELECT b.branch_id, b.name, b.code, (b.branch_id IS NOT DISTINCT FROM u.branch_id) AS is_home
       FROM users u
       JOIN branches b ON b.is_active
@@ -2183,7 +2183,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION auth_logout(p_token_hash TEXT)
-RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     UPDATE user_sessions SET revoked_at = now()
      WHERE token_hash = p_token_hash AND revoked_at IS NULL;
 $$;
@@ -2191,7 +2191,7 @@ $$;
 -- Revoke every session for a user -- used on password reset and on deactivation,
 -- so a stolen session cannot outlive the credential that created it.
 CREATE OR REPLACE FUNCTION auth_revoke_user_sessions(p_user_id UUID)
-RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     UPDATE user_sessions SET revoked_at = now()
      WHERE user_id = p_user_id AND revoked_at IS NULL;
 $$;
@@ -2200,7 +2200,7 @@ $$;
 CREATE OR REPLACE FUNCTION auth_register(
     p_full_name TEXT, p_email TEXT, p_phone TEXT,
     p_role TEXT, p_branch_id UUID, p_password TEXT
-) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 BEGIN
     IF EXISTS (SELECT 1 FROM users WHERE phone = trim(p_phone)
                OR (p_email IS NOT NULL AND lower(email) = lower(trim(p_email)))) THEN
@@ -2224,7 +2224,7 @@ $$;
 -- Admin approves a signup: this is the only path that turns a request into a user.
 CREATE OR REPLACE FUNCTION auth_approve_registration(
     p_request_id UUID, p_reviewer UUID, p_role TEXT, p_branch_id UUID
-) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE r registration_requests; v_new UUID;
 BEGIN
     SELECT * INTO r FROM registration_requests WHERE request_id = p_request_id AND status = 'PENDING';
@@ -2253,7 +2253,7 @@ $$;
 CREATE OR REPLACE FUNCTION auth_request_reset(
     p_identifier TEXT, p_kind TEXT, p_token_hash TEXT, p_expiry_minutes INT DEFAULT 30
 ) RETURNS TABLE (issued BOOLEAN, user_id UUID, email TEXT, phone TEXT)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_user users;
 BEGIN
     SELECT * INTO v_user FROM users u
@@ -2276,7 +2276,7 @@ $$;
 -- Consume a reset token and set the new secret. Every existing session for that
 -- user is revoked in the same transaction.
 CREATE OR REPLACE FUNCTION auth_perform_reset(p_token_hash TEXT, p_new_secret TEXT)
-RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE t password_reset_tokens;
 BEGIN
     SELECT * INTO t FROM password_reset_tokens
@@ -2304,7 +2304,7 @@ $$;
 -- Change your own password while logged in (requires the current one).
 CREATE OR REPLACE FUNCTION auth_change_password(
     p_user_id UUID, p_current TEXT, p_new TEXT
-) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_user users;
 BEGIN
     SELECT * INTO v_user FROM users WHERE user_id = p_user_id;
@@ -2330,7 +2330,7 @@ $$;
 -- cannot be forgotten: you may set your own PIN, an Owner may set anyone's, and a
 -- Branch Manager may set one for staff at their own branch.
 CREATE OR REPLACE FUNCTION auth_set_pin(p_user_id UUID, p_pin TEXT, p_actor UUID)
-RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_actor users; v_target users;
 BEGIN
     IF p_pin !~ '^[0-9]{4,6}$' THEN RETURN 'WEAK'; END IF;   -- 7.4: PIN length 4-6 digits
@@ -2370,7 +2370,7 @@ CREATE OR REPLACE FUNCTION auth_request_override(
     p_pin TEXT, p_purpose TEXT, p_branch_id UUID, p_requested_by UUID,
     p_ip INET DEFAULT NULL, p_ttl_minutes INT DEFAULT 10
 ) RETURNS TABLE (status TEXT, approval_id UUID, approver_name TEXT)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE
     v_user users;
     v_recent_failures INT;
@@ -2417,7 +2417,7 @@ $$;
 CREATE OR REPLACE FUNCTION auth_consume_override(
     p_approval_id UUID, p_purpose TEXT, p_branch_id UUID, p_requested_by UUID
 ) RETURNS TABLE (ok BOOLEAN, approver_id UUID, approver_name TEXT)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE r override_approvals;
 BEGIN
     UPDATE override_approvals SET consumed_at = now()
@@ -2440,7 +2440,7 @@ $$;
 -- Queues an auth message into the outbox the app role cannot read.
 CREATE OR REPLACE FUNCTION auth_queue_message(
     p_to_phone TEXT, p_purpose TEXT, p_body TEXT, p_to_email TEXT DEFAULT NULL
-) RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+) RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     INSERT INTO auth_message_outbox (to_phone, to_email, purpose, body)
     VALUES (p_to_phone, p_to_email, p_purpose, p_body);
 $$;
@@ -2453,7 +2453,7 @@ $$;
 -- which only one works.
 CREATE OR REPLACE FUNCTION auth_outbox_take(p_batch INT DEFAULT 25)
 RETURNS TABLE (id UUID, to_phone TEXT, body TEXT, attempts SMALLINT)
-LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     UPDATE auth_message_outbox o SET status = 'SENDING'
      WHERE o.id IN (
         SELECT c.id FROM auth_message_outbox c
@@ -2468,7 +2468,7 @@ $$;
 -- Returns anything stuck in SENDING to the queue, for a worker that claimed a
 -- batch and then died before reporting a result.
 CREATE OR REPLACE FUNCTION auth_outbox_requeue_stale(p_older_than_minutes INT DEFAULT 5)
-RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     WITH stale AS (
         UPDATE auth_message_outbox SET status = 'QUEUED'
          WHERE status = 'SENDING' AND queued_at < now() - make_interval(mins => p_older_than_minutes)
@@ -2477,7 +2477,7 @@ RETURNS INT LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $
 $$;
 
 CREATE OR REPLACE FUNCTION auth_outbox_result(p_id UUID, p_ok BOOLEAN, p_error TEXT DEFAULT NULL)
-RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
     UPDATE auth_message_outbox
        SET attempts = attempts + 1,
            last_error = p_error,
@@ -2504,7 +2504,7 @@ CREATE OR REPLACE FUNCTION customer_credit_post(
     p_amount NUMERIC, p_ref_table TEXT DEFAULT NULL, p_ref_id UUID DEFAULT NULL,
     p_enforce_limit BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (entry_id UUID, balance_after NUMERIC, credit_limit NUMERIC, over_limit BOOLEAN)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE
     v_customer customers;
     v_prior NUMERIC;
@@ -2551,7 +2551,7 @@ CREATE OR REPLACE FUNCTION vendor_ledger_post(
     p_vendor_id UUID, p_branch_id UUID, p_entry_type vendor_ledger_entry_type,
     p_amount NUMERIC, p_ref_table TEXT DEFAULT NULL, p_ref_id UUID DEFAULT NULL
 ) RETURNS TABLE (entry_id UUID, balance_after NUMERIC)
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
 DECLARE v_prior NUMERIC; v_next NUMERIC; v_id UUID;
 BEGIN
     PERFORM 1 FROM vendors WHERE vendor_id = p_vendor_id FOR UPDATE;
@@ -2650,7 +2650,7 @@ END;
 -- `invoices`, put it ahead of public on its search_path, and have this trigger
 -- read a fabricated status — turning the guard that protects finalised invoices
 -- into the thing that waves the delete through.
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp;
 
 -- Lines and payments of a finalised bill can be neither deleted NOR edited.
 CREATE TRIGGER trg_invoice_lines_draft_only

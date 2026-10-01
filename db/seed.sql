@@ -1088,6 +1088,11 @@ BEGIN
     -- Quoted in the unit the item is sold in (4 L tins, 100 G scoops, pieces).
     JOIN product_units pu ON pu.product_id = p.product_id AND pu.is_default_sale_unit
     CROSS JOIN LATERAL (SELECT (10 + floor(random() * 40))::numeric AS qty) x
+    -- Only quote what the branch can supply, so the reserved quotation never
+    -- holds more than is on the shelf (available stock must not go negative).
+    JOIN branch_stock bs ON bs.product_id = p.product_id
+                        AND bs.branch_id = (ARRAY[b1, b2, b3])[1 + (i % 3)]
+    WHERE bs.base_unit_qty - bs.reserved_qty >= x.qty * pu.multiplier_to_base
     ORDER BY random() LIMIT 4;
   END LOOP;
 

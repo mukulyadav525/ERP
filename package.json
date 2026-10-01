@@ -36,5 +36,8 @@
   "overrides": {
     "postcss": "^8.5.28",
     "serialize-javascript": "^7.1.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
