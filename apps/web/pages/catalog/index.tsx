@@ -397,7 +397,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
               <input inputMode="decimal" value={form.reorder_level} onChange={(e) => set('reorder_level', decimalOnly(e.target.value))} disabled={!mayEdit} /></Field>
             <Field label="Usual supplier"><VendorPicker value={vendor} onSelect={setVendor} /></Field>
             <div className="span-2"><Field label="Description"><input value={form.description} onChange={(e) => set('description', e.target.value)} maxLength={1000} disabled={!mayEdit} /></Field></div>
-            <div className="row" style={{ gap: 18 }}>
+            <div className="span-2 row" style={{ gap: 18, flexWrap: 'wrap', alignSelf: 'end', paddingBottom: 8 }}>
               <Switch checked={form.batch_tracked} onChange={(v) => set('batch_tracked', v)} disabled={!mayEdit} label="Track batches & expiry" />
               <Switch checked={form.serial_tracked} onChange={(v) => set('serial_tracked', v)} disabled={!mayEdit} label="Track serial numbers" />
               {!isNew && <Switch checked={form.is_active} onChange={(v) => set('is_active', v)} disabled={!mayEdit} label="Active" />}

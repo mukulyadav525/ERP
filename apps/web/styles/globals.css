@@ -413,6 +413,8 @@ select {
 .switch input:checked + .track { background: var(--accent); }
 .switch input:checked + .track::before { transform: translateX(18px); }
 .switch input:disabled + .track { opacity: 0.5; cursor: not-allowed; }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch-field { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; }
 
 /* --- Tables -------------------------------------------------------------- */
 .table-wrap { overflow-x: auto; }
@@ -728,6 +730,9 @@ table.data td.nowrap, table.data th.nowrap { white-space: nowrap; }
    fixed positioning, so a modal's scrolling body can never clip it. */
 .combo { position: relative; flex: 1; min-width: 0; }
 .combo input { padding-left: 32px; padding-right: 30px; }
+/* In a form field (a column) `flex: 1` stretched the box taller than its input,
+   so the centred search icon sat below the text box. */
+.field .combo { flex: 0 0 auto; }
 .combo-icon {
   position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
   color: var(--text-muted); pointer-events: none; display: grid; place-items: center;

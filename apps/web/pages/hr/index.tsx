@@ -45,6 +45,10 @@ function HrScreen() {
   );
 }
 
+/** Designations default to the role code (BRANCH_MANAGER); show those as words. */
+const designation = (d?: string | null) => (d && /^[A-Z_]+$/.test(d)
+  ? d.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase()) : d ?? '');
+
 function StaffTab() {
   const { can, activeBranchId } = useAuth();
   const toast = useToast();
@@ -71,7 +75,7 @@ function StaffTab() {
               onRowClick={(e: any) => { if (mayEdit(e)) setEditing(e); }}
               columns={[
                 { key: 'n', header: 'Name', render: (e: any) => (
-                  <div>{e.full_name}<div className="muted small">{e.designation}</div></div>
+                  <div>{e.full_name}<div className="muted small">{designation(e.designation)}</div></div>
                 ) },
                 { key: 'r', header: 'Role', render: (e: any) => <Badge tone="neutral">{e.role.replace(/_/g, ' ').toLowerCase()}</Badge> },
                 { key: 'b', header: 'Branch', render: (e: any) => e.branch_name },
@@ -400,7 +404,7 @@ function EditStaffModal({ staff, onClose, onSaved }: { staff: any | null; onClos
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!staff) return;
-    setForm({ full_name: staff.full_name ?? '', phone: staff.phone ?? '', email: staff.email ?? '', designation: staff.designation ?? '',
+    setForm({ full_name: staff.full_name ?? '', phone: staff.phone ?? '', email: staff.email ?? '', designation: designation(staff.designation),
       joined_at: String(staff.joined_at ?? '').slice(0, 10), is_active: Boolean(staff.is_active), pin: '' });
   }, [staff]);
 

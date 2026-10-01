@@ -132,11 +132,19 @@ export function Switch({ checked, onChange, disabled, label }: {
   checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label?: string;
 }) {
   const id = useId();
-  return (
-    <label className="switch" htmlFor={id} aria-label={label}>
-      <input id={id} type="checkbox" checked={checked} disabled={disabled}
+  const toggle = (
+    <span className="switch">
+      <input id={id} type="checkbox" checked={checked} disabled={disabled} aria-label={label}
              onChange={(e) => onChange(e.target.checked)} />
       <span className="track" />
+    </span>
+  );
+  // The label is shown next to the toggle — a bare toggle says nothing about what it switches.
+  if (!label) return <label htmlFor={id} style={{ display: 'inline-flex' }}>{toggle}</label>;
+  return (
+    <label className="switch-field" htmlFor={id}>
+      {toggle}
+      <span>{label}</span>
     </label>
   );
 }
