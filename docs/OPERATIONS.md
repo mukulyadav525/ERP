@@ -93,27 +93,33 @@ reverse proxy that terminates HTTPS. `GET /health` on the API answers
 
 ### Hosted: Railway (API + web) with Supabase (database)
 
-**Database (Supabase).** Project → *Connect* → use the **Session pooler** string (port
-5432, IPv4 — Railway cannot reach Supabase's IPv6-only direct host). Append
-`?sslmode=no-verify` to every URL. The pooler user is `<role>.<project-ref>`.
+**Database (Supabase).** Project → *Connect* → *Connection pooling* (Railway cannot reach
+Supabase's IPv6-only direct host). The pooler user is `<role>.<project-ref>`. Either
+pooler port works for the API (verified: sign-in, RLS and every write flow, on port
+6543). Use the **transaction pooler (6543)** for `DATABASE_URL`. For the Node scripts
+append `?sslmode=no-verify`; `psql` does not understand that value, so for `psql` use
+`?sslmode=require`.
 
 ```bash
 # From your computer, as the Supabase `postgres` role (the owner role here):
-export MIGRATION_DATABASE_URL='postgresql://postgres.<ref>:<db password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=no-verify'
+export MIGRATION_DATABASE_URL='postgresql://postgres.<ref>:<db password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require'
 psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -v erp_app_password='<app password>' -f db/schema.sql
 npm run create-owner -- --name "Owner Name" --email owner@yourshop.in --phone 98XXXXXXXX
 # (demo only, instead of create-owner: psql "$MIGRATION_DATABASE_URL" -f db/seed.sql)
 ```
 
-The schema works with Supabase keeping `pgcrypto` in its `extensions` schema. Do not use
-the transaction pooler (port 6543).
+If `schema.sql` stops with "deadlock detected" (a Supabase background process touching
+the catalog mid-DDL), drop the half-built schema
+(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) and run it again.
+
+The schema works with Supabase keeping `pgcrypto` in its `extensions` schema.
 
 **Railway.** New project → *Deploy from GitHub repo* → add the repo **twice**, as two
 services. In each service's *Settings → Config-as-code* set the file:
 
 | Service | Config file | Variables |
 |---|---|---|
-| api | `deploy/railway.api.json` | `DATABASE_URL` (as `erp_app.<ref>`, session pooler, `?sslmode=no-verify`), `MIGRATION_DATABASE_URL`, `SESSION_SECRET`, `NODE_ENV=production`, `CORS_ORIGINS=https://<web domain>`, `BUSINESS_TIMEZONE=Asia/Kolkata`, `LOG_LEVEL=info` |
+| api | `deploy/railway.api.json` | `DATABASE_URL` (as `erp_app.<ref>`, pooler port 6543, `?sslmode=no-verify`), `MIGRATION_DATABASE_URL`, `SESSION_SECRET`, `NODE_ENV=production`, `CORS_ORIGINS=https://<web domain>`, `BUSINESS_TIMEZONE=Asia/Kolkata`, `LOG_LEVEL=info` |
 | web | `deploy/railway.web.json` | `NEXT_PUBLIC_API_URL=https://<api domain>`, `NEXT_PUBLIC_BUSINESS_TIMEZONE=Asia/Kolkata`, `NODE_ENV=production` |
 
 Generate a public domain for each (*Settings → Networking*). `NEXT_PUBLIC_API_URL` is
