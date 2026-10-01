@@ -2164,6 +2164,15 @@ BEGIN
 END;
 $$;
 
+-- Hashes a new password or PIN for the API (user creation and Owner resets). The
+-- running app role may not be able to see pgcrypto directly (Supabase keeps it in
+-- an `extensions` schema the app role has no USAGE on), so hashing goes through
+-- this definer function, with the same bcrypt cost as every other credential.
+CREATE OR REPLACE FUNCTION erp_hash_secret(p_secret TEXT)
+RETURNS TEXT LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+    SELECT crypt(p_secret, gen_salt('bf', 12))
+$$;
+
 -- The sign-up form is shown BEFORE anyone is signed in, so it cannot read `branches`
 -- (row-level security hides every row from an anonymous connection). This exposes
 -- exactly the id, name and code of active branches and nothing else.

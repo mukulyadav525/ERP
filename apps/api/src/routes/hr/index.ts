@@ -56,7 +56,7 @@ export default async function hrRoutes(app: FastifyInstance) {
       INSERT INTO users (branch_id, role, full_name, phone, email, pin_hash, language_pref, must_change_password)
       VALUES (${branchId}, ${role}::user_role, ${str(body.full_name, 'Full name', { max: 120 })}, ${phone},
               ${optionalStr(body.email, 'Email', { max: 254 })},
-              ${pin ? sql`crypt(${pin}, gen_salt('bf', 12))` : null},
+              ${pin ? sql`erp_hash_secret(${pin})` : null},
               ${optionalStr(body.language_pref, 'language') ?? 'en'}, TRUE)
       RETURNING user_id, full_name, role
     `.execute(trx)).rows[0];

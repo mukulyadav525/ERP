@@ -11,7 +11,7 @@ export type AuditAction =
   | 'EXPENSE_APPROVED' | 'EXPENSE_REJECTED' | 'INVOICE_VOIDED' | 'CUSTOMER_MERGED'
   | 'LOYALTY_ADJUSTMENT' | 'NEGATIVE_STOCK_OVERRIDE' | 'BACKUP_RESTORED'
   | 'PII_EXPORTED' | 'REGISTRATION_APPROVED' | 'REGISTRATION_REJECTED'
-  | 'STOCK_CONFLICT_RESOLVED' | 'PIN_RESET' | 'WARRANTY_CLAIM_UPDATED'
+  | 'STOCK_CONFLICT_RESOLVED' | 'PIN_RESET' | 'PASSWORD_RESET' | 'WARRANTY_CLAIM_UPDATED'
   // Draft billing (3.x, editable-before-final). A draft is a working document, so
   // only the transitions that change what the customer is asked to pay are logged:
   // the edit itself, the discard, and the moment it becomes a commercial document.
