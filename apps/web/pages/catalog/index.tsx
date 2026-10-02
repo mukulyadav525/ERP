@@ -252,7 +252,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = 'Enter the product name.';
-    if (isNew && !/^[A-Za-z0-9][A-Za-z0-9\-_./]{0,59}$/.test(form.sku.trim())) e.sku = 'Letters, digits and - _ . / only, e.g. PLB-PIPE-15.';
+    if (isNew && form.sku.trim() && !/^[A-Za-z0-9][A-Za-z0-9\-_./]{0,59}$/.test(form.sku.trim())) e.sku = 'Letters, digits and - _ . / only, e.g. PLB-PIPE-15.';
     if (!/^[0-9]{4,8}$/.test(form.hsn_code.trim())) e.hsn_code = 'An HSN code is 4–8 digits.';
     else if (!hsnRate) e.hsn_code = 'This HSN has no GST rate on file. Add it on the GST rates tab first.';
     if (isNew) {
@@ -280,7 +280,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     try {
       if (isNew) {
         const payload = {
-          ...common, sku: form.sku.trim().toUpperCase(), base_unit: form.base_unit,
+          ...common, sku: form.sku.trim().toUpperCase() || undefined, base_unit: form.base_unit,
           selling_price: Number(form.selling_price), mrp: form.mrp === '' ? undefined : Number(form.mrp),
           units: newUnits.map((u) => ({ unit_code: u.unit_code, multiplier_to_base: u.size === '' ? undefined : Number(u.size), is_default: u.is_default })),
           barcodes,
@@ -353,7 +353,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
           {!isNew && !form.is_active && <Alert tone="warning">This product is inactive — it is not offered at the counter.</Alert>}
           <div className="form-grid">
             <Field label="Product name" required error={errors.name}><input value={form.name} onChange={(e) => set('name', e.target.value)} maxLength={200} disabled={!mayEdit} autoFocus={isNew} /></Field>
-            <Field label="SKU" required={isNew} error={errors.sku} hint={isNew ? 'Your own short code, e.g. PLB-PIPE-15' : 'The SKU cannot be changed'}>
+            <Field label="SKU" error={errors.sku} hint={isNew ? 'Optional. Your own short code, e.g. PLB-PIPE-15; left blank, one is made for you' : 'The SKU cannot be changed'}>
               <input className="mono" value={form.sku} onChange={(e) => set('sku', e.target.value.toUpperCase())} disabled={!isNew} maxLength={60} /></Field>
             <Field label="Category">
               <div className="row tight" style={{ flexWrap: 'nowrap' }}>

@@ -4,6 +4,7 @@
 // authenticated user; what changes by role is who may EDIT them (7.1) and who
 // may see cost/margin columns (2.6).
 // ============================================================================
+import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import {
@@ -270,9 +271,17 @@ export default async function catalogRoutes(app: FastifyInstance) {
 
   app.post('/products', guarded('edit_catalog', async ({ session, db: trx, req }) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const sku = str(body.sku, 'SKU', { max: 60 }).toUpperCase();
-    if (!/^[A-Z0-9][A-Z0-9\-_./]{0,59}$/.test(sku)) {
+    // SKU is optional: left blank, a short unique one is made (P-1A2B3C4D), so a
+    // shop that does not use its own codes is never stopped by this field.
+    const givenSku = typeof body.sku === 'string' ? body.sku.trim().toUpperCase() : '';
+    if (givenSku && !/^[A-Z0-9][A-Z0-9\-_./]{0,59}$/.test(givenSku)) {
       throw badRequest('A SKU may use letters, digits and - _ . / only, e.g. PLB-PIPE-15.');
+    }
+    let sku = givenSku;
+    while (!sku) {
+      const candidate = `P-${randomBytes(4).toString('hex').toUpperCase()}`;
+      const taken = await sql`SELECT 1 FROM products WHERE upper(sku) = ${candidate}`.execute(trx);
+      if (!taken.rows.length) sku = candidate;
     }
     const name = str(body.name, 'Product name', { max: 200 });
     const base = await requireUnit(trx, str(body.base_unit, 'Base unit', { max: 20 }).toUpperCase(), 'Base unit');
