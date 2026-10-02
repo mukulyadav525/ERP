@@ -103,3 +103,16 @@ export async function closeDb(): Promise<void> {
 }
 
 export { sql };
+
+/**
+ * Serialises every transaction that names the same key, until it commits.
+ *
+ * Used for idempotency ids: a double-click or a retry after a timeout sends the
+ * same client_txn_id twice, at the same moment. Without this both requests find
+ * no earlier record, both try to insert, and the loser gets a unique-key error
+ * instead of the record that was made. With it the second waits, then finds the
+ * first one's record and returns it.
+ */
+export async function lockKey(trx: Tx, key: string): Promise<void> {
+  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`.execute(trx);
+}

@@ -21,6 +21,7 @@ import {
 } from '../../components/ui';
 import { StateSelect, stateName } from '../../components/pickers';
 import { Icon } from '../../components/icons';
+import ExportButton from '../../components/ExportButton';
 
 export default function VendorsPage() {
   return (
@@ -49,7 +50,7 @@ function VendorsScreen() {
   const [formFor, setFormFor] = useState<any | null | 'new'>(null);
   const money = can('view_financial_reports');
 
-  const params = new URLSearchParams({ limit: '300', status });
+  const params = new URLSearchParams({ limit: '2000', status });
   if (search) params.set('q', search);
   const { data, error, isLoading, mutate } = useSWR<any[]>(`/api/vendors?${params}`, fetcher, { keepPreviousData: true });
   const { data: payable, mutate: mutatePayable } = useSWR<any[]>(money ? '/api/vendors/outstanding/list' : null, fetcher);
@@ -84,10 +85,10 @@ function VendorsScreen() {
               <option value="active">Active</option><option value="inactive">Inactive</option><option value="all">All</option>
             </select>
             <div className="spacer" />
-            <Button onClick={() => downloadCsv((data ?? []).map((v) => ({
+            <ExportButton path={`/api/vendors?${params}`} filename="vendors.csv" map={(v: any) => ({
               name: v.name, contact: v.contact_person, phone: v.phone, email: v.email, gstin: v.gstin, state: v.state,
               terms_days: v.payment_terms_days, ...(money ? { balance: v.balance_owed } : {}),
-            })), 'vendors.csv')} disabled={!data?.length}><Icon name="download" size={14} /> Export</Button>
+            })} />
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
@@ -347,7 +348,7 @@ function VendorPaymentModal({ vendor, grn, onClose, onDone }: { vendor: any; grn
   }
 
   return (
-    <Modal open onClose={onClose} title={`Pay ${vendor.name}`}
+    <Modal guardUnsaved open onClose={onClose} title={`Pay ${vendor.name}`}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void submit()}>Record payment</Button></>}>
       <BranchGate what="this payment">
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
@@ -425,7 +426,7 @@ function VendorForm({ vendor, onClose, onSaved }: { vendor: any | null | 'new'; 
   }
 
   return (
-    <Modal open={vendor !== null} onClose={onClose} wide title={isNew ? 'Add vendor' : `Edit ${(vendor as any)?.name ?? ''}`}
+    <Modal guardUnsaved open={vendor !== null} onClose={onClose} wide title={isNew ? 'Add vendor' : `Edit ${(vendor as any)?.name ?? ''}`}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>{isNew ? 'Add vendor' : 'Save changes'}</Button></>}>
       <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <div className="form-grid">

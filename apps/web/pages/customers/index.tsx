@@ -23,6 +23,9 @@ import {
 } from '../../components/ui';
 import { CustomerPicker, StateSelect, stateName, type CustomerHit } from '../../components/pickers';
 import { Icon } from '../../components/icons';
+import CopyText from '../../components/CopyText';
+import Link from 'next/link';
+import ExportButton from '../../components/ExportButton';
 
 export default function CustomersPage() {
   return (
@@ -114,10 +117,10 @@ function CustomersScreen() {
             </select>
             <label className="checkbox"><input type="checkbox" checked={withBalance} onChange={(e) => setWithBalance(e.target.checked)} /> With a balance</label>
             <div className="spacer" />
-            <Button onClick={() => downloadCsv((data ?? []).map((r) => ({
+            <ExportButton path={`/api/customers?${params}`} filename="customers.csv" map={(r: any) => ({
               name: r.name, company: r.company_name, phone: r.phone, whatsapp: r.whatsapp, email: r.email, gstin: r.gstin,
               state: r.state, type: r.customer_type, credit_limit: r.credit_limit, balance: r.balance_owed, points: r.loyalty_points_balance,
-            })), 'customers.csv')} disabled={!data?.length}><Icon name="download" size={14} /> Export</Button>
+            })} />
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
@@ -230,6 +233,9 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
         {shareUrl && <Button onClick={() => window.open(shareUrl, '_blank', 'noopener')}><Icon name="whatsapp" size={14} /> WhatsApp</Button>}
         {can('set_credit_limit') && <Button onClick={() => setCreditOpen(true)}>Credit limit</Button>}
         {can('edit_customer') && <Button onClick={() => onEdit(c)}><Icon name="edit" size={14} /> Edit</Button>}
+        {can('create_invoice') && c.is_active && (
+          <Link href={`/billing?customer=${c.customer_id}`} className="btn"><Icon name="billing" size={14} /> New bill</Link>
+        )}
         {can('record_customer_payment') && <Button variant="primary" onClick={() => setPayOpen(true)}>Receive payment</Button>}
       </>}>
       {error && <Alert tone="critical">{(error as Error).message}</Alert>}
@@ -239,11 +245,12 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
           {!c.is_active && <Alert tone="warning">This customer is marked inactive.</Alert>}
           <div className="grid cols-2">
             <KeyValue items={[
-              ['Phone', c.phone], ['WhatsApp', c.whatsapp || 'same as phone'], ['Email', c.email || '—'],
+              ['Phone', c.phone ? <CopyText value={c.phone} href={`tel:${c.phone}`} label="Phone" /> : '—'],
+              ['WhatsApp', c.whatsapp || 'same as phone'], ['Email', c.email || '—'],
               ['Company', c.company_name || '—'], ['Type', c.customer_type === 'B2B_CONTRACTOR' ? 'Business / contractor' : 'Retail'],
             ]} />
             <KeyValue items={[
-              ['GSTIN', c.gstin || 'Unregistered'], ['State', c.state_code ? `${c.state_code} ${stateName(c.state_code)}` : '—'],
+              ['GSTIN', c.gstin ? <CopyText value={c.gstin} label="GSTIN" /> : 'Unregistered'], ['State', c.state_code ? `${c.state_code} ${stateName(c.state_code)}` : '—'],
               ['Address', c.address || '—'], ['Customer since', formatDate(c.created_at)],
               ...(c.notes ? [['Notes', c.notes] as [string, React.ReactNode]] : []),
             ]} />
@@ -411,7 +418,7 @@ function ReceivePaymentModal({ open, customer, onClose, onDone }: { open: boolea
   ].join('\n')) : null;
 
   return (
-    <Modal open={open} onClose={done ? onDone : onClose} title={done ? 'Payment received' : `Receive payment — ${customer.name}`}
+    <Modal guardUnsaved={!done} open={open} onClose={done ? onDone : onClose} title={done ? 'Payment received' : `Receive payment — ${customer.name}`}
       footer={done
         ? <>{shareUrl && <Button onClick={() => window.open(shareUrl, '_blank', 'noopener')}><Icon name="whatsapp" size={14} /> Send receipt on WhatsApp</Button>}
             <span className="spacer" /><Button variant="primary" onClick={onDone}>Done</Button></>
@@ -474,7 +481,7 @@ function CreditModal({ open, customer, onClose, onDone }: { open: boolean; custo
     } catch (err) { toast.error(err); }
   }
   return (
-    <Modal open={open} onClose={onClose} title={`Credit terms — ${customer.name}`}
+    <Modal guardUnsaved open={open} onClose={onClose} title={`Credit terms — ${customer.name}`}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={() => void save()}>Save</Button></>}>
       <div className="stack">
         <Switch checked={allowed} onChange={setAllowed} label="Allow sales on credit" />
@@ -551,7 +558,7 @@ function CustomerForm({ customer, onClose, onSaved }: { customer: any | null | '
   }
 
   return (
-    <Modal open={customer !== null} onClose={onClose} wide title={isNew ? 'Add customer' : `Edit ${(customer as any)?.name ?? ''}`}
+    <Modal guardUnsaved open={customer !== null} onClose={onClose} wide title={isNew ? 'Add customer' : `Edit ${(customer as any)?.name ?? ''}`}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>{isNew ? 'Add customer' : 'Save changes'}</Button></>}>
       <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <div className="form-grid">

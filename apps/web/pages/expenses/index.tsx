@@ -21,6 +21,7 @@ import {
 } from '../../components/ui';
 import { BarsChart, DonutChart } from '../../components/charts';
 import { Icon } from '../../components/icons';
+import ExportButton from '../../components/ExportButton';
 
 export default function ExpensesPage() {
   return (
@@ -117,10 +118,10 @@ function ExpensesScreen() {
             <input type="date" aria-label="From" value={from} onChange={(e) => setFrom(e.target.value)} />
             <input type="date" aria-label="To" value={to} onChange={(e) => setTo(e.target.value)} />
             <div className="spacer" />
-            <Button onClick={() => downloadCsv((data ?? []).map((e) => ({
+            <ExportButton path={withBranch(`/api/expenses?${params}`, activeBranchId)} filename="expenses.csv" map={(e: any) => ({
               date: e.expense_date, branch: e.branch_name, category: e.category_name, amount: e.amount, method: e.payment_method,
               paid_to: e.payee, reference: e.reference, description: e.description, status: e.status, raised_by: e.requested_by_name, approved_by: e.approved_by_name,
-            })), 'expenses.csv')} disabled={!data?.length}><Icon name="download" size={14} /> Export</Button>
+            })} />
           </div>
           <Card flush>
             <AsyncSection data={data} error={error} isLoading={isLoading} onRetry={() => void mutate()}
@@ -271,7 +272,7 @@ function ExpenseForm({ expense, categories, onCategoryAdded, onClose, onSaved }:
   }
 
   return (
-    <Modal open={expense !== null} onClose={onClose} title={isNew ? 'Add expense' : 'Edit expense'}
+    <Modal guardUnsaved open={expense !== null} onClose={onClose} title={isNew ? 'Add expense' : 'Edit expense'}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>{isNew ? 'Save expense' : 'Save changes'}</Button></>}>
       <BranchGate what="this expense">
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>

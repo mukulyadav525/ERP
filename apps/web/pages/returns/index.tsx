@@ -255,7 +255,7 @@ function NewReturnModal({ invoiceId, onClose, onDone }: { invoiceId: string | nu
   }
 
   return (
-    <Modal open={invoiceId !== null} onClose={result ? onDone : onClose} wide title={result ? 'Return recorded' : 'New return'}
+    <Modal guardUnsaved={!result} open={invoiceId !== null} onClose={result ? onDone : onClose} wide title={result ? 'Return recorded' : 'New return'}
       footer={result
         ? <>{result.credit_note_id && <Button onClick={() => downloadFile(`/api/returns/credit-notes/${result.credit_note_id}/pdf`, `CreditNote-${result.credit_note_number}.pdf`).catch((e) => toast.error(e))}>
               <Icon name="download" size={14} /> Credit note PDF</Button>}

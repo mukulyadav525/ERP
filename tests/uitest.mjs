@@ -18,6 +18,8 @@ const WEB = process.env.WEB_URL ?? 'http://localhost:3000';
 // environments that ship Chromium separately (a CI image, a sandbox) so the suite
 // does not have to download one.
 const EXECUTABLE = process.env.CHROMIUM_PATH ?? null;
+// The API as the browser reaches it; read inside page.evaluate via window.__ERP_API__.
+const API = process.env.API_URL ?? 'http://localhost:4000';
 
 const C = { g: '\x1b[32m', r: '\x1b[31m', d: '\x1b[90m', b: '\x1b[1m', x: '\x1b[0m' };
 let passed = 0;
@@ -79,6 +81,7 @@ try {
   section('Pages load without errors (Owner)');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     const errs = watch(page);
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
@@ -108,6 +111,7 @@ try {
   section('Responsive at 390px (Section 42)');
   {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
     for (const [path, label] of PAGES) {
@@ -124,6 +128,7 @@ try {
   section('Draft bill: review, edit, finalise');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     const errs = watch(page);
     await login(page, { email: 'sunita@hardwareerp.in', password: 'Manager@12345' });
@@ -134,7 +139,7 @@ try {
     // rather than re-proving that the stock check works (the API suite covers that).
     const stocked = await page.evaluate(async () => {
       const token = localStorage.getItem('erp_auth_token');
-      const res = await fetch('http://localhost:4000/api/catalog/products?limit=60', {
+      const res = await fetch(window.__ERP_API__ + '/api/catalog/products?limit=60', {
         headers: { Authorization: `Bearer ${token}` },
       });
       const rows = await res.json();
@@ -225,18 +230,19 @@ try {
   section('Offline billing');
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { email: 'sunita@hardwareerp.in', password: 'Manager@12345' });
     await page.goto(`${WEB}/billing`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(900);
     const sku = await page.evaluate(async () => {
       const token = localStorage.getItem('erp_auth_token');
-      const rows = await (await fetch('http://localhost:4000/api/catalog/products?limit=80', { headers: { Authorization: `Bearer ${token}` } })).json();
+      const rows = await (await fetch(window.__ERP_API__ + '/api/catalog/products?limit=80', { headers: { Authorization: `Bearer ${token}` } })).json();
       return rows.find((p) => Number(p.available_qty ?? 0) > 20 && Number(p.selling_price) > 0 && p.base_unit === 'PIECE')?.sku;
     });
     const before = await page.evaluate(async () => {
       const token = localStorage.getItem('erp_auth_token');
-      const r = await (await fetch('http://localhost:4000/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json();
+      const r = await (await fetch(window.__ERP_API__ + '/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json();
       return r[0]?.invoice_number ?? null;
     });
     const search = page.locator('input[aria-label="Search or scan an item"]');
@@ -259,14 +265,14 @@ try {
     check('when the connection returns the queued sale uploads', left === 0, `${left} still queued`);
     const after = await page.evaluate(async () => {
       const token = localStorage.getItem('erp_auth_token');
-      return (await (await fetch('http://localhost:4000/api/billing/invoices?limit=3', { headers: { Authorization: `Bearer ${token}` } })).json()).map((r) => r.invoice_number);
+      return (await (await fetch(window.__ERP_API__ + '/api/billing/invoices?limit=3', { headers: { Authorization: `Bearer ${token}` } })).json()).map((r) => r.invoice_number);
     });
     check('it became exactly one new invoice', after[0] !== before && after[1] === before, `${before} → ${after.slice(0, 2).join(', ')}`);
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
     await page.waitForTimeout(1500);
     const again = await page.evaluate(async () => {
       const token = localStorage.getItem('erp_auth_token');
-      return (await (await fetch('http://localhost:4000/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json())[0].invoice_number;
+      return (await (await fetch(window.__ERP_API__ + '/api/billing/invoices?limit=1', { headers: { Authorization: `Bearer ${token}` } })).json())[0].invoice_number;
     });
     check('reconnecting again does not bill it twice', again === after[0]);
     await ctx.close();
@@ -276,6 +282,7 @@ try {
   section('Branch context for a transaction');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     const errs = watch(page);
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
@@ -296,6 +303,7 @@ try {
   section('Navigation matches the role');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { phone: '9900000005', pin: '1234' });
     const nav = await page.locator('aside').innerText();
@@ -316,6 +324,7 @@ try {
   section('Hindi / English');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
     await page.goto(`${WEB}/billing`, { waitUntil: 'networkidle' });
@@ -341,6 +350,7 @@ try {
   section('Light mode is the default for a first-time visitor (hard requirement)');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, colorScheme: 'dark' });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await page.goto(`${WEB}/login`, { waitUntil: 'networkidle' });
     const attr = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
@@ -365,6 +375,7 @@ try {
   section('Light and dark');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
     for (const theme of ['dark', 'light']) {
@@ -386,6 +397,7 @@ try {
   section('No dead controls on the main screens');
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+    await ctx.addInitScript((api) => { window.__ERP_API__ = api; }, API);
     const page = await ctx.newPage();
     await login(page, { email: 'owner@hardwareerp.in', password: 'Owner@12345' });
     for (const [path, label] of [['/billing', 'Billing'], ['/inventory', 'Inventory'], ['/admin', 'Admin']]) {

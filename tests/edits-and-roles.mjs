@@ -43,20 +43,22 @@ async function call(method, path, { token, body } = {}) {
   return { status: res.status, body: json };
 }
 async function login(email, password) {
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 6; i += 1) {
     const r = await call('POST', '/api/auth/login/password', { body: { email, password } });
     if (r.status === 200) return r.body.token;
     if (r.status !== 429) return null;
-    await new Promise((res) => setTimeout(res, 3000));
+    // Rate-limited (the suites before this one signed in a lot): wait it out.
+    await new Promise((res) => setTimeout(res, 15000));
   }
   return null;
 }
 async function loginPin(phone, pin) {
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 6; i += 1) {
     const r = await call('POST', '/api/auth/login/pin', { body: { phone, pin } });
     if (r.status === 200) return r.body.token;
     if (r.status !== 429) return null;
-    await new Promise((res) => setTimeout(res, 3000));
+    // Rate-limited (the suites before this one signed in a lot): wait it out.
+    await new Promise((res) => setTimeout(res, 15000));
   }
   return null;
 }

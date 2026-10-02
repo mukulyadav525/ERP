@@ -17,7 +17,7 @@ export type IconName =
   | 'search' | 'plus' | 'check' | 'alert' | 'info' | 'close' | 'menu' | 'signout'
   | 'sun' | 'moon' | 'monitor' | 'branch' | 'chevron' | 'inbox' | 'lock'
   | 'download' | 'print' | 'whatsapp' | 'scan' | 'clock' | 'rupee'
-  | 'edit' | 'trash' | 'refresh' | 'calendar' | 'box' | 'truck' | 'receipt';
+  | 'edit' | 'trash' | 'refresh' | 'calendar' | 'box' | 'truck' | 'receipt' | 'copy' | 'phone';
 
 const PATHS: Record<IconName, React.ReactNode> = {
   dashboard: <><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>,
@@ -54,6 +54,8 @@ const PATHS: Record<IconName, React.ReactNode> = {
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5.2l3.2 2" /></>,
   rupee: <><path d="M7 4h10" /><path d="M7 8.5h10" /><path d="M14.5 4c0 3.6-2.4 5.4-6 5.4L15.5 20" /></>,
   edit: <><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>,
+  copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></>,
+  phone: <><path d="M5 3h4l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 5a2 2 0 0 1 2-2Z" /></>,
   trash: <><path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6 7l1 13h10l1-13" /><path d="M10 11v5" /><path d="M14 11v5" /></>,
   refresh: <><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" /><path d="M4 3v5h5" /><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" /><path d="M20 21v-5h-5" /></>,
   calendar: <><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M3.5 10h17" /><path d="M8 3v4" /><path d="M16 3v4" /></>,

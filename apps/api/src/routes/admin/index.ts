@@ -297,7 +297,7 @@ export default async function adminRoutes(app: FastifyInstance) {
          ${q.branch_id ? sql`AND a.branch_id = ${uuid(q.branch_id, 'branch_id')}` : sql``}
          ${dateOk(q.from) ? sql`AND a.created_at >= ${q.from}::date` : sql``}
          ${dateOk(q.to) ? sql`AND a.created_at < (${q.to}::date + 1)` : sql``}
-       ORDER BY a.created_at DESC LIMIT ${clampLimit(q.limit, 100, 1000)}
+       ORDER BY a.created_at DESC LIMIT ${clampLimit(q.limit, 100, 5000)}
     `.execute(trx)).rows;
   }));
 

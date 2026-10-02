@@ -162,7 +162,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       ) x
       WHERE ${filter === 'low' ? sql`x.is_low` : filter === 'out' ? sql`x.is_out` : sql`TRUE`}
       ORDER BY ${filter !== 'all' ? sql`x.base_unit_qty ASC,` : sql``} x.name, x.branch_name
-      LIMIT ${clampLimit(q.limit, 300, 2000)}
+      LIMIT ${clampLimit(q.limit, 300, 5000)}
     `.execute(trx);
     return maskCost(rows.rows, showCost);
   }));
@@ -220,12 +220,29 @@ export default async function inventoryRoutes(app: FastifyInstance) {
     const settings = await loadSettings(trx, session.branch_id);
     const from = optionalDate(q.from, 'From date');
     const to = optionalDate(q.to, 'To date');
+    // The page of movements is picked first (index on created_at), and only those
+    // rows are then joined to their documents — joining every movement to every
+    // bill and receipt first, then keeping 100, took seconds at a year's volume.
     const rows = await sql<any>`
+      WITH page AS (
+        SELECT sl.ledger_id FROM stock_ledger sl
+         WHERE sl.movement_type NOT IN ('RESERVATION', 'RESERVATION_RELEASE')
+           ${branchId ? sql`AND sl.branch_id = ${branchId}` : sql``}
+           ${q.product_id ? sql`AND sl.product_id = ${uuid(q.product_id, 'product_id')}` : sql``}
+           ${q.movement_type ? sql`AND sl.movement_type = ${oneOf(q.movement_type, 'Movement type',
+             ['PURCHASE', 'SALE', 'SALE_RETURN', 'TRANSFER_OUT', 'TRANSFER_IN', 'PURCHASE_RETURN', 'WRITE_OFF',
+              'COUNT_ADJUSTMENT', 'OPENING_STOCK', 'ADJUSTMENT'] as const)}::stock_movement_type` : sql``}
+           ${from ? sql`AND sl.created_at >= ${from}::date` : sql``}
+           ${to ? sql`AND sl.created_at < (${to}::date + 1)` : sql``}
+         ORDER BY sl.created_at DESC
+         LIMIT ${clampLimit(q.limit, 100, 5000)}
+      )
       SELECT sl.ledger_id, sl.branch_id, b.name AS branch_name, sl.product_id, p.name AS product_name,
              p.sku, p.base_unit, bu.print_label AS base_unit_label, sl.movement_type, sl.base_unit_qty_change, sl.cost_at_movement,
              sl.ref_table, sl.ref_id, sl.reason_code, sl.created_at, u.full_name AS created_by_name,
              COALESCE(i.invoice_number, g.grn_number, t.transfer_number, sa.adjustment_number, dn.debit_note_number) AS reference
-        FROM stock_ledger sl
+        FROM page pg
+        JOIN stock_ledger sl ON sl.ledger_id = pg.ledger_id
         JOIN products p ON p.product_id = sl.product_id
         JOIN units bu ON bu.unit_code = p.base_unit
         JOIN branches b ON b.branch_id = sl.branch_id
@@ -235,16 +252,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
         LEFT JOIN stock_transfers t ON sl.ref_table = 'stock_transfers' AND t.transfer_id = sl.ref_id
         LEFT JOIN stock_adjustments sa ON sl.ref_table = 'stock_adjustments' AND sa.adjustment_id = sl.ref_id
         LEFT JOIN vendor_debit_notes dn ON sl.ref_table = 'vendor_debit_notes' AND dn.debit_note_id = sl.ref_id
-       WHERE sl.movement_type NOT IN ('RESERVATION', 'RESERVATION_RELEASE')
-         ${branchId ? sql`AND sl.branch_id = ${branchId}` : sql``}
-         ${q.product_id ? sql`AND sl.product_id = ${uuid(q.product_id, 'product_id')}` : sql``}
-         ${q.movement_type ? sql`AND sl.movement_type = ${oneOf(q.movement_type, 'Movement type',
-           ['PURCHASE', 'SALE', 'SALE_RETURN', 'TRANSFER_OUT', 'TRANSFER_IN', 'PURCHASE_RETURN', 'WRITE_OFF',
-            'COUNT_ADJUSTMENT', 'OPENING_STOCK', 'ADJUSTMENT'] as const)}::stock_movement_type` : sql``}
-         ${from ? sql`AND sl.created_at >= ${from}::date` : sql``}
-         ${to ? sql`AND sl.created_at < (${to}::date + 1)` : sql``}
        ORDER BY sl.created_at DESC
-       LIMIT ${clampLimit(q.limit, 100, 1000)}
     `.execute(trx);
     return maskCost(rows.rows, canSeeCost(session.role, settings));
   }));
@@ -311,7 +319,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
         JOIN branches b ON b.branch_id = sa.branch_id
         LEFT JOIN users u ON u.user_id = sa.created_by
        WHERE 1=1 ${branchId ? sql`AND sa.branch_id = ${branchId}` : sql``}
-       ORDER BY sa.created_at DESC LIMIT ${clampLimit(q.limit, 100, 500)}
+       ORDER BY sa.created_at DESC LIMIT ${clampLimit(q.limit, 100, 5000)}
     `.execute(trx)).rows;
     return canSeeCost(session.role, settings) ? rows : rows.map(({ unit_cost, ...r }: any) => r);
   }));

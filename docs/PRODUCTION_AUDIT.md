@@ -343,3 +343,97 @@ the whole screen on a phone.
 * Hindi covers the navigation and core labels; most of the new screens' text is English.
 * There are no incremental migrations; upgrading an existing database needs a written migration.
 * Inter-branch transfer GST treatment (intrastate vs interstate documents) needs the CA's confirmation.
+
+---
+
+## Zero-blind-spots pass (2026-10-02)
+
+Method: everything below was found by **attacking** the running system — parallel
+requests, a 200,000-bill database, a real browser driven by keyboard, outages injected
+with a 502 — not by reading code. Each finding has a test that failed before the fix.
+
+### Defects found and fixed
+
+| # | Sev | Finding | Root cause | Fix | Test |
+|---|---|---|---|---|---|
+| 1 | P0 | Three receipts submitted together, each 60 % of a ₹13,711 balance, were **all accepted** — customer pushed to −₹10,969 | Overpayment check read the balance before taking a lock | Customer row locked `FOR UPDATE` before the balance is read | `concurrency.mjs` §7 |
+| 2 | P0 | Same race overpaid a supplier by ₹4.39 lakh | Same, vendor side | Vendor row locked before the check | `concurrency.mjs` §8 |
+| 3 | P0 | Concurrent ledger posts left a **wrong running balance** (`balance_after` of the "latest" row ≠ sum of entries) | `created_at = now()` is transaction-start time; transactions queued on the lock wrote out of that order | Ledger rows stamped with `clock_timestamp()` under the lock (migration 002) | `concurrency.mjs` §14 |
+| 4 | P0 | **Offline sales deleted** from the queue on any non-network error — an expired sign-in (401) or the server restarting (502/503) lost them | Drain kept only `status === 0` | Kept until accepted; 401/408/429/5xx retried; definite refusals moved to a visible "bill again" list; retry every minute | `ui-audit.mjs` "offline", "refused" |
+| 5 | P1 | Queued offline sale replayed at **whatever branch was selected later** | Queue stored no branch | Branch saved with the sale; replay pins `X-Branch-Id` | `ui-audit.mjs` |
+| 6 | P1 | Loyalty points: two sales for one customer at once lose one sale's points or double-spend | Absolute write from an unlocked read | Re-read under row lock before redeem/earn; returns lock too | code review + `concurrency.mjs` |
+| 7 | P1 | Double-click / retry of a sale or receipt answered with an **error** although it was recorded | Second request hit the unique key instead of finding the first | `pg_advisory_xact_lock` on the idempotency key: the retry waits and returns the original | `concurrency.mjs` §1, §6 |
+| 8 | P1 | Margin report **never finished** (>60 s) at 200k bills | Plan relied on a bad RLS row estimate → per-bill re-scan of the stock ledger | COGS via indexed `LATERAL` lookup | timed: >60 s → 0.28 s |
+| 9 | P1 | Bill list 4.5 s, movement log 9.8 s at 200k bills | Every row decorated (payments, joins) before `LIMIT` | Page chosen first, then decorated; 4 indexes | 4.5 s → 0.06 s; 9.8 s → 0.01 s |
+| 10 | P1 | **Export** gave only the rows on screen (first 100) | Exported the loaded page | Export fetches every row the filters select (cap 5,000, says so if hit) | manual |
+| 11 | P1 | "Show more" silently stopped at 300 customers / 300 vendors / 500 products | Hidden server caps | Caps raised to 5,000 | timed at scale |
+| 12 | P1 | Supabase backups impossible with the documented tool | Server is PG 17, local `pg_dump` 16 | Documented requirement (`postgresql@17`) | — |
+| 13 | P2 | A long bill was **lost on refresh** (or when leaving to create a product) | Cart only in memory | Per-user/branch autosave; "Continue this bill?" with the same idempotency key | `ui-audit.mjs` "refresh" |
+| 14 | P2 | Escape / click outside **discarded a half-filled form** (product, customer, purchase…) | Modal closed unconditionally | `guardUnsaved` on 23 form dialogs | manual |
+| 15 | P2 | Ctrl+K then fast typing dropped the first letter ("putty" → "utty") | Focus on a 20 ms timer | `autoFocus` in the same commit | `ui-audit.mjs` |
+| 16 | P2 | Supplier picker could not add a supplier — leaving the purchase entry lost its lines | No inline create | "Add new supplier" in place | manual |
+| 17 | P2 | Same product name could be created twice under two SKUs | No name check | Confirm before a same-name product | manual |
+| 18 | P3 | Production misconfiguration deployed silently | localhost fallbacks | API refuses to boot without `CORS_ORIGINS`; hosted web build fails without `NEXT_PUBLIC_API_URL` | — |
+
+### Added
+
+Undo for a removed line · quick cash buttons (Exact / ₹500 / ₹2,000…) · last rate sold to
+this customer on each bill line · **Bill again** from an old bill · **Duplicate** estimate ·
+customer page: tap-to-call, copy phone/GSTIN, **New bill** · slow-request warnings in the
+log (route only, no query strings) · versioned migrations with `npm run db:upgrade` and a
+`schema_migrations` history (production upgraded to 002 the same day).
+
+### Verified, no defect
+
+Cross-branch access by id (12 record types, 10 write actions) · `X-Branch-Id` and body
+`branch_id` manipulation · 12 role escalations · mass assignment (credit limit, price,
+points) · forged / signed-out tokens · injection and script payloads (stored as text, PDF
+still renders) · 3 MB body, broken JSON, malformed ids · numbering: 12 parallel bills →
+12 consecutive numbers · one draft finalised from 4 tabs → one bill · last stock sold
+twice at once → one sale · 3 returns against 2 units → 2 accepted · transfer received 3×
+→ once, over-receipt and self-transfer refused · void 3× → once · credit limit raced →
+held · CSV formula injection already neutralised.
+
+### Evidence (fresh database, in `npm test` order, then browsers on a production build)
+
+| Suite | Result |
+|---|---|
+| tax-properties · smoke · regression · workflows | 20 · all · all · 71 |
+| final-pass · working-day | 120 · 140 |
+| edits-and-roles (new last pass) | 56 |
+| **concurrency** (new) | 37 — and 3 repeat runs |
+| **security** (new) | 62 |
+| PDF matrix · geometry | 13 documents · 6,076 runs clean |
+| uitest · viewports (12 widths) | 90 · 35 |
+| **ui-audit** (new, browser) | 27 |
+| Scale: 3,052 products, 20,060 customers, 204,625 bills, 427,500 lines | slowest screen call 0.46 s |
+
+### Feature completeness
+
+| Module | Status | Module | Status |
+|---|---|---|---|
+| Authentication, users, roles | Complete | Purchases, purchase returns | Complete |
+| Permissions, branch isolation | Complete (attacked) | Inventory, movements, transfers | Complete |
+| Branch context (Owner / staff) | Complete | Sales, GST & non-GST billing | Complete |
+| Dashboard, analytics, reports | Complete (fast at scale) | Estimates | Complete |
+| Products, categories, brands, units, HSN/GST | Complete | Payments, credit, returns, refunds | Complete |
+| Customers + ledger, vendors + ledger | Complete | Expenses, tills | Complete |
+| PDF, printing | Complete | Audit log, settings | Complete |
+| Search, keyboard use | Complete (tested) | Import / export | Complete |
+| Offline / sync | Complete (tested with 502) | Responsive, dark mode | Complete |
+| WhatsApp | Share link complete; Business API transport not wired | Backup | Tooling complete; **not scheduled**; needs `pg_dump` 17 for Supabase |
+| Notifications | "Needs attention" panel; no separate centre | Hindi | Navigation and core labels only |
+
+### Still open (not code defects)
+
+* **Backups are not running.** Install `postgresql@17` and schedule `npm run backup`
+  (Supabase's free plan keeps none you can download).
+* Hindi coverage of newer screens; GST e-invoicing if turnover requires it; the CA's
+  answer on inter-branch transfer GST — unchanged from the previous pass.
+* Background jobs run in the API process: fine for one Railway instance, move to a queue
+  before running several.
+
+### Production status
+
+**Ready for production use** on the current deployment, with one condition the code cannot
+meet on its own: **backups must be scheduled before real trading data is entered.**

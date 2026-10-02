@@ -1438,6 +1438,9 @@ CREATE TABLE backups (
 
 CREATE INDEX idx_branch_stock_product ON branch_stock(product_id);
 CREATE INDEX idx_stock_ledger_branch_product ON stock_ledger(branch_id, product_id, created_at);
+-- The movement log reads newest first, chain-wide and per branch.
+CREATE INDEX idx_stock_ledger_created ON stock_ledger(created_at DESC);
+CREATE INDEX idx_stock_ledger_branch_created ON stock_ledger(branch_id, created_at DESC);
 CREATE INDEX idx_invoices_branch_date ON invoices(branch_id, server_received_at);
 CREATE INDEX idx_invoice_lines_invoice ON invoice_lines(invoice_id);
 CREATE INDEX idx_customers_phone ON customers(phone);
@@ -1446,17 +1449,20 @@ CREATE INDEX idx_products_name_trgm ON products USING gin (name gin_trgm_ops);  
 CREATE INDEX idx_credit_ledger_customer ON customer_credit_ledger(customer_id, created_at);
 CREATE INDEX idx_till_events_session ON till_events(session_id);
 CREATE INDEX idx_audit_log_entity ON audit_log(entity_type, entity_id);
-CREATE INDEX idx_invoices_client_txn ON invoices(client_txn_id);
 CREATE INDEX idx_stock_ledger_ref ON stock_ledger(ref_table, ref_id);
 CREATE INDEX idx_expenses_branch_status ON expenses(branch_id, status, created_at DESC);
 CREATE INDEX idx_grn_branch ON grn(branch_id, received_at DESC);
 CREATE INDEX idx_quotations_branch ON quotations(branch_id, created_at DESC);
 CREATE INDEX idx_sales_returns_branch ON sales_returns(branch_id, created_at DESC);
+-- "Has this bill had a return?" is asked for every row of the bill list.
+CREATE INDEX idx_sales_returns_invoice ON sales_returns(invoice_id);
 CREATE INDEX idx_attendance_employee_date ON attendance(employee_id, work_date DESC);
 CREATE INDEX idx_employees_branch ON employees(branch_id);
 CREATE INDEX idx_product_prices_current ON product_prices(product_id) WHERE effective_to IS NULL;
 CREATE INDEX idx_stock_conflicts_open ON stock_conflicts(branch_id, status);
 CREATE INDEX idx_users_branch_role ON users(branch_id, role);
+-- The chain-wide bill list (Owner on All branches) reads newest first.
+CREATE INDEX idx_invoices_received ON invoices(server_received_at DESC);
 CREATE INDEX idx_invoices_customer ON invoices(customer_id, server_received_at DESC) WHERE customer_id IS NOT NULL;
 CREATE INDEX idx_invoices_status_date ON invoices(status, server_received_at DESC);
 CREATE INDEX idx_invoices_number_trgm ON invoices USING gin (invoice_number gin_trgm_ops);
@@ -2585,9 +2591,14 @@ BEGIN
         RETURN;
     END IF;
 
+    -- clock_timestamp(), not now(): now() is when the TRANSACTION began, and
+    -- transactions that queued on the lock above began in a different order from
+    -- the order they write in. "The latest entry" (by created_at) would then not
+    -- be the one holding the true running balance. Stamped here, under the lock,
+    -- created_at order IS posting order.
     INSERT INTO customer_credit_ledger (customer_id, branch_id, entry_type, amount,
-                                        balance_after, ref_table, ref_id)
-    VALUES (p_customer_id, p_branch_id, p_entry_type, p_amount, v_next, p_ref_table, p_ref_id)
+                                        balance_after, ref_table, ref_id, created_at)
+    VALUES (p_customer_id, p_branch_id, p_entry_type, p_amount, v_next, p_ref_table, p_ref_id, clock_timestamp())
     RETURNING customer_credit_ledger.entry_id INTO v_id;
 
     -- 6.1.1 — the offline cache is refreshed in the same breath, so a till that
@@ -2617,13 +2628,32 @@ BEGIN
      ORDER BY l.created_at DESC, l.entry_id DESC LIMIT 1;
     v_next := round(COALESCE(v_prior, 0) + p_amount, 2);
 
-    INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, balance_after, ref_table, ref_id)
-    VALUES (p_vendor_id, p_branch_id, p_entry_type, p_amount, v_next, p_ref_table, p_ref_id)
+    -- clock_timestamp(): stamped under the lock, so created_at order is posting
+    -- order (see customer_credit_post).
+    INSERT INTO vendor_ledger (vendor_id, branch_id, entry_type, amount, balance_after, ref_table, ref_id, created_at)
+    VALUES (p_vendor_id, p_branch_id, p_entry_type, p_amount, v_next, p_ref_table, p_ref_id, clock_timestamp())
     RETURNING vendor_ledger.entry_id INTO v_id;
 
     RETURN QUERY SELECT v_id, v_next;
 END;
 $$;
+
+-- ============================================================================
+-- MIGRATION HISTORY
+-- ============================================================================
+-- This file is always the COMPLETE current schema, for a fresh install. A
+-- database that already holds data is upgraded with db/migrations/NNN_*.sql
+-- instead (npm run db:upgrade), and this table records which of those it has
+-- had. A fresh install already contains everything, so every migration that
+-- exists today is recorded as applied. Add the new version here whenever a
+-- migration file is added.
+CREATE TABLE schema_migrations (
+    version     TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES
+    ('001_baseline'),
+    ('002_concurrency_and_performance');
 
 -- ============================================================================
 -- APPLICATION ROLE & GRANTS
@@ -2660,6 +2690,8 @@ REVOKE DELETE, UPDATE ON audit_log, stock_ledger, login_attempts FROM erp_app;
 REVOKE INSERT, UPDATE, DELETE ON backups FROM erp_app;
 -- Money vouchers are corrected by a reversing entry, never edited or removed.
 REVOKE UPDATE, DELETE ON customer_payments, vendor_payments, stock_adjustments, payment_cancellations FROM erp_app;
+-- The migration history is written by the upgrade script (as the owner), never by the app.
+REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM erp_app;
 -- The app role must not be able to reach auth message bodies by any route.
 REVOKE ALL ON auth_message_outbox FROM erp_app;
 REVOKE ALL ON override_approvals FROM erp_app;

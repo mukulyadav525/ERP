@@ -360,21 +360,33 @@ export function DataTable<T>({ columns, rows, onRowClick, footer, emptyText, row
 }
 
 // ── Modal ───────────────────────────────────────────────────────────────────
-export function Modal({ open, onClose, title, children, footer, wide }: {
+export function Modal({ open, onClose, title, children, footer, wide, guardUnsaved }: {
   open: boolean; onClose: () => void; title: string;
   children: React.ReactNode; footer?: React.ReactNode; wide?: boolean;
+  /** A form: Escape, the × and a click outside ask before throwing away what was typed. */
+  guardUnsaved?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Anything typed or picked inside the dialog since it opened.
+  const dirty = useRef(false);
+  const guardRef = useRef(guardUnsaved); guardRef.current = guardUnsaved;
   // Read through a ref: parents usually pass an inline arrow, and re-running the
   // effect on every render would steal focus back to the first field while the
-  // person is typing in another one.
-  const closeRef = useRef(onClose); closeRef.current = onClose;
+  // person is typing in another one. The explicit Cancel button calls onClose
+  // directly and is not asked — only the accidental ways out are.
+  const closeRef = useRef(onClose);
+  closeRef.current = () => {
+    if (guardRef.current && dirty.current
+        && !window.confirm('Close without saving? What you entered here will be lost.')) return;
+    onClose();
+  };
 
   // Escape closes, Tab stays inside the dialog, the page behind does not scroll,
   // and focus returns to whatever opened the dialog when it closes.
   useEffect(() => {
     if (!open) return;
+    dirty.current = false;
     const opener = document.activeElement as HTMLElement | null;
     const focusable = () => Array.from(ref.current?.querySelectorAll<HTMLElement>(
       'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
@@ -407,11 +419,12 @@ export function Modal({ open, onClose, title, children, footer, wide }: {
 
   if (!open) return null;
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}>
+    <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) closeRef.current(); }}>
+      <div className={`modal${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} ref={ref}
+           onInput={() => { dirty.current = true; }} onChange={() => { dirty.current = true; }}>
         <div className="modal-head">
           <h3 id={titleId} style={{ flex: 1 }}>{title}</h3>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+          <button className="icon-btn" onClick={() => closeRef.current()} aria-label="Close">×</button>
         </div>
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}

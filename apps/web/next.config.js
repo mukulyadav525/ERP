@@ -1,3 +1,12 @@
+// A production build without the API address bakes "http://localhost:4000" into
+// every page, and every browser then fails to reach the server. On a hosting
+// platform (Railway, CI) that stops the build; locally it is a loud warning.
+if (process.env.NODE_ENV === 'production' && !process.env.NEXT_PUBLIC_API_URL) {
+  const message = 'NEXT_PUBLIC_API_URL is not set: this build will call http://localhost:4000. Set it to the API address as the browser sees it.';
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.CI || process.env.VERCEL) throw new Error(message);
+  console.warn(`\n⚠  ${message}\n`);
+}
+
 const withPWA = require('next-pwa')({
   dest: 'public',
   register: true,

@@ -62,7 +62,7 @@ export default async function expensesRoutes(app: FastifyInstance) {
          ${from ? sql`AND e.expense_date >= ${from}::date` : sql``}
          ${to ? sql`AND e.expense_date <= ${to}::date` : sql``}
          ${q.q ? sql`AND (e.description ILIKE ${'%' + q.q.trim() + '%'} OR e.payee ILIKE ${'%' + q.q.trim() + '%'} OR e.reference ILIKE ${'%' + q.q.trim() + '%'})` : sql``}
-       ORDER BY e.expense_date DESC, e.created_at DESC LIMIT ${clampLimit(q.limit, 100, 500)}
+       ORDER BY e.expense_date DESC, e.created_at DESC LIMIT ${clampLimit(q.limit, 100, 5000)}
     `.execute(trx)).rows;
   }));
 

@@ -18,7 +18,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import useSWR, { useSWRConfig } from 'swr';
 import {
-  apiGet, apiPost, apiPut, apiDelete, downloadFile, printFile, whatsappShareUrl, idempotencyKey,
+  apiGet, apiPost, apiPostAt, getActiveBranchHeader, apiPut, apiDelete, downloadFile, printFile, whatsappShareUrl, idempotencyKey,
   fetcher, inr, num, withBranch, formatDateTime, formatDate, qtyWithUnit, ApiError,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
@@ -57,6 +57,62 @@ interface TillSession {
 }
 
 const OFFLINE_QUEUE_KEY = 'erp_offline_bills';
+const OFFLINE_REFUSED_KEY = 'erp_offline_refused';
+const QUEUE_EVENT = 'erp-offline-queue';
+
+// ── Offline sales queue ──────────────────────────────────────────────────────
+// A sale rung up while the connection is down is kept in this browser until the
+// server has ACCEPTED it. It is never dropped because a retry failed: an expired
+// sign-in, a server restarting mid-deploy (502/503) or a rate limit are all
+// "try again later", not "this sale does not exist". Only a definite refusal
+// (e.g. the customer was deactivated) moves it to a list the cashier is shown,
+// because the goods have already left the shop and somebody has to re-bill it.
+function readList(key: string): any[] {
+  try { const v = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function writeList(key: string, list: any[]) {
+  try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* storage full or blocked */ }
+  window.dispatchEvent(new Event(QUEUE_EVENT));
+}
+const isRetryable = (status: number) => status === 0 || status === 401 || status === 408 || status === 429 || status >= 500;
+let draining = false;
+async function drainOfflineQueue(): Promise<{ synced: number; refused: number }> {
+  if (draining) return { synced: 0, refused: 0 };
+  draining = true;
+  try {
+    const list = readList(OFFLINE_QUEUE_KEY);
+    if (!list.length) return { synced: 0, refused: 0 };
+    const kept: any[] = [];
+    const refused = readList(OFFLINE_REFUSED_KEY);
+    let synced = 0, newlyRefused = 0;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      const { _branch, _summary, _queued_at, ...body } = item;
+      try {
+        await apiPostAt('/api/billing/invoices', body, _branch ?? null);
+        synced++;
+      } catch (err: any) {
+        const status = Number(err?.status ?? 0);
+        if (isRetryable(status)) {
+          kept.push(item);
+          // Still offline, or signed out: the rest cannot succeed now either.
+          if (status === 0 || status === 401) { kept.push(...list.slice(i + 1)); break; }
+        } else {
+          refused.push({ ...item, _error: String(err?.message ?? 'Refused'), _refused_at: new Date().toISOString() });
+          newlyRefused++;
+        }
+      }
+    }
+    writeList(OFFLINE_QUEUE_KEY, kept);
+    if (newlyRefused) writeList(OFFLINE_REFUSED_KEY, refused);
+    return { synced, refused: newlyRefused };
+  } finally { draining = false; }
+}
+
+// ── The bill in progress survives a refresh ─────────────────────────────────
+// Kept per user and per branch. Only the CART is saved — never a finalised sale:
+// it is cleared the moment a bill is finalised or queued offline.
+const wipKey = (userId?: string | null, branchId?: string | null) => `erp_pos_wip:${userId ?? 'anon'}:${branchId ?? 'home'}`;
 const EMPTY_DOC: DocFields = { order_no: '', challan_no: '', challan_date: '', vehicle_no: '', due_date: '', place_of_delivery: '', notes: '' };
 const METHODS: Array<[string, string]> = [
   ['CASH', 'Cash'], ['UPI', 'UPI'], ['CARD', 'Card'], ['BANK_TRANSFER', 'Bank transfer'],
@@ -110,11 +166,21 @@ function BillingScreen() {
   const [tab, setTab] = useState<BillingTab>(initialTab);
   useEffect(() => { setTab(initialTab); }, [initialTab]);
   const [offlineCount, setOfflineCount] = useState(0);
+  const [refused, setRefused] = useState<any[]>([]);
 
+  // The banner follows the queue live: the drain, another tab, or a refusal.
   useEffect(() => {
-    try { setOfflineCount(JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]').length); }
-    catch { setOfflineCount(0); }
+    const read = () => { setOfflineCount(readList(OFFLINE_QUEUE_KEY).length); setRefused(readList(OFFLINE_REFUSED_KEY)); };
+    read();
+    window.addEventListener(QUEUE_EVENT, read);
+    window.addEventListener('storage', read);
+    return () => { window.removeEventListener(QUEUE_EVENT, read); window.removeEventListener('storage', read); };
   }, [tab]);
+  function dismissRefused(i: number) {
+    if (!window.confirm('Remove this from the list? Only do this once the sale has been billed again (or was never needed).')) return;
+    const next = refused.filter((_, j) => j !== i);
+    writeList(OFFLINE_REFUSED_KEY, next);
+  }
 
   const { data: conflicts } = useSWR<any[]>(
     can('view_billing') ? withBranch('/api/billing/stock-conflicts', activeBranchId) : null, fetcher);
@@ -129,6 +195,28 @@ function BillingScreen() {
           <Alert tone="warning" title={`${offlineCount} sale(s) waiting to sync`}>
             These were billed while the connection was down. They upload automatically when the
             connection returns — each carries its own reference, so nothing is billed twice.
+            <div style={{ marginTop: 8 }}>
+              <Button size="sm" onClick={() => void drainOfflineQueue()}>Try uploading now</Button>
+            </div>
+          </Alert>
+        </div>
+      )}
+      {refused.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <Alert tone="critical" title={`${refused.length} offline sale(s) were refused — bill them again`}>
+            The goods went out while the connection was down, but the server would not accept these
+            bills. Nothing was recorded for them. Make each bill again, then remove it from this list.
+            <div className="stack" style={{ marginTop: 8, gap: 6 }}>
+              {refused.map((r, i) => (
+                <div key={r.client_txn_id ?? i} className="row tight small" style={{ alignItems: 'center' }}>
+                  <span style={{ flex: 1 }}>
+                    <b>{r._summary ?? `${(r.lines ?? []).length} item(s)`}</b>
+                    {r._queued_at ? ` · rung up ${formatDateTime(r._queued_at)}` : ''} — {r._error}
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={() => dismissRefused(i)}>Billed again — remove</Button>
+                </div>
+              ))}
+            </div>
           </Alert>
         </div>
       )}
@@ -182,8 +270,26 @@ function PosTab() {
   // One idempotency key per attempt at a direct sale: a double click, or a retry
   // after a dropped connection, cannot bill the customer twice.
   const saleKey = useRef<string>(idempotencyKey());
+  const inFlight = useRef(false);
+
+  // ── Autosave of the bill being made ───────────────────────────────────────
+  const wip = wipKey(user?.user_id, activeBranchId);
+  const [restorable, setRestorable] = useState<any | null>(null);
+  const hadItems = useRef(false);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(wip) || 'null');
+      setRestorable(saved?.cart?.length ? saved : null);
+    } catch { setRestorable(null); }
+    hadItems.current = false;
+  }, [wip]);
 
   const { data: settings } = useSWR<any>('/api/admin/settings/effective', fetcher);
+  // What each item on the bill was last sold to THIS customer at (regulars expect the same rate).
+  const cartIds = useMemo(() => [...new Set(cart.map((l) => l.product_id))].sort().join(','), [cart]);
+  const { data: lastRates } = useSWR<any[]>(
+    customer && cartIds ? `/api/billing/last-rates?customer_id=${customer.customer_id}&product_ids=${cartIds}` : null, fetcher);
+  const lastRateOf = (productId: string) => lastRates?.find((r) => r.product_id === productId);
   const { data: tills, mutate: refreshTills } = useSWR<TillSession[]>(
     can('manage_till') ? withBranch('/api/billing/till-sessions?status=OPEN&mine=true', activeBranchId) : null, fetcher);
   const openTill = tills?.[0];
@@ -218,7 +324,46 @@ function PosTab() {
 
   const focusSearch = useCallback(() => { setTimeout(() => scanRef.current?.focus(), 0); }, []);
 
+  // Saved on every change while items are on the bill. Not while reviewing: that
+  // bill is already a server draft. Emptying the cart by hand forgets it.
+  useEffect(() => {
+    if (restorable) return;   // the cashier has not yet said what to do with the saved one
+    try {
+      if (cart.length && !reviewing) {
+        hadItems.current = true;
+        localStorage.setItem(wip, JSON.stringify({
+          cart, customer, invoiceType, doc, payments, payment_touched: paymentTouched.current,
+          sale_key: saleKey.current, saved_at: new Date().toISOString(),
+        }));
+      } else if (!cart.length && hadItems.current) {
+        hadItems.current = false;
+        localStorage.removeItem(wip);
+      }
+    } catch { /* storage full or blocked — the bill still works, it just is not saved */ }
+  }, [cart, customer, invoiceType, doc, payments, reviewing, wip, restorable]);
+
+  function restoreBill() {
+    const s = restorable;
+    if (!s) return;
+    setCart(s.cart ?? []); setCustomer(s.customer ?? null); setInvoiceType(s.invoice_type ?? s.invoiceType ?? 'GST');
+    setDoc({ ...EMPTY_DOC, ...(s.doc ?? {}) });
+    setPayments(s.payments?.length ? s.payments : [{ method: 'CASH', amount: '' }]);
+    paymentTouched.current = Boolean(s.payment_touched);
+    // The SAME key: if that bill was in fact sent before the page went away, sending
+    // it again returns the bill that was made instead of billing twice.
+    if (s.sale_key) saleKey.current = s.sale_key;
+    setRestorable(null);
+    focusSearch();
+  }
+  function forgetSavedBill() {
+    try { localStorage.removeItem(wip); } catch { /* ignore */ }
+    setRestorable(null);
+    focusSearch();
+  }
+
   function clearBill() {
+    try { localStorage.removeItem(wip); } catch { /* storage blocked */ }
+    hadItems.current = false;
     setCart([]); setCustomer(null); setInvoiceType('GST'); setDoc(EMPTY_DOC);
     setPayments([{ method: 'CASH', amount: '' }]); setCashReceived(''); paymentTouched.current = false;
     setApprovals({}); setDraft(null); setReviewing(false); setUnknownCode(null);
@@ -270,8 +415,21 @@ function PosTab() {
     setCart((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   }
   function removeLine(key: string) {
+    const index = cart.findIndex((l) => l.key === key);
+    const removed = cart[index];
     setCart((prev) => prev.filter((l) => l.key !== key));
     focusSearch();
+    // A bin icon next to a quantity box is easy to hit by mistake on a long bill.
+    if (removed) {
+      toast.toast(`Removed ${removed.name}`, {
+        action: { label: 'Undo', onClick: () => setCart((prev) => {
+          if (prev.some((l) => l.key === removed.key)) return prev;
+          const next = [...prev];
+          next.splice(Math.min(index, next.length), 0, removed);
+          return next;
+        }) },
+      });
+    }
   }
 
   function changeInvoiceType(type: 'GST' | 'NON_GST') {
@@ -426,6 +584,64 @@ function PosTab() {
     })();
   }, [router.query.draft]);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  // "Bill again" from an old bill arrives as ?repeat=<invoice_id>: the same items,
+  // quantities and customer, at TODAY's prices — the old bill is not touched.
+  useEffect(() => {
+    const id = router.query.repeat;
+    if (typeof id !== 'string' || !id) return;
+    void (async () => {
+      try {
+        const inv = await apiGet<any>(`/api/billing/invoices/${id}`);
+        const ids = [...new Set((inv.lines ?? []).map((l: any) => l.product_id))];
+        const products = ids.length ? await apiGet<ProductHit[]>(`/api/catalog/products?ids=${ids.join(',')}&status=active&limit=200`) : [];
+        const skipped: string[] = [];
+        const lines: CartLine[] = [];
+        (inv.lines ?? []).forEach((l: any, i: number) => {
+          const p = products.find((x) => x.product_id === l.product_id);
+          const unit = p?.units.find((u) => u.product_unit_id === l.product_unit_id) ?? (p ? defaultUnit(p) : undefined);
+          const rate = Number(p?.selling_price ?? 0);
+          if (!p || !unit || !rate) { skipped.push(l.product_name); return; }
+          lines.push({
+            key: `${p.product_id}:${unit.product_unit_id}:repeat${i}`,
+            product_id: p.product_id, name: p.name, sku: p.sku, base_unit_label: p.base_unit_label,
+            units: p.units, unit_id: unit.product_unit_id, qty: String(Number(l.qty_in_sale_unit)),
+            rate_base: rate, catalog_rate: rate,
+            gst_rate: Number(p.gst_rate_pct ?? 0), price_type: p.default_price_type, discount: '',
+            available: Number(p.available_qty ?? 0),
+          });
+        });
+        clearBill();
+        setCart(lines);
+        setInvoiceType(inv.invoice_type === 'NON_GST' ? 'NON_GST' : 'GST');
+        if (inv.customer_id) {
+          setCustomer({ customer_id: inv.customer_id, name: inv.customer_name, phone: inv.customer_phone ?? '',
+            whatsapp: inv.customer_whatsapp, credit_allowed: inv.credit_allowed, loyalty_points_balance: inv.loyalty_points_balance });
+        }
+        toast.toast(`${lines.length} item(s) from ${inv.invoice_number}`, { tone: 'info',
+          message: skipped.length ? `At today's prices. Not available any more: ${skipped.join(', ')}.` : "At today's prices — check the quantities and take payment." });
+      } catch (err) { toast.error(err); }
+      finally { void router.replace('/billing', undefined, { shallow: true }); focusSearch(); }
+    })();
+  }, [router.query.repeat]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "New bill" from a customer's page arrives as ?customer=<id>.
+  useEffect(() => {
+    const id = router.query.customer;
+    if (typeof id !== 'string' || !id) return;
+    void (async () => {
+      try {
+        const c = await apiGet<any>(`/api/customers/${id}`);
+        if (c?.is_active) {
+          setCustomer({ customer_id: c.customer_id, name: c.name, phone: c.phone ?? '', whatsapp: c.whatsapp,
+            gstin: c.gstin, state_code: c.state_code, credit_allowed: c.credit_allowed, credit_limit: c.credit_limit,
+            balance_owed: c.balance_owed, loyalty_points_balance: c.loyalty_points_balance });
+          if (c.gstin) setInvoiceType('GST');
+        }
+      } catch (err) { toast.error(err); }
+      finally { void router.replace('/billing', undefined, { shallow: true }); focusSearch(); }
+    })();
+  }, [router.query.customer]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   async function discardDraft() {
     if (!draft?.invoice_id) { clearBill(); return; }
     if (!window.confirm('Discard this draft bill? Nothing has been billed yet.')) return;
@@ -473,8 +689,9 @@ function PosTab() {
 
   /** Finalises the reviewed draft. Lines are NOT re-sent: the server bills what it stored. */
   async function finalizeDraft() {
-    if (!draft?.invoice_id || !checkPayments()) return;
+    if (inFlight.current || !draft?.invoice_id || !checkPayments()) return;
     setBusy(true);
+    inFlight.current = true;
     try {
       const invoice = await apiPost<any>(`/api/billing/drafts/${draft.invoice_id}/finalize`, {
         till_session_id: openTill?.session_id ?? undefined,
@@ -482,11 +699,14 @@ function PosTab() {
         credit_approval_id: approvals.CREDIT_LIMIT, payments: paymentBody(),
       });
       onSaleDone(invoice);
-    } catch (err: any) { onSaleError(err); } finally { setBusy(false); }
+    } catch (err: any) { onSaleError(err); } finally { setBusy(false); inFlight.current = false; }
   }
 
   /** The fast path for a simple counter sale with nothing to review. */
   async function completeSale() {
+    // A ref, not `busy`: state updates land on the next render, so two clicks in
+    // the same frame would both get through a `busy` check.
+    if (inFlight.current) return;
     const problem = validateCart();
     if (problem) { toast.error(new Error(problem)); return; }
     if (!checkPayments()) return;
@@ -499,6 +719,7 @@ function PosTab() {
       client_txn_id: saleKey.current,
     };
     setBusy(true);
+    inFlight.current = true;
     try {
       onSaleDone(await apiPost<any>('/api/billing/invoices', body));
     } catch (err: any) {
@@ -506,38 +727,34 @@ function PosTab() {
       // id and replayed; the server ignores it if the first attempt did land.
       if (err?.status === 0) {
         try {
-          const list = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
-          list.push({ ...body, device_created_at: new Date().toISOString() });
-          localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(list));
+          const list = readList(OFFLINE_QUEUE_KEY);
+          list.push({ ...body, device_created_at: new Date().toISOString(),
+            // Where and what, so the replay lands at the right branch and a refusal can be described.
+            _branch: getActiveBranchHeader(), _queued_at: new Date().toISOString(),
+            _summary: `${customer?.name ?? 'Walk-in'} · ${cart.length} item(s) · ${inr(payable, { decimals: true })}` });
+          writeList(OFFLINE_QUEUE_KEY, list);
           clearBill();
           toast.toast('Saved offline', { tone: 'info',
             message: 'The connection is down. This sale is queued and uploads when you are back online. Print the bill after it syncs.' });
         } catch { toast.error(err); }
       } else onSaleError(err);
-    } finally { setBusy(false); }
+    } finally { setBusy(false); inFlight.current = false; }
   }
 
-  // Drain the offline queue whenever the browser reports it is back online.
+  // Drain the offline queue when the browser reports it is back online, on
+  // arrival, and every minute while anything is waiting (a server that was
+  // restarting does not fire an 'online' event when it comes back).
   useEffect(() => {
     async function drain() {
-      let list: any[] = [];
-      try { list = JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]'); } catch { return; }
-      if (!list.length) return;
-      const remaining: any[] = [];
-      let failed = 0;
-      for (const item of list) {
-        try { await apiPost('/api/billing/invoices', item); }
-        catch (err: any) { if (err?.status === 0) remaining.push(item); else failed++; }
-      }
-      localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(remaining));
-      const synced = list.length - remaining.length - failed;
-      if (synced > 0) toast.success(`${synced} offline sale(s) synced`);
-      if (failed > 0) toast.error(new Error(`${failed} offline sale(s) were refused by the server — check stock conflicts.`));
+      const { synced, refused } = await drainOfflineQueue();
+      if (synced > 0) { toast.success(`${synced} offline sale(s) uploaded`); refreshLists(); }
+      if (refused > 0) toast.error(new Error(`${refused} offline sale(s) were refused by the server. They are listed at the top of Billing — bill them again.`));
     }
     window.addEventListener('online', drain);
     void drain();
-    return () => window.removeEventListener('online', drain);
-  }, [toast]);
+    const timer = window.setInterval(() => { if (readList(OFFLINE_QUEUE_KEY).length) void drain(); }, 60_000);
+    return () => { window.removeEventListener('online', drain); window.clearInterval(timer); };
+  }, [toast, refreshLists]);
 
   const paymentEditor = (
     <PaymentEditor payments={payments} payable={payable} cashReceived={cashReceived}
@@ -561,6 +778,18 @@ function PosTab() {
 
   return (
     <>
+      {restorable && (
+        <div style={{ marginBottom: 14 }}>
+          <Alert tone="info" title="Continue the bill you were making?">
+            {restorable.cart.length} item(s){restorable.customer?.name ? ` for ${restorable.customer.name}` : ''}, last changed {formatDateTime(restorable.saved_at)}.
+            Nothing was billed — this is the unfinished bill from before the page was closed or refreshed.
+            <div className="row tight" style={{ marginTop: 8 }}>
+              <Button size="sm" variant="primary" onClick={restoreBill}>Continue this bill</Button>
+              <Button size="sm" onClick={forgetSavedBill}>Start a new bill</Button>
+            </div>
+          </Alert>
+        </div>
+      )}
       {can('manage_till') && !openTill && (
         <div style={{ marginBottom: 14 }}>
           <Alert tone="warning" title="No till is open">
@@ -641,6 +870,11 @@ function PosTab() {
                                 : short
                                   ? <span style={{ color: 'var(--status-critical)' }}>only {qtyWithUnit(l.available, l.base_unit_label)} in stock</span>
                                   : <span>{qtyWithUnit(l.available, l.base_unit_label)} in stock</span>}
+                              {lastRateOf(l.product_id) && (
+                                <span title={`Bill ${lastRateOf(l.product_id).invoice_number}`}>
+                                  {' '}· last sold to {customer?.name} at {inr(lastRateOf(l.product_id).rate_per_sale_unit, { decimals: true })}/{lastRateOf(l.product_id).unit_label ?? ''} on {formatDate(lastRateOf(l.product_id).sold_at)}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td data-label="Unit">
@@ -783,6 +1017,8 @@ function PaymentEditor({ payments, payable, onChange, cashReceived, setCashRecei
   const balance = round2(payable - paid);
   const set = (i: number, patch: Partial<Payment>) => onChange(payments.map((p, j) => (j === i ? { ...p, ...patch } : p)));
   const hasCash = payments.some((p) => p.method === 'CASH' && toNum(p.amount) > 0);
+  const cashDue = Math.ceil(payments.filter((p) => p.method === 'CASH').reduce((s, p) => s + toNum(p.amount), 0));
+  const quickCash = cashSuggestions(cashDue);
   return (
     <div className="stack">
       {payments.map((p, i) => (
@@ -825,8 +1061,30 @@ function PaymentEditor({ payments, payable, onChange, cashReceived, setCashRecei
           )}
         </div>
       )}
+      {hasCash && quickCash.length > 0 && (
+        <div className="row tight" style={{ flexWrap: 'wrap', gap: 6 }} aria-label="Cash handed over">
+          {quickCash.map((v, i) => (
+            <button key={v} type="button" className="pill" onClick={() => setCashReceived(String(v))}>
+              {i === 0 && v === cashDue ? 'Exact' : inr(v)}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/** The notes a customer is likely to hand over for a cash amount: exact, and the
+ *  next round 50 / 100 / 500 / 2000 above it. */
+function cashSuggestions(amount: number): number[] {
+  if (!(amount > 0)) return [];
+  const exact = Math.ceil(amount);
+  const out = new Set<number>([exact]);
+  for (const step of [50, 100, 500, 2000]) {
+    const v = Math.ceil(amount / step) * step;
+    if (v > exact) out.add(v);
+  }
+  return [...out].sort((a, b) => a - b).slice(0, 5);
 }
 
 // ── Review (server figures) ──────────────────────────────────────────────────
@@ -1167,6 +1425,9 @@ function InvoicesTab() {
           )}
           {can('process_return') && selected?.status === 'FINAL' && (
             <Link className="btn" href={`/returns?invoice=${selected.invoice_id}`}>Return items</Link>
+          )}
+          {can('create_invoice') && selected && selected.status !== 'DRAFT' && (
+            <Link className="btn" href={`/billing?repeat=${selected.invoice_id}`} title="A new bill with the same items, at today's prices">Bill again</Link>
           )}
           <div className="spacer" />
           {shareUrl && <Button onClick={() => window.open(shareUrl, '_blank', 'noopener')}><Icon name="whatsapp" size={14} /> WhatsApp</Button>}

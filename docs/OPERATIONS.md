@@ -152,6 +152,11 @@ there is exactly one schema file and one seed file.
 
 ## 4. Backups
 
+> **`pg_dump` must be at least the server's major version.** Supabase runs PostgreSQL
+> 17; the Homebrew `pg_dump` 16 refuses to dump it ("server version mismatch"). On a
+> Mac: `brew install postgresql@17` and put `/opt/homebrew/opt/postgresql@17/bin` first
+> on `PATH` before running the backup. Check with `pg_dump --version`.
+
 ```bash
 npm run backup
 ```
@@ -225,10 +230,23 @@ Admin → Compliance warns when no restore test has passed in 90 days.
 
 ## 7. Upgrades
 
-This release ships the schema as a single file for a fresh install. There are no
-incremental migration files yet, so **upgrading an existing production database to a
-later schema needs a planned, written migration** (take a backup and a restore test
-first). For a new installation, `db/schema.sql` is always the complete, current schema.
+`db/schema.sql` is always the complete, current schema for a **fresh** install. A
+database that already holds data is upgraded with the numbered files in
+`db/migrations/`, each applied once and recorded in `schema_migrations`:
+
+```bash
+npm run backup                      # first — see §4
+npm run db:upgrade -- --dry-run     # lists what would be applied
+npm run db:upgrade                  # applies it, one transaction per file
+```
+
+`MIGRATION_DATABASE_URL` is the owner connection (for Supabase, the pooler URL with
+`?sslmode=no-verify`). A failed migration is rolled back and stops the run; nothing is
+left half-applied. Deploy the new code **after** the upgrade has run.
+
+When you change the schema: edit `db/schema.sql`, add `db/migrations/NNN_name.sql`
+that makes the same change idempotently (`IF NOT EXISTS`, `CREATE OR REPLACE`), and add
+its version to the `INSERT INTO schema_migrations` list in `db/schema.sql`.
 
 ---
 
@@ -249,6 +267,12 @@ WhatsApp is optional and never automatic by default:
 ---
 
 ## 9. Health checks and logs
+
+* A request slower than `SLOW_REQUEST_MS` (default 1500) is logged as a `slow request`
+  warning with its route pattern — never the full URL, so search terms stay out of logs.
+* In production the API refuses to start without `CORS_ORIGINS`, and a hosted web build
+  (Railway / CI) fails without `NEXT_PUBLIC_API_URL`, rather than deploying something
+  that cannot reach its API.
 
 * `GET /health` — liveness plus a database round-trip.
 * The API logs JSON lines (pino) to stdout; set `LOG_LEVEL=info` in production.

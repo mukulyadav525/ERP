@@ -119,7 +119,7 @@ function NewStaffModal({ open, onClose, onCreated }: { open: boolean; onClose: (
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Add a staff member"
+    <Modal guardUnsaved open={open} onClose={onClose} title="Add a staff member"
       footer={<><Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" disabled={!form.full_name || !form.phone} onClick={() => void submit()}>Add</Button></>}>
       <div className="stack">
@@ -424,7 +424,7 @@ function EditStaffModal({ staff, onClose, onSaved }: { staff: any | null; onClos
   }
 
   return (
-    <Modal open={Boolean(staff)} onClose={onClose} title={staff ? `Edit ${staff.full_name}` : ''}
+    <Modal guardUnsaved open={Boolean(staff)} onClose={onClose} title={staff ? `Edit ${staff.full_name}` : ''}
       footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={() => void save()}>Save</Button></>}>
       {staff && (
         <div className="stack">

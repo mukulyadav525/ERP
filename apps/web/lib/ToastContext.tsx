@@ -1,10 +1,11 @@
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
 
 type Tone = 'good' | 'critical' | 'info';
-interface Toast { id: number; tone: Tone; title: string; message?: string; }
+interface ToastAction { label: string; onClick: () => void }
+interface Toast { id: number; tone: Tone; title: string; message?: string; action?: ToastAction }
 
 interface ToastCtx {
-  toast: (title: string, opts?: { message?: string; tone?: Tone }) => void;
+  toast: (title: string, opts?: { message?: string; tone?: Tone; action?: ToastAction }) => void;
   success: (title: string, message?: string) => void;
   error: (err: unknown, fallback?: string) => void;
 }
@@ -19,11 +20,12 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setToasts((list) => list.filter((t) => t.id !== id));
   }, []);
 
-  const toast = useCallback((title: string, opts: { message?: string; tone?: Tone } = {}) => {
-    const t: Toast = { id: nextId++, tone: opts.tone ?? 'info', title, message: opts.message };
+  const toast = useCallback((title: string, opts: { message?: string; tone?: Tone; action?: ToastAction } = {}) => {
+    const t: Toast = { id: nextId++, tone: opts.tone ?? 'info', title, message: opts.message, action: opts.action };
     setToasts((list) => [...list, t]);
-    // Errors stay on screen longer, because they usually need reading twice.
-    setTimeout(() => dismiss(t.id), t.tone === 'critical' ? 7000 : 4000);
+    // Errors stay on screen longer, because they usually need reading twice; one
+    // with an action (Undo) long enough to reach for it.
+    setTimeout(() => dismiss(t.id), t.tone === 'critical' ? 7000 : t.action ? 8000 : 4000);
   }, [dismiss]);
 
   const success = useCallback((title: string, message?: string) => {
@@ -50,6 +52,9 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               <b>{t.title}</b>
               {t.message && <span className="muted small">{t.message}</span>}
             </div>
+            {t.action && (
+              <button className="btn sm" onClick={() => { t.action!.onClick(); dismiss(t.id); }}>{t.action.label}</button>
+            )}
             <button className="close" onClick={() => dismiss(t.id)} aria-label="Dismiss">×</button>
           </div>
         ))}

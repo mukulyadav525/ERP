@@ -23,6 +23,11 @@ it says otherwise.
   choose **KG** and enter **0.3**. The stock taken is worked out for you.
 * Change the quantity, the rate per unit, or give a discount in rupees on the line.
   A discount above your limit needs a manager's PIN before the bill can be finished.
+* Removed a line by mistake? Press **Undo** in the message that appears.
+* With a regular customer on the bill, each item shows what it was **last sold to them
+  at**, so their usual rate is in front of you.
+* The bill you are making is saved as you go. If the page is refreshed or closed, or you
+  leave to create a product, Billing offers **Continue this bill** when you come back.
 * **Customer:** leave empty for a walk-in. Type a name, phone or GSTIN to find a customer;
   if they are new, choose **Add new customer** — you do not leave the bill.
 * **GST invoice / Non-GST** is chosen at the top of the bill panel.
@@ -36,7 +41,8 @@ it says otherwise.
   finished when the payments add up to the total exactly.
 * For **Bank transfer**, the UTR reference is required. For UPI and card it is optional.
 * **Credit (on account)** is only possible for a customer who has a credit limit.
-* **Cash received** works out the change to give back.
+* **Cash received** works out the change to give back — tap **Exact** or the note the
+  customer handed over (₹500, ₹2,000…) instead of typing it.
 
 ## Finishing
 
@@ -50,6 +56,13 @@ it says otherwise.
   with the bill details for you to send; it does not send anything by itself and cannot
   attach the PDF).
 
+## Repeat customers
+
+* **Bill again** on any old bill (Billing → Invoices) starts a new bill with the same
+  items and customer at today's prices.
+* **New bill** on a customer's page starts a bill with that customer already chosen.
+* **Duplicate** on an estimate makes a new estimate from it.
+
 ## Drafts and estimates
 
 * A reviewed bill that was not finalised stays under **Drafts**; **Resume** carries on.
@@ -60,8 +73,13 @@ it says otherwise.
 
 Keep billing. A bill finished while the connection is down is saved on this computer and
 uploads by itself when the connection returns — a yellow notice shows how many are
-waiting. Each carries its own reference, so nothing is billed twice. Print those bills
-after they have synced.
+waiting (**Try uploading now** sends them at once). Each carries its own reference, so
+nothing is billed twice, and it is kept until the server has accepted it. Print those
+bills after they have synced.
+
+If the server **refuses** one (for example, the customer was deactivated meanwhile), a
+red notice lists it: the goods have gone, so make that bill again, then press **Billed
+again — remove**.
 
 ## Returns
 
