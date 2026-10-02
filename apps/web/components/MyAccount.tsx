@@ -6,6 +6,7 @@ import { apiPost, businessToday, fetcher, formatDate, formatDateTime } from '../
 import { useAuth } from '../lib/AuthContext';
 import { useToast } from '../lib/ToastContext';
 import { Badge, Button, Field, KeyValue, Modal } from './ui';
+import AccountSecurity from './AccountSecurity';
 
 export default function MyAccount({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { user, roleLabel, can } = useAuth();
@@ -52,7 +53,7 @@ export default function MyAccount({ open, onClose }: { open: boolean; onClose: (
   const digits = (v: string) => v.replace(/\D/g, '').slice(0, 6);
 
   return (
-    <Modal open={open} onClose={onClose} title="My account" footer={<Button onClick={onClose}>Close</Button>}>
+    <Modal open={open} onClose={onClose} wide title="My account" footer={<Button onClick={onClose}>Close</Button>}>
       <div className="stack">
         <KeyValue items={[['Name', user?.full_name], ['Role', roleLabel], ['Phone', user?.phone || '—'], ['Email', user?.email || '—']]} />
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void changePassword(); }}>
@@ -107,6 +108,7 @@ export default function MyAccount({ open, onClose }: { open: boolean; onClose: (
             ))}
           </div>
         )}
+        <AccountSecurity open={open} />
         <span className="muted small">Forgot your password? Ask the Owner to set a new one in Admin → Users.</span>
       </div>
     </Modal>

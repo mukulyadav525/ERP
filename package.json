@@ -32,7 +32,8 @@
     "db:upgrade": "node apps/api/scripts/migrate.mjs",
     "test:concurrency": "node tests/concurrency.mjs",
     "test:security": "node tests/security.mjs",
-    "test:ui-audit": "node tests/ui-audit.mjs"
+    "test:ui-audit": "node tests/ui-audit.mjs",
+    "test:sign-in": "node tests/sign-in.mjs"
   },
   "devDependencies": {
     "kysely-codegen": "^0.20.0",

@@ -3,9 +3,11 @@
 //   • Google sign-in (verified ID token, when a client ID is configured)
 //   • email or phone + password
 //   • phone + PIN, for shop-floor staff
-//   • phone + OTP
+//   • a one-time code by email, or by WhatsApp to a phone
+//   • two-step sign-in: an authenticator-app code after any of the above
 //   • self-service registration → an admin approval queue
-//   • forgot password / forgot PIN → single-use reset code
+//   • forgot password / forgot PIN → single-use reset link or code
+// Only options the server can actually deliver are shown (GET /api/auth/methods).
 // ============================================================================
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
@@ -16,11 +18,15 @@ import { useAuth, type AuthUser } from '../lib/AuthContext';
 import { useI18n } from '../lib/i18n';
 import { Alert, Button, Field } from '../components/ui';
 
-type Mode = 'password' | 'pin' | 'otp' | 'register' | 'forgot';
+type Mode = 'password' | 'pin' | 'email' | 'otp' | 'register' | 'forgot' | 'twostep';
 
 interface Branch { branch_id: string; name: string; }
+interface Methods { google_client_id: string | null; email_codes: boolean; phone_codes: boolean; password_reset: boolean }
+type LoginResult = { token: string; user: AuthUser } | { mfa_required: true; mfa_token: string };
 
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
+// The client ID now comes from the API at runtime (one setting on the server);
+// the build-time variable still works for older deployments.
+const BUILD_GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -51,6 +57,31 @@ export default function LoginPage() {
   const [resetToken, setResetToken] = useState('');
   const [newSecret, setNewSecret] = useState('');
   const [resetStage, setResetStage] = useState<'request' | 'enter'>('request');
+  // Email code
+  const [emailAddr, setEmailAddr] = useState('');
+  const [emailCode, setEmailCode] = useState('');
+  const [emailSent, setEmailSent] = useState(false);
+  // Second step
+  const [mfaToken, setMfaToken] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  // What this server offers
+  const [methods, setMethods] = useState<Methods | null>(null);
+  const [googleReady, setGoogleReady] = useState(false);
+  const GOOGLE_CLIENT_ID = methods?.google_client_id || BUILD_GOOGLE_CLIENT_ID;
+
+  useEffect(() => {
+    apiGet<Methods>('/api/auth/methods').then(setMethods)
+      .catch(() => setMethods({ google_client_id: null, email_codes: false, phone_codes: false, password_reset: false }));
+  }, []);
+
+  // A reset link from an email: /login?reset=<token>&kind=PASSWORD|PIN
+  useEffect(() => {
+    const token = typeof router.query.reset === 'string' ? router.query.reset : '';
+    if (!token) return;
+    setMode('forgot'); setResetStage('enter'); setResetToken(token);
+    setForgotKind(router.query.kind === 'PIN' ? 'PIN' : 'PASSWORD');
+    setNotice(router.query.kind === 'PIN' ? 'Choose your new PIN below.' : 'Choose your new password below.');
+  }, [router.query.reset, router.query.kind]);
 
   // The signup form needs branch names before anyone is signed in, so this is the
   // one unauthenticated read in the app.
@@ -61,13 +92,18 @@ export default function LoginPage() {
   // Navigation is left to the auth gate in _app. Redirecting from here as well
   // meant two router.replace calls raced, and Next aborted one of them —
   // harmless, but it filled the console with a spurious error on every sign-in.
-  const finish = useCallback((res: { token: string; user: AuthUser }) => {
+  const finish = useCallback((res: LoginResult) => {
+    // Two-step sign-in: the first step passed; ask for the second before signing in.
+    if ('mfa_required' in res) {
+      setMfaToken(res.mfa_token); setMfaCode(''); setMode('twostep'); setError(''); setNotice('');
+      return;
+    }
     login(res.token, res.user);
   }, [login]);
 
   function switchMode(m: Mode) {
     setMode(m); setError(''); setNotice('');
-    setOtpSent(false); setResetStage('request');
+    setOtpSent(false); setEmailSent(false); setResetStage('request');
   }
 
   async function run(fn: () => Promise<void>) {
@@ -82,25 +118,23 @@ export default function LoginPage() {
   // Google's keys before trusting a single field in it.
   const handleGoogleCredential = useCallback((response: { credential: string }) => {
     void run(async () => {
-      const res = await apiPost<{ token: string; user: AuthUser }>('/api/auth/login/google', {
+      const res = await apiPost<LoginResult>('/api/auth/login/google', {
         id_token: response.credential,
       });
       finish(res);
     });
   }, [finish]);
 
+  // The button is drawn into #google-btn, which only exists on the Password tab —
+  // so it is (re)drawn whenever that tab is showing, not just once on load (it
+  // used to vanish after visiting another tab and coming back).
   useEffect(() => {
-    if (!GOOGLE_CLIENT_ID) return;
-    (window as any).__erpGoogleCallback = handleGoogleCredential;
-  }, [handleGoogleCredential]);
-
-  const initGoogle = useCallback(() => {
     const g = (window as any).google;
-    if (!g || !GOOGLE_CLIENT_ID) return;
+    if (!googleReady || !g || !GOOGLE_CLIENT_ID || mode !== 'password') return;
     g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleCredential });
     const host = document.getElementById('google-btn');
-    if (host) g.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 336, text: 'signin_with' });
-  }, [handleGoogleCredential]);
+    if (host) { host.innerHTML = ''; g.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 336, text: 'signin_with' }); }
+  }, [googleReady, GOOGLE_CLIENT_ID, mode, handleGoogleCredential]);
 
   return (
     <>
@@ -109,7 +143,7 @@ export default function LoginPage() {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
       {GOOGLE_CLIENT_ID && (
-        <Script src="https://accounts.google.com/gsi/client" strategy="afterInteractive" onLoad={initGoogle} />
+        <Script src="https://accounts.google.com/gsi/client" strategy="afterInteractive" onLoad={() => setGoogleReady(true)} />
       )}
 
       <div style={{
@@ -132,16 +166,17 @@ export default function LoginPage() {
           <div className="card">
             <div className="card-body">
               {/* Mode switcher */}
-              <div className="segmented" style={{ display: 'flex', width: '100%', marginBottom: 18 }}>
+              {mode !== 'twostep' && <div className="segmented" style={{ display: 'flex', width: '100%', marginBottom: 18 }}>
                 {([
                   ['password', lang === 'hi' ? 'पासवर्ड' : 'Password'],
                   ['pin', lang === 'hi' ? 'फ़ोन + पिन' : 'Phone + PIN'],
-                  ['otp', 'OTP'],
+                  ...(methods?.email_codes ? [['email', lang === 'hi' ? 'ईमेल कोड' : 'Email code']] : []),
+                  ...(methods?.phone_codes ? [['otp', lang === 'hi' ? 'फ़ोन कोड' : 'Phone code']] : []),
                 ] as [Mode, string][]).map(([m, label]) => (
                   <button key={m} style={{ flex: 1 }} className={mode === m ? 'active' : ''}
                           onClick={() => switchMode(m)}>{label}</button>
                 ))}
-              </div>
+              </div>}
 
               {error && <div style={{ marginBottom: 14 }}><Alert tone="critical">{error}</Alert></div>}
               {notice && <div style={{ marginBottom: 14 }}><Alert tone="good">{notice}</Alert></div>}
@@ -151,7 +186,7 @@ export default function LoginPage() {
                 <form className="stack" onSubmit={(e) => {
                   e.preventDefault();
                   void run(async () => {
-                    const res = await apiPost<{ token: string; user: AuthUser }>('/api/auth/login/password',
+                    const res = await apiPost<LoginResult>('/api/auth/login/password',
                       { identifier: identifier.trim(), password });
                     finish(res);
                   });
@@ -187,7 +222,7 @@ export default function LoginPage() {
                 <form className="stack" onSubmit={(e) => {
                   e.preventDefault();
                   void run(async () => {
-                    const res = await apiPost<{ token: string; user: AuthUser }>('/api/auth/login/pin',
+                    const res = await apiPost<LoginResult>('/api/auth/login/pin',
                       { phone: pinPhone.trim(), pin });
                     finish(res);
                   });
@@ -223,7 +258,7 @@ export default function LoginPage() {
                     });
                   } else {
                     void run(async () => {
-                      const res = await apiPost<{ token: string; user: AuthUser }>('/api/auth/login/otp',
+                      const res = await apiPost<LoginResult>('/api/auth/login/otp',
                         { phone: otpPhone.trim(), otp });
                       finish(res);
                     });
@@ -251,6 +286,75 @@ export default function LoginPage() {
                       Use a different number
                     </Button>
                   )}
+                </form>
+              )}
+
+              {/* ── Code by email ───────────────────────────────────────── */}
+              {mode === 'email' && (
+                <form className="stack" onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!emailSent) {
+                    void run(async () => {
+                      const res = await apiPost<{ message: string; dev_otp?: string }>('/api/auth/email-code/request', { email: emailAddr.trim() });
+                      setEmailSent(true);
+                      setNotice(res.dev_otp ? `${res.message} (development code: ${res.dev_otp})` : res.message);
+                    });
+                  } else {
+                    void run(async () => {
+                      finish(await apiPost<LoginResult>('/api/auth/login/email-code', { email: emailAddr.trim(), code: emailCode }));
+                    });
+                  }
+                }}>
+                  <Field label={lang === 'hi' ? 'ईमेल' : 'Email'}>
+                    <input type="email" autoComplete="email" required value={emailAddr} disabled={emailSent}
+                           onChange={(e) => setEmailAddr(e.target.value)} placeholder="you@example.com" />
+                  </Field>
+                  {emailSent && (
+                    <Field label={lang === 'hi' ? 'ईमेल में आया कोड' : 'Code from the email'}>
+                      <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={emailCode} autoFocus
+                             onChange={(e) => setEmailCode(e.target.value.replace(/\D/g, ''))}
+                             placeholder="000000" style={{ letterSpacing: '0.4em', fontSize: 17 }} />
+                    </Field>
+                  )}
+                  <Button type="submit" variant="primary" size="lg" busy={busy} className="block">
+                    {emailSent ? (lang === 'hi' ? 'साइन इन करें' : 'Sign in') : (lang === 'hi' ? 'कोड भेजें' : 'Email me a code')}
+                  </Button>
+                  {emailSent && (
+                    <Button type="button" variant="ghost" size="sm"
+                            onClick={() => { setEmailSent(false); setEmailCode(''); setNotice(''); }}>
+                      Use a different email, or send again
+                    </Button>
+                  )}
+                </form>
+              )}
+
+              {/* ── Second step ─────────────────────────────────────────── */}
+              {mode === 'twostep' && (
+                <form className="stack" onSubmit={(e) => {
+                  e.preventDefault();
+                  void run(async () => {
+                    finish(await apiPost<LoginResult>('/api/auth/login/two-step', { mfa_token: mfaToken, code: mfaCode.trim() }));
+                  });
+                }}>
+                  <div>
+                    <b>{lang === 'hi' ? 'दो-चरण सत्यापन' : 'Two-step sign-in'}</b>
+                    <div className="muted small" style={{ marginTop: 4 }}>
+                      {lang === 'hi'
+                        ? 'अपने ऑथेंटिकेटर ऐप में दिख रहा 6 अंकों का कोड डालें।'
+                        : 'Enter the 6-digit code shown in your authenticator app. Lost your phone? Use one of your recovery codes.'}
+                    </div>
+                  </div>
+                  <Field label={lang === 'hi' ? 'कोड' : 'Code'}>
+                    <input type="text" autoComplete="one-time-code" inputMode="text" maxLength={11} required value={mfaCode} autoFocus
+                           onChange={(e) => setMfaCode(e.target.value.toUpperCase().replace(/[^0-9A-F-]/g, ''))}
+                           placeholder="000000" style={{ letterSpacing: '0.3em', fontSize: 17 }} />
+                  </Field>
+                  <Button type="submit" variant="primary" size="lg" busy={busy} className="block">
+                    {lang === 'hi' ? 'सत्यापित करें' : 'Verify and sign in'}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => { setMfaToken(''); switchMode('password'); }}>
+                    Cancel and start again
+                  </Button>
                 </form>
               )}
 
@@ -370,12 +474,16 @@ export default function LoginPage() {
             </div>
 
             <div className="card-foot" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
-              {mode === 'forgot' || mode === 'register' ? (
+              {mode === 'forgot' || mode === 'register' || mode === 'twostep' ? (
                 <button className="btn ghost sm" onClick={() => switchMode('password')}>← Back to sign in</button>
-              ) : (
+              ) : methods?.password_reset ? (
                 <button className="btn ghost sm" onClick={() => switchMode('forgot')}>Forgot password or PIN?</button>
+              ) : (
+                // No email or WhatsApp set up: a reset code could not be delivered,
+                // so the link is not offered — the owner resets it instead.
+                <span className="muted small" style={{ alignSelf: 'center' }}>Forgot it? Ask the owner to reset it.</span>
               )}
-              {mode !== 'register' && (
+              {mode !== 'register' && mode !== 'twostep' && (
                 <button className="btn ghost sm" onClick={() => switchMode('register')}>Request an account</button>
               )}
             </div>

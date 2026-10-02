@@ -8,6 +8,7 @@ import { sql } from 'kysely';
 import type { Tx } from './db.js';
 import { db, withSystemScope } from './db.js';
 import { env } from './env.js';
+import { mailEnabled, sendEmail } from './mailer.js';
 
 // Note the absence of 'OTP' here. Verification codes and reset tokens do NOT go
 // through this log — it is readable by ordinary staff, so a secret in a message
@@ -40,14 +41,35 @@ export async function queueMessage(trx: Tx, msg: {
  * report, no export — can read the body back out.
  */
 export async function queueAuthMessage(msg: {
-  to_phone: string;
-  purpose: 'OTP' | 'PASSWORD_RESET' | 'PIN_RESET';
-  body: string;
+  channel?: 'WHATSAPP' | 'EMAIL';
+  to_phone?: string | null;
   to_email?: string | null;
+  purpose: 'OTP' | 'PASSWORD_RESET' | 'PIN_RESET';
+  /** For WhatsApp: the whole message. For email: the plain-text body. */
+  body: string;
+  /** Email only: subject and HTML, kept with the message so the drain needs nothing else. */
+  subject?: string;
+  html?: string;
 }): Promise<void> {
-  if (!msg.to_phone) return;
-  await sql`SELECT auth_queue_message(${msg.to_phone}, ${msg.purpose}, ${msg.body}, ${msg.to_email ?? null})`
+  const channel = msg.channel ?? 'WHATSAPP';
+  if (channel === 'WHATSAPP' && !msg.to_phone) return;
+  if (channel === 'EMAIL' && !msg.to_email) return;
+  // An email is stored as a small JSON envelope so subject and HTML survive the queue.
+  const body = channel === 'EMAIL' ? JSON.stringify({ subject: msg.subject ?? 'Your code', text: msg.body, html: msg.html }) : msg.body;
+  await sql`SELECT auth_queue_message(${msg.to_phone ?? null}, ${msg.purpose}, ${body}, ${msg.to_email ?? null}, ${channel})`
     .execute(db);
+  kickAuthOutbox();
+}
+
+// Codes are wanted NOW, not at the next 30-second timer tick: a queued code
+// triggers a drain right after the request that queued it has committed.
+let kickTimer: NodeJS.Timeout | null = null;
+export function kickAuthOutbox(): void {
+  if (kickTimer) return;
+  kickTimer = setTimeout(() => {
+    kickTimer = null;
+    drainAuthOutbox().catch(() => { /* the timer retries; bodies are never logged */ });
+  }, 300);
 }
 
 async function deliver(toPhone: string, body: string): Promise<void> {
@@ -70,13 +92,25 @@ async function deliver(toPhone: string, body: string): Promise<void> {
 /** Drains the auth outbox. Bodies are read through the definer function and are
  *  never logged, even on failure. */
 export async function drainAuthOutbox(batchSize = 25): Promise<number> {
-  const pending = await sql<{ id: string; to_phone: string; body: string }>`
+  const pending = await sql<{ id: string; channel: string; to_phone: string | null; to_email: string | null; body: string }>`
     SELECT * FROM auth_outbox_take(${batchSize})
   `.execute(db);
 
   for (const msg of pending.rows) {
+    // No channel set up: closed as NOT_CONFIGURED. It used to be marked SENT,
+    // and the person waited for a code that was never going to arrive.
+    const configured = msg.channel === 'EMAIL' ? mailEnabled() : env.whatsapp.enabled;
+    if (!configured) {
+      await sql`SELECT auth_outbox_result(${msg.id}, FALSE, ${`${msg.channel} is not configured; nothing was sent.`}, TRUE)`.execute(db);
+      continue;
+    }
     try {
-      await deliver(msg.to_phone, msg.body);
+      if (msg.channel === 'EMAIL') {
+        const mail = JSON.parse(msg.body) as { subject: string; text: string; html?: string };
+        await sendEmail({ to: msg.to_email!, subject: mail.subject, text: mail.text, html: mail.html });
+      } else {
+        await deliver(msg.to_phone!, msg.body);
+      }
       await sql`SELECT auth_outbox_result(${msg.id}, TRUE, NULL)`.execute(db);
     } catch (err) {
       // Deliberately generic: the message body is a credential.

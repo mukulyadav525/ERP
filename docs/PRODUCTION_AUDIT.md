@@ -438,3 +438,24 @@ held · CSV formula injection already neutralised.
 
 **Ready for production use** on the current deployment, with one condition the code cannot
 meet on its own: **backups must be scheduled before real trading data is entered.**
+
+---
+
+## Sign-in upgrades (2026-10-02)
+
+| Added / fixed | Notes |
+|---|---|
+| **Bug:** OTP and reset codes were marked **SENT** although nothing was sent (no WhatsApp configured) | Outbox now closes them as `NOT_CONFIGURED`; the sign-in screen hides options that cannot deliver (`GET /api/auth/methods`) |
+| **Bug:** the Google button disappeared after visiting another sign-in tab | Re-drawn whenever the Password tab shows |
+| Google sign-in switched on by one API setting | Client ID served by the API; no web rebuild |
+| Email delivery (Brevo / Resend over HTTPS) | Codes sent within a second of the request, not at the next 30 s tick |
+| Sign in with a code by email | One code a minute per person; codes single-use, bcrypt-hashed, count towards lockout |
+| Forgot password / PIN by email link | Link pre-fills the reset form; single use |
+| Two-step sign-in (TOTP, RFC 6238) + 10 recovery codes | Secret and check inside the database (`user_mfa`, no app-role access); a session is unusable until the second step (`mfa_pending`); replayed codes refused; applies to every first-step method |
+| Signed-in devices, sign out one / all others; sign-in history | My account |
+| Owner: per-user two-step status, reset, sign out everywhere, recent sign-ins | Admin → Users → Edit |
+
+Migration `004_sign_in_upgrades`. Evidence: `tests/sign-in.mjs` (46 checks, with a fake
+mail server), TOTP verified against the RFC 6238 test vectors, all earlier suites and
+the browser suites re-run green on a fresh database.
+

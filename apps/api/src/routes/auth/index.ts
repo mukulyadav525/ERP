@@ -16,6 +16,11 @@
 //   POST /reset               consume the reset token, set the new secret
 //   POST /change-password     while logged in
 //   POST /verify-override-pin manager PIN for an in-session override (3.4/3.8)
+//   GET  /methods             which sign-in options this server can offer
+//   POST /email-code/request  email -> one-time code by email
+//   POST /login/email-code    email + code
+//   POST /login/two-step      second step (authenticator or recovery code)
+//   /two-step, /sessions, /sign-in-history — the signed-in person's own security
 // ============================================================================
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { OAuth2Client } from 'google-auth-library';
@@ -44,8 +49,9 @@ async function setBranchAccess(trx: Tx, userId: string, homeBranch: string | nul
 }
 import { badRequest, forbidden, tooMany, unauthorized, notFound } from '../../lib/errors.js';
 import {
-  issueToken, hashToken, issueResetToken, hashResetToken, generateOtp, bearerFrom,
+  issueToken, hashToken, issueResetToken, hashResetToken, generateOtp, bearerFrom, looksValid, base32,
 } from '../../lib/session.js';
+import { codeEmail, mailEnabled } from '../../lib/mailer.js';
 import { ALL_ROLES, ROLE_META } from '../../lib/rbac.js';
 import { audit } from '../../lib/audit.js';
 import { queueAuthMessage } from '../../lib/whatsapp.js';
@@ -75,6 +81,10 @@ function clientIp(req: FastifyRequest): string | null {
 function finishLogin(row: AuthRow | undefined, token: string, branchName?: string | null) {
   if (!row) throw unauthorized('Incorrect credentials. Please check and try again.');
   switch (row.status) {
+    case 'MFA_REQUIRED':
+      // The first step passed. The token is held back as a ticket for the second
+      // step: until /login/two-step accepts a code, the server will not honour it.
+      return { mfa_required: true, mfa_token: token };
     case 'OK':
       return {
         token,
@@ -226,6 +236,162 @@ export default async function authRoutes(app: FastifyInstance) {
     return finishLogin(res.rows[0], token, await branchNameFor(res.rows[0]?.branch_id ?? null));
   });
 
+  // ── What this server can offer at sign-in ─────────────────────────────────
+  // The screen shows only options that will actually work: a code that cannot be
+  // delivered is worse than no option at all.
+  app.get('/methods', async () => ({
+    google_client_id: env.googleClientId || null,
+    email_codes: mailEnabled(),
+    phone_codes: env.whatsapp.enabled,
+    password_reset: mailEnabled() || env.whatsapp.enabled,
+  }));
+
+  // ── Sign in with a code sent by email ─────────────────────────────────────
+  app.post('/email-code/request', { config: { rateLimit: { max: 10, timeWindow: '5 minutes' } } }, async (req) => {
+    if (!mailEnabled()) throw badRequest('Email sign-in codes are not set up on this server. Use your password instead.');
+    const email = str((req.body as any)?.email, 'Email', { max: 254 }).toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw badRequest('Please enter a valid email address.');
+    const code = generateOtp(6);
+    const minutes = Math.max(env.otpExpiryMinutes, 10);
+    const res = await sql<{ issued: boolean; full_name: string | null; email: string | null }>`
+      SELECT * FROM auth_email_code_issue(${email}, ${code}, ${minutes})
+    `.execute(db);
+    const row = res.rows[0];
+    if (row?.issued && row.email) {
+      const brand = await chainDisplayName();
+      const mail = codeEmail({
+        brand, heading: `Your sign-in code${row.full_name ? `, ${row.full_name.split(' ')[0]}` : ''}`, code,
+        note: `It expires in ${minutes} minutes and works once. Never share it — ${brand} staff will never ask for it.`,
+      });
+      await queueAuthMessage({ channel: 'EMAIL', to_email: row.email, purpose: 'OTP', subject: `${brand} sign-in code: ${code}`, body: mail.text, html: mail.html });
+    }
+    // Identical either way: this cannot be used to find out which emails have accounts.
+    return {
+      ok: true,
+      message: `If that email belongs to an account here, a 6-digit code is on its way. It expires in ${minutes} minutes.`,
+      ...(env.exposeDevOtp && row?.issued ? { dev_otp: code } : {}),
+    };
+  });
+
+  app.post('/login/email-code', authLimit, async (req) => {
+    const body = (req.body ?? {}) as { email?: string; code?: string };
+    const email = str(body.email, 'Email', { max: 254 });
+    const code = str(body.code, 'Code', { max: 8, min: 6 }).replace(/\s/g, '');
+    const { token, tokenHash } = issueToken();
+    const res = await sql<AuthRow>`
+      SELECT * FROM auth_email_code_verify(${email}, ${code}, ${tokenHash},
+        ${clientIp(req)}::inet, ${req.headers['user-agent'] ?? null}, NULL, ${env.sessionTtlMinutes})
+    `.execute(db);
+    const status = res.rows[0]?.status;
+    if (status !== 'OK' && status !== 'MFA_REQUIRED' && status !== 'LOCKED' && status !== 'INACTIVE') {
+      throw unauthorized('That code is not valid or has expired. Request a new one.');
+    }
+    return finishLogin(res.rows[0], token, await branchNameFor(res.rows[0]?.branch_id ?? null));
+  });
+
+  // ── Second step (two-step sign-in) ────────────────────────────────────────
+  app.post('/login/two-step', authLimit, async (req) => {
+    const body = (req.body ?? {}) as { mfa_token?: string; code?: string };
+    const token = str(body.mfa_token, 'Sign-in ticket', { max: 200 });
+    const code = str(body.code, 'Code', { max: 20 });
+    if (!looksValid(token)) throw unauthorized('That sign-in has expired. Please sign in again.');
+    const res = await sql<AuthRow>`
+      SELECT * FROM auth_mfa_verify_session(${hashToken(token)}, ${code}, ${clientIp(req)}::inet)
+    `.execute(db);
+    const row = res.rows[0];
+    if (row?.status === 'EXPIRED') throw unauthorized('That sign-in has expired. Please sign in again.');
+    if (row?.status === 'INVALID') throw unauthorized('That code is not right. Use the current code from your authenticator app, or a recovery code.');
+    return finishLogin(row, token, await branchNameFor(row?.branch_id ?? null));
+  });
+
+  // ── Your own security: two-step, devices, sign-in history ─────────────────
+  app.get('/two-step', guarded(null, async ({ session }) => {
+    const row = (await sql<any>`SELECT * FROM auth_mfa_status(${session.user_id})`.execute(db)).rows[0];
+    return { enabled: Boolean(row?.enabled), enabled_at: row?.enabled_at ?? null, recovery_codes_left: Number(row?.recovery_codes_left ?? 0) };
+  }));
+
+  app.post('/two-step/begin', guarded(null, async ({ session }) => {
+    const res = await sql<{ auth_mfa_begin: Buffer | null }>`SELECT auth_mfa_begin(${session.user_id})`.execute(db);
+    const secret = res.rows[0]?.auth_mfa_begin;
+    if (!secret) throw badRequest('Two-step sign-in is already on. Turn it off first to set it up again.');
+    const key = base32(Buffer.from(secret));
+    const brand = await chainDisplayName();
+    const label = encodeURIComponent(`${brand}:${session.email || session.phone || session.full_name}`);
+    return {
+      key: key.replace(/(.{4})/g, '$1 ').trim(),
+      otpauth_url: `otpauth://totp/${label}?secret=${key}&issuer=${encodeURIComponent(brand)}&algorithm=SHA1&digits=6&period=30`,
+    };
+  }));
+
+  app.post('/two-step/enable', guarded(null, async ({ session, req }) => {
+    const code = str((req.body as any)?.code, 'Code', { max: 8 }).replace(/\s/g, '');
+    const res = await sql<{ auth_mfa_enable: string[] | null }>`SELECT auth_mfa_enable(${session.user_id}, ${code})`.execute(db);
+    const codes = res.rows[0]?.auth_mfa_enable;
+    if (!codes) throw badRequest('That code is not right. Check the time on your phone is automatic, and use the newest code.');
+    return { ok: true, recovery_codes: codes };
+  }));
+
+  app.post('/two-step/disable', guarded(null, async ({ session, req }) => {
+    const code = str((req.body as any)?.code, 'Code', { max: 20 });
+    const res = await sql<{ auth_mfa_disable: boolean }>`SELECT auth_mfa_disable(${session.user_id}, ${code})`.execute(db);
+    if (!res.rows[0]?.auth_mfa_disable) throw badRequest('That code is not right. Use a code from your authenticator app, or a recovery code.');
+    return { ok: true };
+  }));
+
+  app.get('/sessions', guarded(null, async ({ session, db: trx }) => (await sql<any>`
+    SELECT s.session_id, s.login_method, host(s.ip_address) AS ip, s.user_agent, s.created_at, s.last_seen_at, s.expires_at,
+           (s.session_id = ${session.session_id ?? null}) AS is_current
+      FROM user_sessions s
+     WHERE s.user_id = ${session.user_id} AND s.revoked_at IS NULL AND s.expires_at > now() AND NOT s.mfa_pending
+     ORDER BY (s.session_id = ${session.session_id ?? null}) DESC, s.last_seen_at DESC
+     LIMIT 50
+  `.execute(trx)).rows));
+
+  app.post('/sessions/:id/revoke', guarded(null, async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'session');
+    const res = await sql`
+      UPDATE user_sessions SET revoked_at = now()
+       WHERE session_id = ${id} AND user_id = ${session.user_id} AND revoked_at IS NULL
+    `.execute(trx);
+    if (!Number(res.numAffectedRows ?? 0)) throw notFound('That session has already ended.');
+    return { ok: true, signed_out_self: id === session.session_id };
+  }));
+
+  app.post('/sessions/revoke-others', guarded(null, async ({ session, db: trx }) => {
+    const res = await sql`
+      UPDATE user_sessions SET revoked_at = now()
+       WHERE user_id = ${session.user_id} AND revoked_at IS NULL AND session_id IS DISTINCT FROM ${session.session_id ?? null}
+    `.execute(trx);
+    return { ok: true, signed_out: Number(res.numAffectedRows ?? 0) };
+  }));
+
+  app.get('/sign-in-history', guarded(null, async ({ session }) =>
+    (await sql<any>`SELECT * FROM auth_sign_in_history(${session.user_id}, 30)`.execute(db)).rows));
+
+  // ── The Owner looking after someone else's sign-in ────────────────────────
+  app.get('/users/:id/security', guarded('manage_users', async ({ req }) => {
+    const id = uuid((req.params as any).id, 'user_id');
+    const [mfa, history, sessions] = await Promise.all([
+      sql<any>`SELECT * FROM auth_mfa_status(${id})`.execute(db),
+      sql<any>`SELECT * FROM auth_sign_in_history(${id}, 15)`.execute(db),
+      sql<{ n: number }>`SELECT auth_session_count(${id}) AS n`.execute(db),
+    ]);
+    return { two_step: Boolean(mfa.rows[0]?.enabled), active_sessions: Number(sessions.rows[0]?.n ?? 0), history: history.rows };
+  }));
+
+  app.post('/users/:id/two-step/reset', guarded('manage_users', async ({ session, req }) => {
+    const id = uuid((req.params as any).id, 'user_id');
+    await sql`SELECT auth_mfa_admin_reset(${id}, ${session.user_id})`.execute(db);
+    return { ok: true };
+  }));
+
+  app.post('/users/:id/sessions/revoke', guarded('manage_users', async ({ session, db: trx, req }) => {
+    const id = uuid((req.params as any).id, 'user_id');
+    await sql`SELECT auth_revoke_user_sessions(${id})`.execute(db);
+    await audit(trx, session, 'USER_UPDATED', 'users', id, { after: { signed_out_everywhere: true } });
+    return { ok: true };
+  }));
+
   // ── Registration (7.2) ────────────────────────────────────────────────────
   // A signup never produces a working account by itself. It produces a request an
   // Owner/Admin approves — which is the only sane default for a system where an
@@ -285,15 +451,25 @@ export default async function authRoutes(app: FastifyInstance) {
     `.execute(db);
     const row = res.rows[0];
 
-    if (row?.issued && row.phone) {
+    if (row?.issued) {
       const brand = await chainDisplayName();
-      await queueAuthMessage({
-        to_phone: row.phone,
-        to_email: row.email,
-        purpose: kind === 'PIN' ? 'PIN_RESET' : 'PASSWORD_RESET',
-        body: kind === 'PIN'
-          ? `Reset your ${brand} PIN with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.`
-          : `Reset your ${brand} password with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.` });
+      const what = kind === 'PIN' ? 'PIN' : 'password';
+      // Email when it is set up and the person has an address; otherwise WhatsApp.
+      // With neither, nothing is queued — and the sign-in screen does not offer this.
+      if (mailEnabled() && row.email) {
+        const link = `${env.appUrl}/login?reset=${encodeURIComponent(token)}&kind=${kind}`;
+        const mail = codeEmail({
+          brand, heading: `Reset your ${what}`,
+          link: { url: link, label: `Choose a new ${what}` },
+          note: `This link works once and expires in ${env.resetExpiryMinutes} minutes. If you did not ask for it, ignore this email — nothing changes.`,
+        });
+        await queueAuthMessage({ channel: 'EMAIL', to_email: row.email, purpose: kind === 'PIN' ? 'PIN_RESET' : 'PASSWORD_RESET',
+          subject: `${brand}: reset your ${what}`, body: mail.text, html: mail.html });
+      } else if (env.whatsapp.enabled && row.phone) {
+        await queueAuthMessage({
+          to_phone: row.phone, purpose: kind === 'PIN' ? 'PIN_RESET' : 'PASSWORD_RESET',
+          body: `Reset your ${brand} ${what} with this code: ${token}. It expires in ${env.resetExpiryMinutes} minutes.` });
+      }
     }
 
     return {
@@ -423,16 +599,7 @@ export default async function authRoutes(app: FastifyInstance) {
       };
     }));
 
-  // ── Active sessions (7.2 device-level login audit) ────────────────────────
-  app.get('/sessions', guarded(null, async ({ session, db: trx }) => {
-    const rows = await sql<any>`
-      SELECT session_id, login_method, ip_address, user_agent, created_at, last_seen_at, expires_at
-        FROM user_sessions
-       WHERE user_id = ${session.user_id} AND revoked_at IS NULL AND expires_at > now()
-       ORDER BY last_seen_at DESC
-    `.execute(trx);
-    return rows.rows;
-  }));
+  // (GET /sessions — your signed-in devices — is defined with the sign-in security routes above.)
 
   app.post('/sessions/revoke-all', guarded(null, async ({ session }) => {
     await sql`SELECT auth_revoke_user_sessions(${session.user_id})`.execute(db);

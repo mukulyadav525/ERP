@@ -135,6 +135,36 @@ your own computer with `MIGRATION_DATABASE_URL` pointing at Supabase (needs `pg_
 
 ---
 
+### Sign-in options
+
+The sign-in screen offers only what this server can actually do (`GET /api/auth/methods`):
+
+| Option | Needs | Always on? |
+|---|---|---|
+| Email or phone + password, phone + PIN | nothing | yes |
+| **Sign in with Google** | `GOOGLE_OAUTH_CLIENT_ID` on the API | no |
+| **Email code**, and **Forgot password** by email link | `BREVO_API_KEY` (or `RESEND_API_KEY`) + `MAIL_FROM` on the API | no |
+| Phone code (WhatsApp) | `WHATSAPP_CLOUD_API_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` | no |
+| **Two-step sign-in** (authenticator app) | nothing — each person turns it on in My account | per person |
+
+**Google.** In Google Cloud Console → APIs & Services: configure the OAuth consent
+screen (External, app name, your email), then Credentials → Create credentials →
+OAuth client ID → *Web application*. Add your web address (e.g.
+`https://bhawani-one.up.railway.app`) under **Authorised JavaScript origins**; no
+redirect URI is needed. Put the client ID in `GOOGLE_OAUTH_CLIENT_ID` on the **API**
+service. A Google account can sign in only if its email is on a user in Admin → Users.
+
+**Email (Brevo).** Create a free Brevo account, add and verify your sender address
+(Senders & IP → Senders; a Gmail address works), create an API key (SMTP & API → API
+keys), then set `BREVO_API_KEY` and `MAIL_FROM="Shop name <that address>"` on the API.
+Railway's cheaper plans block outgoing SMTP, which is why an HTTPS email API is used.
+
+**Two-step.** Anyone can turn it on in My account (click your name). If someone loses
+their phone *and* their recovery codes, the Owner turns it off in Admin → Users → Edit
+→ *Turn off two-step*.
+
+---
+
 ## 3. Development set-up (with demo data)
 
 ```bash

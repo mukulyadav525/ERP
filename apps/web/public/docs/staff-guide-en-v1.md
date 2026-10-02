@@ -5,7 +5,8 @@ it says otherwise.
 
 ## Start of the day
 
-1. Sign in with your phone number and PIN.
+1. Sign in with your phone number and PIN (or your password, Google, or a code sent to
+   your email — whichever your shop has set up).
 2. The branch you are working at shows at the top right. If you work at more than one
    branch, choose today's branch there.
 3. **Billing → Till → Open till.** Count the cash in the drawer and enter it as the
