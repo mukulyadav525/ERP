@@ -109,11 +109,13 @@ purchase or payment is made at one chosen branch.
 
 | Mistake | How it is fixed | Who |
 |---|---|---|
+| Your own name, phone, email or language wrong | My account (click your name) → Your details — phone/email need your current password or PIN | Everyone |
 | Wrong name / phone / email / password on a user | Admin → Users → Edit | Owner |
 | Wrong details or PIN for counter, inventory or accounts staff | Staff → Edit | Owner; Manager (own branch) |
 | Someone left | Staff → Edit → untick *Can sign in* (their past bills stay) | Owner; Manager (own branch) |
 | Wrong role or branch | Admin → Users → Edit | Owner only |
-| Forgot own password / PIN | My account (click your name, bottom left) to change; Owner resets if forgotten | Everyone |
+| Forgot own password / PIN | Sign-in screen → *Forgot password* (emails a reset link, when email is set up); otherwise the Owner sets a new one in Admin → Users | Everyone |
+| Lost the phone with the authenticator app | Sign in with a recovery code; or the Owner → Admin → Users → Edit → *Turn off two-step* | Owner |
 | Wrong GST rate for an HSN | Catalog → GST rates → Edit, same date | Owner |
 | Product details / unit / barcode wrong | Catalog → product → Edit | Owner, Manager |
 | Selling price wrong | Catalog → product → Change price (history kept) | Owner |

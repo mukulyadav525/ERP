@@ -580,6 +580,7 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
           <Field label="Set a new password" hint="Leave blank to keep the current one. At least 8 characters.">
             <input type="password" value={password} autoComplete="new-password" onChange={(e) => setPassword(e.target.value)} />
           </Field>
+          <UserSecurity userId={user.user_id} />
           <Field label="Reset their PIN" hint="Leave blank to keep the current one. 4 to 6 digits.">
             <input type="password" inputMode="numeric" maxLength={6} value={pin} autoComplete="new-password"
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} />
@@ -587,6 +588,42 @@ function UserEditor({ user, onClose, onSaved }: { user: any | null; onClose: () 
         </div>
       )}
     </Modal>
+  );
+}
+
+/** Sign-in security for one user, as the Owner sees it. */
+function UserSecurity({ userId }: { userId: string }) {
+  const toast = useToast();
+  const { data, mutate } = useSWR<any>(`/api/auth/users/${userId}/security`, fetcher);
+  async function resetTwoStep() {
+    if (!window.confirm('Turn off two-step sign-in for this person? Use this when they have lost their phone and their recovery codes. They will be signed out everywhere.')) return;
+    try { await apiPost(`/api/auth/users/${userId}/two-step/reset`, {}); toast.success('Two-step turned off', 'They can sign in with their password and set it up again.'); void mutate(); }
+    catch (err) { toast.error(err); }
+  }
+  async function signOutEverywhere() {
+    if (!window.confirm('Sign this person out on every device?')) return;
+    try { await apiPost(`/api/auth/users/${userId}/sessions/revoke`, {}); toast.success('Signed out everywhere'); void mutate(); }
+    catch (err) { toast.error(err); }
+  }
+  if (!data) return null;
+  return (
+    <div className="stack" style={{ gap: 6, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 10 }}>
+      <div className="row tight" style={{ alignItems: 'center' }}>
+        <b style={{ flex: 1 }}>Sign-in</b>
+        {data.two_step ? <Badge tone="good">two-step on</Badge> : <Badge tone="neutral">two-step off</Badge>}
+        <Badge tone="neutral">{data.active_sessions} signed-in device(s)</Badge>
+      </div>
+      <div className="row tight">
+        {data.two_step && <Button size="sm" onClick={() => void resetTwoStep()}>Turn off two-step (lost phone)</Button>}
+        {data.active_sessions > 0 && <Button size="sm" onClick={() => void signOutEverywhere()}>Sign out everywhere</Button>}
+      </div>
+      {(data.history ?? []).slice(0, 5).map((h: any, i: number) => (
+        <div key={i} className="row tight small">
+          <span style={{ flex: 1 }}>{formatDateTime(h.attempted_at)} <span className="muted">· {h.ip ?? 'unknown IP'}</span></span>
+          {h.succeeded ? <Badge tone="good">signed in</Badge> : <Badge tone="critical">failed</Badge>}
+        </div>
+      ))}
+    </div>
   );
 }
 

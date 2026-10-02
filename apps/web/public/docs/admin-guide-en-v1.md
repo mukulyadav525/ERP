@@ -103,3 +103,21 @@ expected and counted cash) and **Staff**.
   voids, refunds, user and settings changes — who, when and what changed.
 * **Compliance:** backup status. "Not configured" means no verified backup exists yet —
   see the operations guide (`npm run backup`, `npm run backup:restore-test`).
+
+## Sign-in security
+
+* Everyone can correct their own name, phone, email and language in My account; a phone
+  or email change asks for their current password or PIN, and is in the audit trail. A
+  changed email is notified to the old address. Role and branch stay with you.
+
+* **Click your name** (bottom left) → My account: change your password or PIN, turn on
+  **two-step sign-in** (a code from an authenticator app after your password — strongly
+  recommended for the Owner), see the devices you are signed in on and sign any of them
+  out, and see recent sign-ins including failed attempts.
+* When two-step is turned on you get ten **recovery codes**. Keep them somewhere safe:
+  each signs you in once if your phone is lost.
+* **Admin → Users → Edit** shows whether a person uses two-step, how many devices they
+  are signed in on, and their recent sign-ins. **Sign out everywhere** ends all their
+  sessions; **Turn off two-step** is for someone who has lost their phone.
+* Google sign-in and email codes appear on the sign-in screen once they are set up — see
+  the operations guide.

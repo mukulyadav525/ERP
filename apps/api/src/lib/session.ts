@@ -82,3 +82,15 @@ export function generateOtp(digits = 6): string {
   } while (n >= Math.floor(0xffffffff / max) * max);
   return String(n % max).padStart(digits, '0');
 }
+
+/** RFC 4648 base32 (no padding) — how authenticator apps take a key. */
+export function base32(buf: Buffer): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0, out = '';
+  for (const byte of buf) {
+    value = (value << 8) | byte; bits += 8;
+    while (bits >= 5) { out += alphabet[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+  return out;
+}

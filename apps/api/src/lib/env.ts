@@ -60,6 +60,18 @@ export const env = {
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? '',
     get enabled() { return Boolean(process.env.WHATSAPP_CLOUD_API_TOKEN); },
   },
+  // Email for sign-in codes and password resets, through an HTTPS email API
+  // (Railway's cheaper plans block outgoing SMTP). Brevo sends from a single
+  // verified address (a Gmail is fine); Resend needs a verified domain.
+  mail: {
+    provider: (process.env.BREVO_API_KEY ? 'brevo' : process.env.RESEND_API_KEY ? 'resend' : null) as 'brevo' | 'resend' | null,
+    brevoKey: process.env.BREVO_API_KEY ?? '',
+    resendKey: process.env.RESEND_API_KEY ?? '',
+    from: process.env.MAIL_FROM ?? '',
+    get enabled() { return Boolean(this.provider && this.from); },
+  },
+  // The web app's address, for links in emails. Defaults to the first CORS origin.
+  appUrl: (process.env.APP_URL || (process.env.CORS_ORIGINS ?? 'http://localhost:3000').split(',')[0]).trim().replace(/\/$/, ''),
   // Returning the OTP/reset code in the API response makes the flow testable
   // without an SMS gateway. It is gated on an EXPLICIT opt-in as well as on
   // NODE_ENV, because "we forgot to set NODE_ENV" is a real deployment mistake and
