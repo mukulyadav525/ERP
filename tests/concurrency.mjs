@@ -41,9 +41,14 @@ async function call(method, path, { token, body, branch } = {}) {
 const parallel = (n, fn) => Promise.all(Array.from({ length: n }, (_, i) => fn(i)));
 const statuses = (rs) => rs.map((r) => r.status).join(',');
 async function login(email, password) {
-  const r = await call('POST', '/api/auth/login/password', { body: { email, password } });
-  if (r.status !== 200) throw new Error(`login ${email}: ${r.status}`);
-  return r.body.token;
+  // Rate-limited when run straight after other suites: wait it out, don't fail.
+  for (let i = 0; i < 6; i += 1) {
+    const r = await call('POST', '/api/auth/login/password', { body: { email, password } });
+    if (r.status === 200) return r.body.token;
+    if (r.status !== 429) throw new Error(`login ${email}: ${r.status}`);
+    await new Promise((res) => setTimeout(res, 15000));
+  }
+  throw new Error(`login ${email}: still rate-limited`);
 }
 
 const db = new pg.Client({ connectionString: DB });

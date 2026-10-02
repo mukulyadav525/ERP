@@ -42,14 +42,23 @@ async function call(method, path, { token, body, branch, raw } = {}) {
   return { status: res.status, body: json, type: res.headers.get('content-type') ?? '' };
 }
 async function login(email, password) {
-  const r = await call('POST', '/api/auth/login/password', { body: { email, password } });
-  if (r.status !== 200) throw new Error(`login ${email}: ${r.status}`);
-  return r.body.token;
+  // Rate-limited when run straight after other suites: wait it out, don't fail.
+  for (let i = 0; i < 6; i += 1) {
+    const r = await call('POST', '/api/auth/login/password', { body: { email, password } });
+    if (r.status === 200) return r.body.token;
+    if (r.status !== 429) throw new Error(`login ${email}: ${r.status}`);
+    await new Promise((res) => setTimeout(res, 15000));
+  }
+  throw new Error(`login ${email}: still rate-limited`);
 }
 async function loginPin(phone, pin) {
-  const r = await call('POST', '/api/auth/login/pin', { body: { phone, pin } });
-  if (r.status !== 200) throw new Error(`pin ${phone}: ${r.status}`);
-  return r.body.token;
+  for (let i = 0; i < 6; i += 1) {
+    const r = await call('POST', '/api/auth/login/pin', { body: { phone, pin } });
+    if (r.status === 200) return r.body.token;
+    if (r.status !== 429) throw new Error(`pin ${phone}: ${r.status}`);
+    await new Promise((res) => setTimeout(res, 15000));
+  }
+  throw new Error(`pin ${phone}: still rate-limited`);
 }
 const denied = (r) => r.status === 403 || r.status === 404;
 
