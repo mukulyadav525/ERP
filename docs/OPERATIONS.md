@@ -112,7 +112,10 @@ If `schema.sql` stops with "deadlock detected" (a Supabase background process to
 the catalog mid-DDL), drop the half-built schema
 (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) and run it again.
 
-The schema works with Supabase keeping `pgcrypto` in its `extensions` schema.
+The schema works with Supabase keeping `pgcrypto` in its `extensions` schema. It also
+shuts Supabase's auto-generated REST API out of the `public` schema (the `anon` and
+`authenticated` roles get no access to tables or functions): this app talks to the
+database only through its own API, as `erp_app`.
 
 **Railway.** New project → *Deploy from GitHub repo* → add the repo **twice**, as two
 services. In each service's *Settings → Config-as-code* set the file:
@@ -247,6 +250,11 @@ left half-applied. Deploy the new code **after** the upgrade has run.
 When you change the schema: edit `db/schema.sql`, add `db/migrations/NNN_name.sql`
 that makes the same change idempotently (`IF NOT EXISTS`, `CREATE OR REPLACE`), and add
 its version to the `INSERT INTO schema_migrations` list in `db/schema.sql`.
+
+**A migration that creates a function must end with the lockdown block from
+`003_lock_down_functions.sql`** (copy it). Postgres lets everyone execute a new function,
+and on Supabase "everyone" includes the `anon` role behind its REST API — which would
+reach the SECURITY DEFINER auth functions directly, skipping the API's checks.
 
 ---
 

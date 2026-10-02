@@ -373,6 +373,7 @@ with a 502 — not by reading code. Each finding has a test that failed before t
 | 15 | P2 | Ctrl+K then fast typing dropped the first letter ("putty" → "utty") | Focus on a 20 ms timer | `autoFocus` in the same commit | `ui-audit.mjs` |
 | 16 | P2 | Supplier picker could not add a supplier — leaving the purchase entry lost its lines | No inline create | "Add new supplier" in place | manual |
 | 17 | P2 | Same product name could be created twice under two SKUs | No name check | Confirm before a same-name product | manual |
+| 18b | P1 | On Supabase, 29 SECURITY DEFINER auth functions (sign-in, set PIN, issue session, approve sign-up) were callable by the `anon` role through Supabase's REST API — bypassing the API's checks for anyone holding the project's anon key | Postgres grants EXECUTE on new functions to PUBLIC; Supabase maps its REST API onto `public` | Migration 003: EXECUTE revoked from PUBLIC/anon/authenticated, granted to `erp_app` only; anon/authenticated lose the schema; applied to production | live catalog check: 0 functions reachable by anon |
 | 18 | P3 | Production misconfiguration deployed silently | localhost fallbacks | API refuses to boot without `CORS_ORIGINS`; hosted web build fails without `NEXT_PUBLIC_API_URL` | — |
 
 ### Added

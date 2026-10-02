@@ -2653,7 +2653,8 @@ CREATE TABLE schema_migrations (
 );
 INSERT INTO schema_migrations (version) VALUES
     ('001_baseline'),
-    ('002_concurrency_and_performance');
+    ('002_concurrency_and_performance'),
+    ('003_lock_down_functions');
 
 -- ============================================================================
 -- APPLICATION ROLE & GRANTS
@@ -2692,6 +2693,8 @@ REVOKE INSERT, UPDATE, DELETE ON backups FROM erp_app;
 REVOKE UPDATE, DELETE ON customer_payments, vendor_payments, stock_adjustments, payment_cancellations FROM erp_app;
 -- The migration history is written by the upgrade script (as the owner), never by the app.
 REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM erp_app;
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+
 -- The app role must not be able to reach auth message bodies by any route.
 REVOKE ALL ON auth_message_outbox FROM erp_app;
 REVOKE ALL ON override_approvals FROM erp_app;
@@ -2813,3 +2816,31 @@ EXCEPTION WHEN insufficient_privilege THEN
     RAISE NOTICE 'Could not set the database timezone; the API sets it per connection instead.';
 END $$;
 
+-- ============================================================================
+-- FUNCTION LOCKDOWN — last, so it covers every function defined above.
+-- ============================================================================
+-- Functions: callable by erp_app only. Postgres lets PUBLIC execute every new
+-- function, and on Supabase PUBLIC includes the anon/authenticated roles behind
+-- its REST API — which would reach the SECURITY DEFINER auth functions directly,
+-- skipping every check the API makes first. This app never uses that REST API.
+-- (Same as migration 003; extension functions are left alone.)
+DO $$
+DECLARE
+    r RECORD;
+    has_anon BOOLEAN := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon');
+    has_auth BOOLEAN := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated');
+BEGIN
+    FOR r IN
+        SELECT p.oid::regprocedure AS sig
+          FROM pg_proc p
+         WHERE p.pronamespace = 'public'::regnamespace
+           AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', r.sig);
+        IF has_anon THEN EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM anon', r.sig); END IF;
+        IF has_auth THEN EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM authenticated', r.sig); END IF;
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO erp_app', r.sig);
+    END LOOP;
+    IF has_anon THEN REVOKE ALL ON SCHEMA public FROM anon; END IF;
+    IF has_auth THEN REVOKE ALL ON SCHEMA public FROM authenticated; END IF;
+END $$;
