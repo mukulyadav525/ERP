@@ -6,7 +6,7 @@ import useSWR from 'swr';
 import { useAuth } from '../lib/AuthContext';
 import { useI18n } from '../lib/i18n';
 import { NAV_CONFIG } from '../lib/rbac';
-import { fetcher } from '../lib/api';
+import { apiPut, fetcher } from '../lib/api';
 import { BranchFilter } from './ui';
 import { Icon } from './icons';
 import CommandPalette from './CommandPalette';
@@ -64,8 +64,17 @@ function modKeyLabel(): string {
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const { user, can, logout, roleLabel, roleColor } = useAuth();
+  const { user, can, logout, roleLabel, roleColor, refreshUser } = useAuth();
   const { t, lang, setLang } = useI18n();
+  // Language is part of the person's account: it follows them to any device.
+  useEffect(() => {
+    if (user?.language_pref && user.language_pref !== lang) setLang(user.language_pref);
+  }, [user?.language_pref]);   // eslint-disable-line react-hooks/exhaustive-deps
+  function toggleLanguage() {
+    const next = lang === 'en' ? 'hi' : 'en';
+    setLang(next);
+    if (user) void apiPut('/api/auth/me', { full_name: user.full_name, language_pref: next }).then(() => refreshUser()).catch(() => { /* still switched on this device */ });
+  }
   const [theme, setTheme] = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -170,7 +179,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </button>
             <div className="row tight" style={{ padding: '0 8px' }}>
               <button className="pill" style={{ flex: 1 }}
-                      onClick={() => setLang(lang === 'en' ? 'hi' : 'en')}
+                      onClick={toggleLanguage}
                       title={t('language')}>
                 {lang === 'en' ? 'हिन्दी' : 'English'}
               </button>

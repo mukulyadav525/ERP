@@ -109,6 +109,7 @@ purchase or payment is made at one chosen branch.
 
 | Mistake | How it is fixed | Who |
 |---|---|---|
+| Your own name, phone, email or language wrong | My account (click your name) → Your details — phone/email need your current password or PIN | Everyone |
 | Wrong name / phone / email / password on a user | Admin → Users → Edit | Owner |
 | Wrong details or PIN for counter, inventory or accounts staff | Staff → Edit | Owner; Manager (own branch) |
 | Someone left | Staff → Edit → untick *Can sign in* (their past bills stay) | Owner; Manager (own branch) |

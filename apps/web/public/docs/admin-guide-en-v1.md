@@ -106,6 +106,10 @@ expected and counted cash) and **Staff**.
 
 ## Sign-in security
 
+* Everyone can correct their own name, phone, email and language in My account; a phone
+  or email change asks for their current password or PIN, and is in the audit trail. A
+  changed email is notified to the old address. Role and branch stay with you.
+
 * **Click your name** (bottom left) → My account: change your password or PIN, turn on
   **two-step sign-in** (a code from an authenticator app after your password — strongly
   recommended for the Owner), see the devices you are signed in on and sign any of them

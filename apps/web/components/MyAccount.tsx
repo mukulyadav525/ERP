@@ -5,11 +5,12 @@ import useSWR from 'swr';
 import { apiPost, businessToday, fetcher, formatDate, formatDateTime } from '../lib/api';
 import { useAuth } from '../lib/AuthContext';
 import { useToast } from '../lib/ToastContext';
-import { Badge, Button, Field, KeyValue, Modal } from './ui';
+import { Badge, Button, Field, Modal } from './ui';
 import AccountSecurity from './AccountSecurity';
+import MyDetails from './MyDetails';
 
 export default function MyAccount({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { user, roleLabel, can } = useAuth();
+  const { can } = useAuth();
   const { data: me, mutate: mutateMe } = useSWR<any>(open && can('mark_attendance') ? '/api/hr/me' : null, fetcher);
   const [leave, setLeave] = useState({ from_date: '', to_date: '' });
   const toast = useToast();
@@ -55,7 +56,7 @@ export default function MyAccount({ open, onClose }: { open: boolean; onClose: (
   return (
     <Modal open={open} onClose={onClose} wide title="My account" footer={<Button onClick={onClose}>Close</Button>}>
       <div className="stack">
-        <KeyValue items={[['Name', user?.full_name], ['Role', roleLabel], ['Phone', user?.phone || '—'], ['Email', user?.email || '—']]} />
+        <MyDetails open={open} />
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void changePassword(); }}>
           <b>Change password</b>
           <Field label="Current password" required>

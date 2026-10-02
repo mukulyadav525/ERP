@@ -47,6 +47,8 @@ interface AuthContextType {
   setActiveBranchId: (id: string | null) => void;
   login: (token: string, user: AuthUser) => void;
   logout: () => Promise<void>;
+  /** Re-reads the signed-in person from the server (after they edit their details). */
+  refreshUser: () => Promise<void>;
   can: (permission: string) => boolean;
   roleLabel: string;
   roleColor: string;
@@ -117,6 +119,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .catch(() => { /* the session is valid either way; we just have less to show */ });
   }, [pickInitialBranch]);
 
+  const refreshUser = useCallback(async () => {
+    const stored = readStoredSession<AuthUser>();
+    const fresh = await apiGet<AuthUser>('/api/auth/me');
+    setUser(fresh);
+    if (stored) setStoredSession(stored.token, fresh);
+  }, []);
+
   const logout = useCallback(async () => {
     try { await apiPost('/api/auth/logout'); } catch { /* signing out locally still matters */ }
     clearStoredSession();
@@ -174,10 +183,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveBranchId,
     login,
     logout,
+    refreshUser,
     can,
     roleLabel: meta.label,
     roleColor: meta.color,
-  }), [user, isLoading, branches, activeBranchId, activeBranchName, activeBranch, setActiveBranchId, login, logout, can, meta.label, meta.color]);
+  }), [user, isLoading, branches, activeBranchId, activeBranchName, activeBranch, setActiveBranchId, login, logout, refreshUser, can, meta.label, meta.color]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

@@ -3,6 +3,13 @@
 For cashiers and sales staff. Everything here happens on the **Billing** screen unless
 it says otherwise.
 
+## Your account
+
+Click your name (bottom left) → **My account**. There you can change your name, phone,
+email and language (changing the phone or email asks for your current PIN or password,
+because you sign in with them), your password and PIN, and see where you are signed in.
+Your role and branch are set by the owner.
+
 ## Start of the day
 
 1. Sign in with your phone number and PIN (or your password, Google, or a code sent to

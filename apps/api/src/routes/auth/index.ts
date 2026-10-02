@@ -515,6 +515,50 @@ export default async function authRoutes(app: FastifyInstance) {
     };
   }));
 
+  /**
+   * Your own details: name, phone, email, language — for every role. Phone and
+   * email are sign-in identifiers, so changing either needs your current
+   * password (or PIN); the database function checks it and counts a wrong one
+   * towards the lockout. Role and branch are not accepted here.
+   */
+  app.put('/me', guarded(null, async ({ session, req }) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const fullName = str(body.full_name, 'Full name', { max: 120 });
+    const phone = body.phone === undefined ? (session.phone ?? '') : String(body.phone ?? '').replace(/\s+/g, '');
+    if (phone && phone.replace(/\D/g, '').length < 10) throw badRequest('Enter a 10-digit phone number.');
+    if (phone && !/^[0-9+-]{10,20}$/.test(phone)) throw badRequest('A phone number has only digits (and + or -).');
+    const email = body.email === undefined ? (session.email ?? '') : String(body.email ?? '').trim().toLowerCase();
+    if (email && (email.length > 254 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))) throw badRequest('Please enter a valid email address.');
+    const language = oneOf(body.language_pref ?? session.language_pref ?? 'en', 'Language', ['en', 'hi'] as const);
+    const secret = optionalStr(body.current_secret, 'Current password or PIN', { max: 256 });
+
+    const res = await sql<{ status: string; old_email: string | null; changed: string[] | null }>`
+      SELECT * FROM auth_update_profile(${session.user_id}, ${secret}, ${fullName}, ${phone || null}, ${email || null},
+                                        ${language}, ${clientIp(req)}::inet)
+    `.execute(db);
+    const row = res.rows[0];
+    switch (row?.status) {
+      case 'OK': break;
+      case 'WRONG_SECRET': throw unauthorized('Your current password or PIN is not right. Changing your phone or email needs it.');
+      case 'TAKEN': throw badRequest('Another account already uses that phone number or email.');
+      case 'NO_CREDENTIAL': throw badRequest('Your account has no password or PIN to confirm with. Ask the owner to change your phone or email.');
+      case 'NEED_CONTACT': throw badRequest('Keep at least a phone number or an email — it is how you sign in.');
+      case 'LOCKED': throw tooMany('Too many wrong attempts. Try again in a little while.');
+      default: throw unauthorized('Your session has ended. Please sign in again.');
+    }
+    const changed = row.changed ?? [];
+    // A changed email tells the OLD address, so a taken-over account is noticed.
+    if (changed.includes('email') && row.old_email && mailEnabled()) {
+      const brand = await chainDisplayName();
+      const mail = codeEmail({
+        brand, heading: 'The email on your account was changed',
+        note: `Your ${brand} account now uses ${email || 'no email'}. If you did not do this, tell the owner straight away so they can secure your account.`,
+      });
+      await queueAuthMessage({ channel: 'EMAIL', to_email: row.old_email, purpose: 'OTP', subject: `${brand}: your email was changed`, body: mail.text, html: mail.html });
+    }
+    return { ok: true, changed };
+  }));
+
   app.post('/logout', async (req) => {
     const token = bearerFrom(req as any);
     if (token) await sql`SELECT auth_logout(${hashToken(token)})`.execute(db);

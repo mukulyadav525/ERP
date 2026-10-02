@@ -251,6 +251,48 @@ try {
   check('what is payable is back where it was', Math.abs(Number(r.body.balance_after) - vBefore) < 0.01, `${r.body.balance_after} vs ${vBefore}`);
   const dueAfter = await one(`SELECT COALESCE(SUM(amount_due), 0) AS d FROM erp_vendor_bill_dues($1)`, [v.vendor_id]);
   check('the bill-by-bill dues are back too', Math.abs(Number(dueAfter.d) - Number(dueBefore.d)) < 0.01, `${dueAfter.d} vs ${dueBefore.d}`);
+
+  // ── Your own details (every role) ────────────────────────────────────────
+  section('Everyone edits their own details (My account)');
+  const cashierRow = await one(`SELECT user_id, full_name, phone, role FROM users WHERE phone = '9900000005'`);
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: 'Ramesh Y. (counter 1)' } });
+  check('a cashier renames themselves without re-entering anything', r.status === 200 && r.body.changed?.includes('name'), JSON.stringify(r.body));
+  check('…and it is saved', (await one(`SELECT full_name FROM users WHERE user_id = $1`, [cashierRow.user_id])).full_name === 'Ramesh Y. (counter 1)');
+  const newCashierPhone = phone();
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: 'Ramesh Y. (counter 1)', phone: newCashierPhone } });
+  check('changing the phone without the PIN is refused', r.status === 401, r.body.error);
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: 'Ramesh Y. (counter 1)', phone: newCashierPhone, current_secret: '9999' } });
+  check('…and with a wrong PIN', r.status === 401);
+  const fails = await one(`SELECT failed_attempts FROM users WHERE user_id = $1`, [cashierRow.user_id]);
+  check('…which counts towards the lockout', fails.failed_attempts >= 1, `${fails.failed_attempts}`);
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: 'Ramesh Y. (counter 1)', phone: newCashierPhone, current_secret: '1234' } });
+  check('with the right PIN the phone changes', r.status === 200 && r.body.changed?.includes('phone'), JSON.stringify(r.body));
+  check('the new phone signs in with the PIN', Boolean(await loginPin(newCashierPhone, '1234')));
+  r = await call('POST', '/api/auth/login/pin', { body: { phone: '9900000005', pin: '1234' } });
+  check('…and the old phone no longer does', r.status === 401, `${r.status}`);
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: 'Ramesh Y. (counter 1)', phone: '9900000006', current_secret: '1234' } });
+  check("another person's phone is refused", r.status === 400 && /already uses/.test(r.body.error ?? ''), r.body.error);
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: cashierRow.full_name, phone: '9900000005', current_secret: '1234', role: 'OWNER_ADMIN', branch_id: null } });
+  check('changing back works, and a role in the body is ignored', r.status === 200, r.body.error ?? '');
+  const cashierAfter = await one(`SELECT role, phone FROM users WHERE user_id = $1`, [cashierRow.user_id]);
+  check("…the cashier is still a cashier, at their phone", cashierAfter.role === "CASHIER" && cashierAfter.phone === "9900000005", JSON.stringify(cashierAfter));
+  r = await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: cashierRow.full_name, language_pref: 'hi' } });
+  const cashierMe = await call('GET', '/api/auth/me', { token: cashier });
+  check('language is saved to the account', cashierMe.body.language_pref === 'hi', cashierMe.body.language_pref);
+  await call('PUT', '/api/auth/me', { token: cashier, body: { full_name: cashierRow.full_name, language_pref: 'en' } });
+
+  const meera = await one(`SELECT user_id, full_name, email FROM users WHERE email = 'meera@hardwareerp.in'`);
+  r = await call('PUT', '/api/auth/me', { token: accountant, body: { full_name: meera.full_name, email: 'owner@hardwareerp.in', current_secret: 'Account@12345' } });
+  check("the accountant cannot take the owner's email", r.status === 400);
+  const meeraNewEmail = `meera.${Date.now()}@shop.in`;
+  r = await call('PUT', '/api/auth/me', { token: accountant, body: { full_name: meera.full_name, email: meeraNewEmail, current_secret: 'Account@12345' } });
+  check('the accountant changes their email with their password', r.status === 200 && r.body.changed?.includes('email'), r.body.error ?? '');
+  check('…and signs in with it', Boolean(await login(meeraNewEmail, 'Account@12345')));
+  await call('PUT', '/api/auth/me', { token: accountant, body: { full_name: meera.full_name, email: 'meera@hardwareerp.in', current_secret: 'Account@12345' } });
+  r = await call('PUT', '/api/auth/me', { token: owner, body: { full_name: 'Rohan Mehta', email: '', phone: '', current_secret: 'Owner@12345' } });
+  check('nobody can remove both their phone and email', r.status === 400, r.body.error);
+  const prof = await one(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'PROFILE_UPDATED' AND entity_id = $1`, [cashierRow.user_id]);
+  check('every change is in the audit trail', prof.n >= 3, `${prof.n}`);
 } catch (err) {
   failures.push(`suite crashed: ${err.stack ?? err}`);
   console.log(`${C.r}suite crashed:${C.x}`, err);
