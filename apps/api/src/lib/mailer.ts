@@ -3,6 +3,8 @@
 //
 // Sent through an HTTPS email API rather than SMTP: Railway blocks outgoing SMTP
 // on its cheaper plans, and an API key is one setting instead of five.
+//   GMAIL_CLIENT_SECRET + GMAIL_REFRESH_TOKEN + MAIL_FROM — Gmail API: sends as
+//                                  your own Gmail account, over HTTPS (see docs/OPERATIONS.md)
 //   BREVO_API_KEY  + MAIL_FROM   — Brevo: sends from one verified address (a
 //                                  Gmail works), free tier 300 emails a day
 //   RESEND_API_KEY + MAIL_FROM   — Resend: needs your own verified domain
@@ -21,10 +23,66 @@ function parseFrom(from: string): { name?: string; email: string } {
 // For automated tests only: send to a local fake mail server instead.
 const apiBase = (fallback: string) => (process.env.MAIL_API_URL || fallback).replace(/\/$/, '');
 
+// ── Gmail API ───────────────────────────────────────────────────────────────
+const gmailToken = { value: '', expires: 0 };
+
+async function gmailAccessToken(): Promise<string> {
+  if (gmailToken.value && gmailToken.expires > Date.now() + 60_000) return gmailToken.value;
+  const res = await fetch(process.env.MAIL_TOKEN_URL || 'https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: env.mail.gmailClientId, client_secret: env.mail.gmailClientSecret,
+      refresh_token: env.mail.gmailRefreshToken, grant_type: 'refresh_token',
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`gmail sign-in responded ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const j = await res.json() as { access_token: string; expires_in?: number };
+  Object.assign(gmailToken, { value: j.access_token, expires: Date.now() + (j.expires_in ?? 3000) * 1000 });
+  return j.access_token;
+}
+
+const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+const wrap = (s: string) => s.replace(/.{1,76}/g, '$&\r\n').trimEnd();
+/** Header text that may contain non-ASCII (RFC 2047). */
+const headerText = (s: string) => (/^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${b64(s)}?=`);
+
+function mimeMessage(from: { name?: string; email: string }, msg: { to: string; subject: string; text: string; html?: string }): string {
+  const boundary = `b_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  const head = [
+    `From: ${from.name ? `${headerText(from.name)} <${from.email}>` : from.email}`,
+    `To: ${msg.to}`,
+    `Subject: ${headerText(msg.subject)}`,
+    'MIME-Version: 1.0',
+  ];
+  if (!msg.html) {
+    return [...head, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', wrap(b64(msg.text))].join('\r\n');
+  }
+  return [
+    ...head, `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+    `--${boundary}`, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', wrap(b64(msg.text)),
+    `--${boundary}`, 'Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', wrap(b64(msg.html)),
+    `--${boundary}--`, '',
+  ].join('\r\n');
+}
+
+async function sendViaGmail(from: { name?: string; email: string }, msg: { to: string; subject: string; text: string; html?: string }): Promise<Response> {
+  const raw = Buffer.from(mimeMessage(from, msg), 'utf8').toString('base64url');
+  return fetch(`${apiBase('https://gmail.googleapis.com')}/gmail/v1/users/me/messages/send`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${await gmailAccessToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw }),
+    signal: AbortSignal.timeout(15_000),
+  });
+}
+
 export async function sendEmail(msg: { to: string; subject: string; text: string; html?: string }): Promise<void> {
   if (!env.mail.enabled) throw new Error('Email is not configured.');
   const from = parseFrom(env.mail.from);
-  const res = env.mail.provider === 'brevo'
+  const res = env.mail.provider === 'gmail'
+    ? await sendViaGmail(from, msg)
+    : env.mail.provider === 'brevo'
     ? await fetch(`${apiBase('https://api.brevo.com')}/v3/smtp/email`, {
         method: 'POST',
         headers: { 'api-key': env.mail.brevoKey, 'Content-Type': 'application/json', Accept: 'application/json' },

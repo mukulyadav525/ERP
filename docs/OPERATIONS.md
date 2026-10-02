@@ -143,7 +143,7 @@ The sign-in screen offers only what this server can actually do (`GET /api/auth/
 |---|---|---|
 | Email or phone + password, phone + PIN | nothing | yes |
 | **Sign in with Google** | `GOOGLE_OAUTH_CLIENT_ID` on the API | no |
-| **Email code**, and **Forgot password** by email link | `BREVO_API_KEY` (or `RESEND_API_KEY`) + `MAIL_FROM` on the API | no |
+| **Email code**, and **Forgot password** by email link | `GMAIL_CLIENT_SECRET` + `GMAIL_REFRESH_TOKEN` (or `BREVO_API_KEY`, or `RESEND_API_KEY`) + `MAIL_FROM` on the API | no |
 | Phone code (WhatsApp) | `WHATSAPP_CLOUD_API_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` | no |
 | **Two-step sign-in** (authenticator app) | nothing — each person turns it on in My account | per person |
 
@@ -153,6 +153,20 @@ OAuth client ID → *Web application*. Add your web address (e.g.
 `https://bhawani-one.up.railway.app`) under **Authorised JavaScript origins**; no
 redirect URI is needed. Put the client ID in `GOOGLE_OAUTH_CLIENT_ID` on the **API**
 service. A Google account can sign in only if its email is on a user in Admin → Users.
+
+**Email (your own Gmail).** Sends as your Gmail account through the Gmail API over
+HTTPS (SMTP is blocked on Railway's cheaper plans). One-time setup:
+1. Google Cloud → APIs & Services → Library → enable **Gmail API**.
+2. OAuth consent screen → Data access → add the scope `.../auth/gmail.send`, and
+   **publish the app** (Testing-mode tokens expire after 7 days).
+3. On the OAuth client, add `https://developers.google.com/oauthplayground` under
+   **Authorised redirect URIs**.
+4. Open the OAuth Playground → gear icon → *Use your own OAuth credentials* (client ID
+   and secret) → authorise `https://www.googleapis.com/auth/gmail.send` as the sending
+   Gmail → *Exchange authorization code for tokens* → copy the **refresh token**.
+5. On the API service set `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` and
+   `MAIL_FROM="Shop name <that Gmail>"`. The client ID is the Google sign-in one.
+If both Gmail and Brevo are set, Gmail is used.
 
 **Email (Brevo).** Create a free Brevo account, add and verify your sender address
 (Senders & IP → Senders; a Gmail address works), create an API key (SMTP & API → API

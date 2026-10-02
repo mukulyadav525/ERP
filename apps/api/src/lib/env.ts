@@ -64,9 +64,14 @@ export const env = {
   // (Railway's cheaper plans block outgoing SMTP). Brevo sends from a single
   // verified address (a Gmail is fine); Resend needs a verified domain.
   mail: {
-    provider: (process.env.BREVO_API_KEY ? 'brevo' : process.env.RESEND_API_KEY ? 'resend' : null) as 'brevo' | 'resend' | null,
+    provider: (process.env.GMAIL_REFRESH_TOKEN && process.env.GMAIL_CLIENT_SECRET ? 'gmail'
+      : process.env.BREVO_API_KEY ? 'brevo' : process.env.RESEND_API_KEY ? 'resend' : null) as 'gmail' | 'brevo' | 'resend' | null,
     brevoKey: process.env.BREVO_API_KEY ?? '',
     resendKey: process.env.RESEND_API_KEY ?? '',
+    // Gmail API: sends as the Gmail account itself. Client ID defaults to the one used for Google sign-in.
+    gmailClientId: process.env.GMAIL_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    gmailClientSecret: process.env.GMAIL_CLIENT_SECRET ?? '',
+    gmailRefreshToken: process.env.GMAIL_REFRESH_TOKEN ?? '',
     from: process.env.MAIL_FROM ?? '',
     get enabled() { return Boolean(this.provider && this.from); },
   },

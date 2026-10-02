@@ -2089,7 +2089,7 @@ BEGIN
     -- Bind the Google subject on first successful sign-in so later logins match on
     -- the immutable subject id rather than on a mutable email address.
     IF p_google_sub IS NOT NULL AND v_user.google_sub IS DISTINCT FROM p_google_sub THEN
-        UPDATE users SET google_sub = p_google_sub WHERE user_id = v_user.user_id;
+        UPDATE users u SET google_sub = p_google_sub WHERE u.user_id = v_user.user_id;
     END IF;
 
     INSERT INTO login_attempts (identifier, ip_address, succeeded) VALUES (lower(p_email), p_ip, TRUE);
@@ -3039,7 +3039,8 @@ INSERT INTO schema_migrations (version) VALUES
     ('002_concurrency_and_performance'),
     ('003_lock_down_functions'),
     ('004_sign_in_upgrades'),
-    ('005_own_profile');
+    ('005_own_profile'),
+    ('006_google_sign_in_fix');
 
 -- ============================================================================
 -- APPLICATION ROLE & GRANTS

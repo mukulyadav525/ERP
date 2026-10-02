@@ -211,6 +211,25 @@ try {
   const audits = await one(`SELECT count(*)::int AS n FROM audit_log WHERE entity_id = $1 AND action IN ('TWO_STEP_ENABLED','TWO_STEP_RESET')`, [sunitaId]);
   check('turning it on and resetting it are in the audit trail', audits.n >= 2, `${audits.n}`);
 
+  // ── Google sign-in, the database half ───────────────────────────────────
+  // The API checks Google's signature before this runs, and that cannot be faked
+  // offline — so this calls the function the API calls, with an already-verified
+  // identity. (It once failed on the very first sign-in with "user_id is ambiguous".)
+  section('Google sign-in: matching a verified Google account to a user');
+  const gTok = (n) => `${n}`.padEnd(64, 'a');
+  await db.query(`UPDATE users SET google_sub = NULL WHERE lower(email) = 'owner@hardwareerp.in'`);
+  let g = await one(`SELECT * FROM auth_login_google('Owner@HardwareERP.in', 'google-sub-1', $1, '127.0.0.1'::inet, 'test', NULL, 60)`, [gTok('g1')]);
+  check('a registered email signs in on the first Google sign-in', g?.status === 'OK' && Boolean(g.user_id), JSON.stringify(g));
+  const bound = await one(`SELECT google_sub FROM users WHERE lower(email) = 'owner@hardwareerp.in'`);
+  check('…and the Google account id is remembered', bound?.google_sub === 'google-sub-1', bound?.google_sub);
+  g = await one(`SELECT * FROM auth_login_google('owner@hardwareerp.in', 'google-sub-1', $1, '127.0.0.1'::inet, 'test', NULL, 60)`, [gTok('g2')]);
+  check('the next sign-in works too', g?.status === 'OK', g?.status);
+  g = await one(`SELECT * FROM auth_login_google('someone.else@example.com', 'google-sub-9', $1, '127.0.0.1'::inet, 'test', NULL, 60)`, [gTok('g3')]);
+  check('an account nobody added is turned away, not created', g?.status === 'UNKNOWN_ACCOUNT', g?.status);
+  const stranger = await one(`SELECT count(*)::int AS n FROM users WHERE lower(email) = 'someone.else@example.com'`);
+  check('…and no user was created for it', stranger.n === 0);
+  await db.query(`UPDATE users SET google_sub = NULL WHERE lower(email) = 'owner@hardwareerp.in'`);
+
   // ── Nothing claims a delivery that did not happen ────────────────────────
   section('A code with no way to send it');
   r = await call('POST', '/api/auth/otp/request', { body: { phone: '9900000005', purpose: 'LOGIN' } });
