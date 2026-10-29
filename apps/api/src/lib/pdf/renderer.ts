@@ -129,6 +129,8 @@ export interface DocumentModel {
   notes?: string | null;
   /** Extra terms for this document on top of the business-wide ones. */
   extraTerms?: string[];
+  /** Overrides the page-footer line for this document (e.g. a consolidated bill). */
+  footerNote?: string | null;
 }
 
 // ── Font resolution ─────────────────────────────────────────────────────────
@@ -142,7 +144,7 @@ const FONT_CANDIDATES = [
   resolve(process.cwd(), 'assets/fonts/Lohit-Devanagari.ttf'),
 ];
 
-function devanagariFontPath(): string | null {
+export function devanagariFontPath(): string | null {
   for (const p of FONT_CANDIDATES) if (existsSync(p)) return p;
   return null;
 }
@@ -909,7 +911,7 @@ export async function renderDocument(model: DocumentModel): Promise<Buffer> {
         doc.switchToPage(range.start + i);
         const fy = PAGE.footerTop;
         line(ctx, PAGE.left, fy, PAGE.right, fy, COLORS.rule, 0.6);
-        const note = model.business.footer_note
+        const note = model.footerNote ?? model.business.footer_note
           ?? (model.kind === 'ESTIMATE'
             ? 'This is an estimate, not a tax invoice. Prices are subject to change until the order is confirmed.'
             : model.kind === 'CREDIT_NOTE'

@@ -11,6 +11,7 @@ import { BranchFilter } from './ui';
 import { Icon } from './icons';
 import CommandPalette from './CommandPalette';
 import MyAccount from './MyAccount';
+import KeyboardHelp from './KeyboardHelp';
 
 type Theme = 'light' | 'dark' | 'system';
 const THEME_KEY = 'erp_theme';
@@ -79,25 +80,63 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
   const title = usePageTitle();
 
   // Global shortcuts. Deliberately few, and deliberately not the ones the browser
   // already owns: Ctrl/Cmd+K opens search (no browser meaning), Ctrl/Cmd+N opens a
   // new bill. Anything typed into a field is left alone — a cashier keying a
   // customer's name must never trip a navigation.
+  //
+  // Keyboard-first: every page is reachable without the mouse.
+  //   Alt+1…9  the nth page in the menu      F2  new bill      ?/F1  the key map
+  //   /        this page's search box        Alt+N  this page's main "new" button
+  //   [ ]      previous / next tab
+  // Physical key codes (e.code) are used with Alt, because on a Mac Option+1
+  // types "¡" rather than reporting "1".
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
       const el = document.activeElement as HTMLElement | null;
       const typing = Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
         || el.tagName === 'SELECT' || el.isContentEditable));
+      const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]');
+      const top = dialogs.length ? dialogs[dialogs.length - 1] : null;
       const key = e.key.toLowerCase();
-      if (key === 'k') { e.preventDefault(); setPaletteOpen((v) => !v); return; }
+      if (mod && key === 'k') { e.preventDefault(); setPaletteOpen((v) => !v); return; }
       // A new bill from inside a text field would discard what is being typed.
-      if (key === 'n' && !typing && can('create_invoice')) {
+      if (((mod && key === 'n' && !typing) || e.key === 'F2') && !top && can('create_invoice')) {
         e.preventDefault();
         void router.push('/billing?new=1');
+        return;
+      }
+      if ((e.key === 'F1' || (e.key === '?' && !typing)) && !mod) { e.preventDefault(); setKeysOpen(true); return; }
+      if (e.altKey && !mod && /^Digit[1-9]$/.test(e.code) && !top) {
+        e.preventDefault();
+        const items = NAV_CONFIG.flatMap((sec) => sec.items).filter((i) => can(i.permission));
+        const item = items[Number(e.code.slice(5)) - 1];
+        if (item) void router.push(item.href);
+        return;
+      }
+      const scope: ParentNode = top ?? document.querySelector('main') ?? document;
+      if (e.altKey && !mod && e.code === 'KeyN') {
+        const btn = scope.querySelector<HTMLElement>('.page-actions .btn.primary:not([disabled]), [data-hotkey="new"]:not([disabled])');
+        if (btn) { e.preventDefault(); btn.click(); }
+        return;
+      }
+      if (typing || mod || e.altKey) return;
+      // Billing owns "/" (its item search) — see pages/billing.
+      if (e.key === '/' && !router.pathname.startsWith('/billing')) {
+        const box = scope.querySelector<HTMLInputElement>('.searchbar input, input[type="search"]');
+        if (box) { e.preventDefault(); box.focus(); box.select(); }
+        return;
+      }
+      if (e.key === '[' || e.key === ']') {
+        const tabs = [...(scope.querySelector('[role="tablist"]')?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [])];
+        if (!tabs.length) return;
+        const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
+        const next = tabs[(at + (e.key === ']' ? 1 : -1) + tabs.length) % tabs.length];
+        e.preventDefault(); next.click(); next.focus();
       }
     }
     window.addEventListener('keydown', onKey);
@@ -118,6 +157,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     '/admin': Number(overview?.pending_registrations ?? 0),
     '/billing': Number(overview?.open_stock_conflicts ?? 0),
   };
+
+  // Alt+1…9 follows the menu as this person sees it.
+  const navIndex = new Map(NAV_CONFIG.flatMap((sec) => sec.items).filter((i) => can(i.permission))
+    .slice(0, 9).map((i, k) => [i.href, k + 1] as const));
 
   const initials = (user?.full_name ?? '?')
     .split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase();
@@ -155,7 +198,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                       : router.pathname.startsWith(item.href);
                     const count = counts[item.href] ?? 0;
                     return (
-                      <Link key={item.href} href={item.href} className={`nav-item${active ? ' active' : ''}`}>
+                      <Link key={item.href} href={item.href} className={`nav-item${active ? ' active' : ''}`}
+                        title={navIndex.get(item.href) ? `Alt+${navIndex.get(item.href)}` : undefined}>
                         <span className="ico"><Icon name={item.icon} size={17} /></span>
                         <span>{t(item.labelKey)}</span>
                         {count > 0 && <span className="count">{count}</span>}
@@ -216,6 +260,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <MyAccount open={accountOpen} onClose={() => setAccountOpen(false)} />
+      <KeyboardHelp open={keysOpen} onClose={() => setKeysOpen(false)} />
     </>
   );
 }

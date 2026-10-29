@@ -24,7 +24,7 @@ import {
   writeBranch, resolveBranchScope, limit as clampLimit, arrayOf,
 } from '../../lib/http.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
-import { loadSettings, canSeeCost, maskCost } from '../../lib/settings.js';
+import { loadSettings, resolveSetting, canSeeCost, maskCost, loyaltyScale } from '../../lib/settings.js';
 import { round2 } from '../../lib/tax.js';
 import {
   priceBasket, rawLinesFromStored, assertPaymentsSettle, PAYMENT_METHODS,
@@ -33,7 +33,9 @@ import {
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
 import { queueMessage } from '../../lib/whatsapp.js';
-import { buildInvoicePdf } from '../../lib/pdf/index.js';
+import { buildInvoicePdf, buildInvoiceModel, buildInvoiceThermal, renderDocument, renderThermal, type DocumentModel, type ThermalWidth } from '../../lib/pdf/index.js';
+import type { DocumentLine } from '../../lib/pdf/renderer.js';
+import { dateOnly, money } from '../../lib/pdf/theme.js';
 import type { Tx } from '../../lib/db.js';
 import { lockKey } from '../../lib/db.js';
 import type { Session } from '../../lib/session.js';
@@ -76,6 +78,110 @@ function parseDocFields(body: Record<string, any>) {
  * up, with the sale unit's printed label, its size in base units, and the GST rate
  * that applied on the billing date (2.7), not today's.
  */
+/** Everything a printed bill is built from, read from the finalised rows. */
+async function invoiceForPrint(trx: Tx, id: string) {
+  const invoice = (await sql<any>`
+    SELECT i.*, b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
+           b.phone AS branch_phone, b.state_code AS branch_state_code,
+           c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
+           c.address AS customer_address, c.company_name AS customer_company,
+           c.state AS customer_state, c.state_code AS customer_state_code,
+           eu.full_name AS sold_by_name, qt.quotation_number
+      FROM invoices i JOIN branches b ON b.branch_id = i.branch_id
+      LEFT JOIN customers c ON c.customer_id = i.customer_id
+      LEFT JOIN employees e ON e.employee_id = i.sold_by_employee_id
+      LEFT JOIN users eu ON eu.user_id = e.user_id
+      LEFT JOIN quotations qt ON qt.quotation_id = i.source_quotation_id
+     WHERE i.invoice_id = ${id}
+  `.execute(trx)).rows[0];
+  if (!invoice) throw notFound('Invoice not found.');
+  const lines = await invoiceLineRows(trx, id, invoice.server_received_at);
+  const payments = (await sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx)).rows;
+  return { invoice, lines, payments };
+}
+
+/** 58 or 80 mm: as asked, else the branch's setting. */
+async function thermalWidth(trx: Tx, raw: unknown, branchId: string | null): Promise<ThermalWidth> {
+  const asked = Number(raw);
+  const mm = Number.isFinite(asked) && asked > 0 ? asked : Number(await resolveSetting(trx, 'thermal_paper_width_mm', branchId));
+  return mm < 70 ? 58 : 80;
+}
+
+/**
+ * Several bills of one type as one document. Lines are listed bill by bill
+ * (each carries its bill number and date), or merged item by item; the totals
+ * are the bills' own stored totals added up, never recomputed.
+ */
+function combineModels(
+  models: DocumentModel[], invoices: Array<Record<string, any>>,
+  o: { from: string; to: string; group: 'bill' | 'item'; isGst: boolean },
+): DocumentModel {
+  const first = models[0];
+  let lines: DocumentLine[];
+  if (o.group === 'item') {
+    const merged = new Map<string, DocumentLine>();
+    for (const l of models.flatMap((m) => m.lines)) {
+      const key = [l.description, l.unit_label, l.rate, l.gst_rate_pct, l.hsn_code].join('|');
+      const cur = merged.get(key);
+      if (!cur) { merged.set(key, { ...l, note: null }); continue; }
+      cur.qty = Number((cur.qty + l.qty).toFixed(4));
+      cur.discount_amount = round2((cur.discount_amount ?? 0) + (l.discount_amount ?? 0));
+      cur.taxable_value = round2(cur.taxable_value + l.taxable_value);
+      cur.cgst_amount = round2((cur.cgst_amount ?? 0) + (l.cgst_amount ?? 0));
+      cur.sgst_amount = round2((cur.sgst_amount ?? 0) + (l.sgst_amount ?? 0));
+      cur.igst_amount = round2((cur.igst_amount ?? 0) + (l.igst_amount ?? 0));
+      cur.line_total = round2(cur.line_total + l.line_total);
+    }
+    lines = [...merged.values()];
+  } else {
+    lines = models.flatMap((m, k) => m.lines.map((l) => ({
+      ...l,
+      note: [`Bill ${invoices[k].invoice_number}, ${dateOnly(invoices[k].server_received_at)}`, l.note].filter(Boolean).join('  •  '),
+    })));
+  }
+  const sum = (f: (m: DocumentModel) => number) => round2(models.reduce((acc, m) => acc + f(m), 0));
+  const byMethod = new Map<string, number>();
+  for (const p of models.flatMap((m) => m.payments ?? [])) byMethod.set(p.method, round2((byMethod.get(p.method) ?? 0) + p.amount));
+  const grand = sum((m) => m.totals.grand_total);
+  const paid = sum((m) => m.amount_paid ?? 0);
+  const numbers = invoices.map((i) => i.invoice_number);
+  return {
+    kind: o.isGst ? 'TAX_INVOICE' : 'CASH_MEMO',
+    title: o.isGst ? 'CONSOLIDATED BILL (GST)' : 'CONSOLIDATED BILL',
+    business: { ...first.business,
+      declaration: 'We declare that this summary shows the bills listed, with the amounts and tax as they were issued.' },
+    billTo: first.billTo,
+    meta: [
+      ['Period', `${dateOnly(o.from)} to ${dateOnly(o.to)}`],
+      ['Bills included', String(invoices.length)],
+      ...(numbers.length > 1
+        ? [['First bill', String(numbers[0])], ['Last bill', String(numbers[numbers.length - 1])]] as Array<[string, string]>
+        : [['Bill', String(numbers[0])]] as Array<[string, string]>),
+      ['Prepared on', dateOnly(new Date().toISOString())],
+    ],
+    lines,
+    totals: {
+      gross: sum((m) => m.totals.gross ?? m.totals.taxable_total + m.totals.discount_total),
+      discount_total: sum((m) => m.totals.discount_total),
+      taxable_total: sum((m) => m.totals.taxable_total),
+      cgst_total: sum((m) => m.totals.cgst_total),
+      sgst_total: sum((m) => m.totals.sgst_total),
+      igst_total: sum((m) => m.totals.igst_total),
+      round_off: sum((m) => m.totals.round_off),
+      grand_total: grand,
+    },
+    payments: [...byMethod.entries()].map(([method, amount]) => ({ method, amount })),
+    amount_paid: paid,
+    balance_due: round2(grand - paid),
+    interstate: models.some((m) => m.interstate),
+    showTax: o.isGst,
+    watermark: null,
+    notes: `Bills: ${invoices.map((i) => `${i.invoice_number} (${dateOnly(i.server_received_at)}, ${money(Number(i.grand_total) + Number(i.round_off ?? 0))})`).join('; ')}`,
+    extraTerms: ['This consolidated bill summarises the bills listed above. Each original bill remains the tax document; this summary is not a separate invoice.'],
+    footerNote: 'Consolidated bill — a summary of bills already issued, prepared on request. Not a separate tax invoice.',
+  };
+}
+
 async function invoiceLineRows(trx: Tx, invoiceId: string, billedAt: unknown) {
   return (await sql<any>`
     SELECT il.*, p.name AS product_name, p.sku, p.hsn_code, p.base_unit,
@@ -87,7 +193,7 @@ async function invoiceLineRows(trx: Tx, invoiceId: string, billedAt: unknown) {
            round(il.rate_locked_at_scan * COALESCE(pu.multiplier_to_base, 1), 2) AS rate_per_sale_unit,
            sb.batch_number,
            tr.base_shade, tr.tint_formula,
-           COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+           COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) AS gst_rate_pct,
            (SELECT string_agg(ss.serial_number, ', ') FROM stock_serials ss
              WHERE ss.invoice_line_id = il.line_id) AS serial_numbers,
            COALESCE((SELECT SUM(srl.qty_base_unit) FROM sales_return_lines srl
@@ -652,25 +758,7 @@ export default async function billingRoutes(app: FastifyInstance) {
   // cannot influence what a tax invoice says by changing what it posts.
   app.get('/invoices/:id/pdf', guarded('view_billing', async ({ db: trx, req, reply }) => {
     const id = uuid((req.params as any).id, 'invoice_id');
-    const invoice = (await sql<any>`
-      SELECT i.*, b.name AS branch_name, b.address AS branch_address, b.gstin AS branch_gstin,
-             b.phone AS branch_phone, b.state_code AS branch_state_code,
-             c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin,
-             c.address AS customer_address, c.company_name AS customer_company,
-             c.state AS customer_state, c.state_code AS customer_state_code,
-             eu.full_name AS sold_by_name, qt.quotation_number
-        FROM invoices i JOIN branches b ON b.branch_id = i.branch_id
-        LEFT JOIN customers c ON c.customer_id = i.customer_id
-        LEFT JOIN employees e ON e.employee_id = i.sold_by_employee_id
-        LEFT JOIN users eu ON eu.user_id = e.user_id
-        LEFT JOIN quotations qt ON qt.quotation_id = i.source_quotation_id
-       WHERE i.invoice_id = ${id}
-    `.execute(trx)).rows[0];
-    if (!invoice) throw notFound('Invoice not found.');
-
-    const lines = await invoiceLineRows(trx, id, invoice.server_received_at);
-    const payments = (await sql<any>`SELECT * FROM invoice_payments WHERE invoice_id = ${id}`.execute(trx)).rows;
-
+    const { invoice, lines, payments } = await invoiceForPrint(trx, id);
     const pdf = await buildInvoicePdf(trx, invoice, lines, payments);
     const label = invoice.status === 'DRAFT'
       ? `Draft-${String(id).slice(0, 8)}`
@@ -680,6 +768,83 @@ export default async function billingRoutes(app: FastifyInstance) {
       .header('Content-Disposition',
         `inline; filename="${(invoice.invoice_type === 'GST' ? 'Invoice-' : 'Bill-')}${String(label).replace(/[^\w.-]/g, '_')}.pdf"`)
       .send(pdf);
+  }));
+
+  // ── Thermal receipt (58 / 80 mm roll) ─────────────────────────────────────
+  // The same finalised rows as the A4 bill, laid out for a roll printer.
+  app.get('/invoices/:id/thermal', guarded('view_billing', async ({ session, db: trx, req, reply }) => {
+    const id = uuid((req.params as any).id, 'invoice_id');
+    const { invoice, lines, payments } = await invoiceForPrint(trx, id);
+    const width = await thermalWidth(trx, (req.query as any)?.width, invoice.branch_id ?? session.branch_id);
+    const pdf = await buildInvoiceThermal(trx, invoice, lines, payments, width);
+    const label = invoice.status === 'DRAFT' ? `Draft-${String(id).slice(0, 8)}` : (invoice.invoice_number ?? id);
+    return reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `inline; filename="Receipt-${String(label).replace(/[^\w.-]/g, '_')}.pdf"`)
+      .send(pdf);
+  }));
+
+  // ── Combined (master) bill for one customer over a period ─────────────────
+  //
+  // Puts every finalised bill of ONE type (GST or non-GST) a customer had in a
+  // period on one document — what a contractor settling monthly asks for. It is
+  // a summary of bills already issued, not a new invoice: it draws no number,
+  // moves nothing, and says on its face that the original bills stand.
+  //   format=json   what would be included (the screen shows this first)
+  //   format=pdf    A4, item lines listed bill by bill (group=bill) or merged (group=item)
+  //   format=thermal  the same on a roll
+  app.get('/combined-bill', guarded('view_billing', async ({ session, db: trx, req, reply }) => {
+    const q = (req.query ?? {}) as Record<string, string | undefined>;
+    const customerId = uuid(q.customer_id, 'Customer');
+    const invoiceType = oneOf(q.type ?? 'GST', 'Bill type', ['GST', 'NON_GST'] as const);
+    const from = str(q.from, 'From date', { max: 10 });
+    const to = str(q.to, 'To date', { max: 10 });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw badRequest('Dates are YYYY-MM-DD.');
+    if (from > to) throw badRequest('The start date is after the end date.');
+    const format = oneOf(q.format ?? 'json', 'Format', ['json', 'pdf', 'thermal'] as const);
+    const group = oneOf(q.group ?? 'bill', 'Grouping', ['bill', 'item'] as const);
+    const branchId = resolveBranchScope(session, q.branch_id);
+
+    const customer = (await sql<any>`SELECT * FROM customers WHERE customer_id = ${customerId}`.execute(trx)).rows[0];
+    if (!customer) throw notFound('Customer not found.');
+
+    const invoices = (await sql<any>`
+      SELECT i.invoice_id, i.invoice_number, i.branch_id, i.server_received_at, i.grand_total, i.round_off
+        FROM invoices i
+       WHERE i.customer_id = ${customerId} AND i.status = 'FINAL' AND i.invoice_type = ${invoiceType}::invoice_type
+         AND i.server_received_at >= ${from}::date AND i.server_received_at < (${to}::date + 1)
+         ${branchId ? sql`AND i.branch_id = ${branchId}` : sql``}
+       ORDER BY i.server_received_at, i.invoice_number
+    `.execute(trx)).rows;
+
+    const branches = [...new Set(invoices.map((i) => i.branch_id))];
+    const summary = {
+      customer: { customer_id: customer.customer_id, name: customer.name, company_name: customer.company_name },
+      type: invoiceType, from, to,
+      count: invoices.length,
+      total: round2(invoices.reduce((s, i) => s + Number(i.grand_total) + Number(i.round_off ?? 0), 0)),
+      branches: branches.length,
+      invoices: invoices.map((i) => ({
+        invoice_id: i.invoice_id, invoice_number: i.invoice_number, date: i.server_received_at,
+        total: round2(Number(i.grand_total) + Number(i.round_off ?? 0)),
+      })),
+    };
+    if (format === 'json') return summary;
+    if (!invoices.length) throw badRequest(`${customer.name} has no ${invoiceType === 'GST' ? 'GST' : 'non-GST'} bills from ${from} to ${to}.`);
+    // A GST document belongs to one GSTIN, i.e. one branch.
+    if (branches.length > 1) throw badRequest('These bills are from more than one branch. Pick a branch in the top bar and try again.');
+
+    const models: DocumentModel[] = [];
+    for (const i of invoices) {
+      const { invoice, lines, payments } = await invoiceForPrint(trx, i.invoice_id);
+      models.push(await buildInvoiceModel(trx, invoice, lines, payments));
+    }
+    const model = combineModels(models, invoices, { from, to, group, isGst: invoiceType === 'GST' });
+    const pdf = format === 'thermal'
+      ? await renderThermal(model, await thermalWidth(trx, q.width, branches[0]))
+      : await renderDocument(model);
+    const name = `Combined-${String(customer.name).replace(/[^\w.-]+/g, '_')}-${from}-to-${to}.pdf`;
+    return reply.header('Content-Type', 'application/pdf').header('Content-Disposition', `inline; filename="${name}"`).send(pdf);
   }));
 
   // ── Commit a sale ─────────────────────────────────────────────────────────
@@ -876,7 +1041,7 @@ export default async function billingRoutes(app: FastifyInstance) {
     let pointsRedeemed = 0;
     if (loyaltyPayment && loyaltyPayment.amount > 0) {
       if (!customer) throw badRequest('Loyalty points can only be redeemed for an identified customer.');
-      const pointValue = Number(settings.loyalty_point_value_rupees) || 1;
+      const { pointValue } = loyaltyScale(settings, customer.customer_type);
       pointsRedeemed = Math.ceil(loyaltyPayment.amount / pointValue);
       if (pointsRedeemed > Number(customer.loyalty_points_balance)) {
         throw badRequest(`${customer.name} has ${customer.loyalty_points_balance} points, worth ₹${(Number(customer.loyalty_points_balance) * pointValue).toFixed(2)}. That is less than the ₹${loyaltyPayment.amount.toFixed(2)} being redeemed.`);
@@ -1188,7 +1353,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       // Points are earned on what was actually paid in money, not on the portion
       // settled with points — otherwise points would compound into themselves.
       const earnBase = round2(totals.payable - (loyaltyPayment?.amount ?? 0));
-      const earned = Math.floor((earnBase / 100) * Number(settings.loyalty_earn_points_per_100));
+      const earned = Math.floor((earnBase / 100) * loyaltyScale(settings, customer.customer_type).earnPer100);
       if (earned > 0) {
         balance += earned;
         await sql`

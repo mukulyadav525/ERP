@@ -43,6 +43,9 @@ export const SETTING_DEFAULTS = {
   allow_loyalty_discount_stacking: false,
   loyalty_earn_points_per_100:     1,
   loyalty_point_value_rupees:      1,
+  // Contractors (B2B) buy in volume, so they get their own scale.
+  loyalty_contractor_earn_points_per_100: 0.5,
+  loyalty_contractor_point_value_rupees:  1,
   loyalty_point_expiry_days:       365,
   enable_birthday_greetings:       true,
   // Off by default: a bill or credit note is shared on WhatsApp by a person, from
@@ -58,6 +61,8 @@ export const SETTING_DEFAULTS = {
   // Compliance (Section 15)
   backup_frequency_hours:          24,
   einvoice_enabled:                false,
+  // Thermal receipts: the roll width the counter's printer takes (58 or 80 mm).
+  thermal_paper_width_mm:          80,
   // Printed documents (Section 65). The full shape and its defaults live in
   // lib/pdf/business-profile.ts, which is what the renderer reads; this entry
   // exists so the key is a known setting and shows up in the admin panel.
@@ -102,6 +107,20 @@ export async function resolveSetting<K extends SettingKey>(
  * function of the role: the Owner can grant a Branch Manager sight of their own
  * branch's cost data via a setting. This is the one place that decision is made.
  */
+/**
+ * The loyalty scale that applies to a customer: contractors (B2B) have their
+ * own earn rate and point value; everyone else uses the retail one. A point's
+ * value is always read for the customer it belongs to, so earning, redeeming
+ * and refunding stay on the same scale.
+ */
+export function loyaltyScale(settings: typeof SETTING_DEFAULTS, customerType: string | null | undefined):
+  { earnPer100: number; pointValue: number } {
+  const contractor = customerType === 'B2B_CONTRACTOR';
+  const earn = Number(contractor ? settings.loyalty_contractor_earn_points_per_100 : settings.loyalty_earn_points_per_100);
+  const value = Number(contractor ? settings.loyalty_contractor_point_value_rupees : settings.loyalty_point_value_rupees);
+  return { earnPer100: Number.isFinite(earn) && earn >= 0 ? earn : 0, pointValue: value > 0 ? value : 1 };
+}
+
 export function canSeeCost(role: string, settings: typeof SETTING_DEFAULTS): boolean {
   if (role === 'OWNER_ADMIN') return true;
   if (role === 'BRANCH_MANAGER') return Boolean(settings.branch_manager_cost_visibility);

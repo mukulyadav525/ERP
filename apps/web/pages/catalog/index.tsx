@@ -164,7 +164,7 @@ function ProductsTab({ master, onOpen }: { master: Master; onOpen: (id: string) 
                     <div><span style={{ fontWeight: 550 }}>{p.name}</span>{!p.is_active && <> <Badge tone="neutral">inactive</Badge></>}
                       <div className="muted small mono">{p.sku}{p.barcode ? ` · ${p.barcode}` : ''}</div></div>) },
                   { key: 'c', header: 'Category / brand', render: (p: any) => <div>{p.category_name ?? '—'}<div className="muted small">{p.brand_name ?? ''}</div></div> },
-                  { key: 'h', header: 'HSN · GST', nowrap: true, render: (p: any) => <span className="mono small">{p.hsn_code} · {num(p.gst_rate_pct ?? 0, 2)}%</span> },
+                  { key: 'h', header: 'HSN · GST', nowrap: true, render: (p: any) => <span className="mono small">{p.hsn_code ?? '—'} · {num(p.gst_rate_pct ?? 0, 2)}%</span> },
                   { key: 'u', header: 'Sold in', render: (p: any) => (
                     <div className="row tight">{(p.units ?? []).map((u: any) => (
                       <Badge key={u.product_unit_id} tone={u.is_default ? 'info' : 'neutral'}>{u.print_label}</Badge>))}</div>) },
@@ -190,8 +190,9 @@ function ProductsTab({ master, onOpen }: { master: Master; onOpen: (id: string) 
 
 // ── Product editor ───────────────────────────────────────────────────────────
 interface NewUnit { unit_code: string; size: string; is_default: boolean }
+const GST_RATES = [0, 0.25, 3, 5, 12, 18, 28, 40];
 const EMPTY = {
-  name: '', sku: '', description: '', category_id: '', brand_id: '', base_unit: 'PIECE', hsn_code: '',
+  name: '', sku: '', description: '', category_id: '', brand_id: '', base_unit: 'PIECE', hsn_code: '', gst_rate_pct: '',
   default_price_type: 'TAX_INCLUSIVE', selling_price: '', mrp: '', reference_purchase_price: '', reorder_level: '',
   batch_tracked: false, serial_tracked: false, is_active: true,
 };
@@ -223,7 +224,7 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     if (!product) return;
     setForm({
       name: product.name ?? '', sku: product.sku ?? '', description: product.description ?? '', category_id: product.category_id ?? '',
-      brand_id: product.brand_id ?? '', base_unit: product.base_unit, hsn_code: product.hsn_code ?? '',
+      brand_id: product.brand_id ?? '', base_unit: product.base_unit, hsn_code: product.hsn_code ?? '', gst_rate_pct: product.own_gst_rate_pct === null || product.own_gst_rate_pct === undefined ? '' : String(Number(product.own_gst_rate_pct)),
       default_price_type: product.default_price_type, selling_price: '', mrp: '',
       reference_purchase_price: product.reference_purchase_price === null || product.reference_purchase_price === undefined ? '' : String(Number(product.reference_purchase_price)),
       reorder_level: product.reorder_level === null || product.reorder_level === undefined ? '' : String(Number(product.reorder_level)),
@@ -253,8 +254,10 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = 'Enter the product name.';
     if (isNew && form.sku.trim() && !/^[A-Za-z0-9][A-Za-z0-9\-_./]{0,59}$/.test(form.sku.trim())) e.sku = 'Letters, digits and - _ . / only, e.g. PLB-PIPE-15.';
-    if (!/^[0-9]{4,8}$/.test(form.hsn_code.trim())) e.hsn_code = 'An HSN code is 4–8 digits.';
-    else if (!hsnRate) e.hsn_code = 'This HSN has no GST rate on file. Add it on the GST rates tab first.';
+    // HSN is optional. The bill still needs a GST rate: the HSN's when it is on
+    // file, otherwise the one chosen here.
+    if (form.hsn_code.trim() && !/^[0-9]{4,8}$/.test(form.hsn_code.trim())) e.hsn_code = 'An HSN code is 4–8 digits — or leave it blank.';
+    if (!hsnRate && form.gst_rate_pct === '') e.gst_rate_pct = 'Choose the GST rate (0% if exempt).';
     if (isNew) {
       if (!(Number(form.selling_price) > 0)) e.selling_price = 'Enter the selling price.';
       if (form.mrp && Number(form.mrp) < Number(form.selling_price)) e.mrp = 'MRP cannot be below the selling price.';
@@ -272,7 +275,8 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
     setBusy(true);
     const common = {
       name: form.name.trim(), description: form.description.trim() || null, category_id: form.category_id || null,
-      brand_id: form.brand_id || null, hsn_code: form.hsn_code.trim(), default_price_type: form.default_price_type,
+      brand_id: form.brand_id || null, hsn_code: form.hsn_code.trim() || null, gst_rate_pct: hsnRate || form.gst_rate_pct === '' ? null : Number(form.gst_rate_pct),
+      default_price_type: form.default_price_type,
       reference_purchase_price: form.reference_purchase_price === '' ? null : Number(form.reference_purchase_price),
       reorder_level: form.reorder_level === '' ? null : Number(form.reorder_level),
       batch_tracked: form.batch_tracked, serial_tracked: form.serial_tracked, preferred_vendor_id: vendor?.vendor_id ?? null,
@@ -373,8 +377,17 @@ function ProductEditor({ id, initialBarcode, master, onClose, onSaved }: {
                 {can('manage_master_data') && <Button size="sm" onClick={() => void quickAdd('brands')} title="Add a brand">+ New</Button>}
               </div>
             </Field>
-            <Field label="HSN code" required error={errors.hsn_code} hint={hsnRate ? `GST ${num(hsnRate.gst_rate_pct, 2)}%` : 'Choose from the list, or add the rate first'}>
+            <Field label="HSN code" error={errors.hsn_code} hint={hsnRate ? `GST ${num(hsnRate.gst_rate_pct, 2)}% from the GST rates tab` : 'Optional — printed on GST bills when given'}>
               <input className="mono" list="hsn-codes" value={form.hsn_code} onChange={(e) => set('hsn_code', e.target.value.replace(/\D/g, ''))} maxLength={8} disabled={!mayEdit} />
+            </Field>
+            <Field label="GST rate" required={!hsnRate} error={errors.gst_rate_pct}
+              hint={hsnRate ? 'Set by the HSN code' : form.hsn_code.trim() ? 'This HSN has no rate on file, so choose it here' : 'Used on GST bills'}>
+              <select value={hsnRate ? String(Number(hsnRate.gst_rate_pct)) : form.gst_rate_pct} disabled={!mayEdit || Boolean(hsnRate)}
+                onChange={(e) => set('gst_rate_pct', e.target.value)}>
+                {!hsnRate && <option value="">Choose…</option>}
+                {hsnRate && !GST_RATES.includes(Number(hsnRate.gst_rate_pct)) && <option value={String(Number(hsnRate.gst_rate_pct))}>{num(hsnRate.gst_rate_pct, 2)}%</option>}
+                {GST_RATES.map((r) => <option key={r} value={String(r)}>{r}%</option>)}
+              </select>
             </Field>
             <datalist id="hsn-codes">{master.hsn.map((h) => <option key={h.hsn_code} value={h.hsn_code}>{`${num(h.gst_rate_pct, 2)}% GST`}</option>)}</datalist>
             <Field label="Prices are">
@@ -852,7 +865,8 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
         <Button variant="primary" busy={busy} disabled={!rows.length || !report?.dryRun || Boolean(report?.error) || (report?.errors?.length ?? 0) > 0} onClick={() => void run(false)}>Import {rows.length} row(s)</Button></>}>
       <div className="stack">
         <Alert tone="info" title="Columns">
-          <span className="mono small">sku, name, hsn_code, selling_price</span> (required) and optionally{' '}
+          <span className="mono small">sku, name, selling_price</span> and either{' '}
+          <span className="mono small">hsn_code</span> (with its rate on the GST rates tab) or <span className="mono small">gst_rate_pct</span> (required), and optionally{' '}
           <span className="mono small">mrp, base_unit, category, brand, barcode, price_type, reorder_level, reference_purchase_price</span>.
           Categories and brands must already exist. The whole file imports, or none of it does.
         </Alert>

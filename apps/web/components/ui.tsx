@@ -180,10 +180,20 @@ export function Tabs({ tabs, active, onChange }: {
   active: string; onChange: (key: string) => void;
 }) {
   return (
-    <div className="tabs" role="tablist">
+    <div className="tabs" role="tablist"
+      onKeyDown={(e) => {
+        // ← → move along the tabs and open them; Home / End jump to the ends.
+        const i = tabs.findIndex((t) => t.key === active);
+        const next = e.key === 'ArrowRight' ? (i + 1) % tabs.length : e.key === 'ArrowLeft' ? (i - 1 + tabs.length) % tabs.length
+          : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : -1;
+        if (next < 0) return;
+        e.preventDefault();
+        onChange(tabs[next].key);
+        (e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]')[next])?.focus();
+      }}>
       {tabs.map((tab) => (
         <button
-          key={tab.key} role="tab" aria-selected={active === tab.key}
+          key={tab.key} role="tab" aria-selected={active === tab.key} tabIndex={active === tab.key ? 0 : -1}
           className={`tab ${active === tab.key ? 'active' : ''}`}
           onClick={() => onChange(tab.key)}
         >
@@ -341,7 +351,17 @@ export function DataTable<T>({ columns, rows, onRowClick, footer, emptyText, row
             {rows.map((row, i) => (
               <tr key={keyOf(row, i)} className={onRowClick ? 'clickable' : ''}
                   tabIndex={onRowClick ? 0 : undefined}
-                  onKeyDown={onRowClick ? (e) => { if (e.key === 'Enter') onRowClick(row); } : undefined}
+                  onKeyDown={onRowClick ? (e) => {
+                    if (e.key === 'Enter') { onRowClick(row); return; }
+                    // ↑ ↓ walk the rows, Home / End jump to the first and last.
+                    const tr = e.currentTarget;
+                    const rows = [...(tr.parentElement?.querySelectorAll<HTMLElement>('tr[tabindex]') ?? [])];
+                    const at = rows.indexOf(tr);
+                    const to = e.key === 'ArrowDown' ? at + 1 : e.key === 'ArrowUp' ? at - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1 : -2;
+                    if (to === -2) return;
+                    e.preventDefault();
+                    rows[Math.min(Math.max(to, 0), rows.length - 1)]?.focus();
+                  } : undefined}
                   onClick={onRowClick ? () => onRowClick(row) : undefined}>
                 {columns.map((c) => (
                   <td key={c.key} data-label={c.header || undefined}
@@ -535,7 +555,7 @@ export function BranchGate({ children, what = 'this transaction' }: { children: 
         <b>Please select a branch for {what}.</b>
         <div className="muted small">You are viewing all branches. A sale, receipt or purchase always happens at one branch.</div>
       </div>
-      <select aria-label="Branch for this transaction" defaultValue=""
+      <select aria-label="Branch for this transaction" defaultValue="" autoFocus
         onChange={(e) => e.target.value && setActiveBranchId(e.target.value)} style={{ maxWidth: 320 }}>
         <option value="" disabled>Choose a branch…</option>
         {branches.map((b) => <option key={b.branch_id} value={b.branch_id}>{b.name}</option>)}

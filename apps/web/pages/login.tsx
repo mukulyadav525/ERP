@@ -9,7 +9,7 @@
 //   • forgot password / forgot PIN → single-use reset link or code
 // Only options the server can actually deliver are shown (GET /api/auth/methods).
 // ============================================================================
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Script from 'next/script';
@@ -128,13 +128,21 @@ export default function LoginPage() {
   // The button is drawn into #google-btn, which only exists on the Password tab —
   // so it is (re)drawn whenever that tab is showing, not just once on load (it
   // used to vanish after visiting another tab and coming back).
+  // initialize() runs once per client ID (Google warns when it is repeated); the
+  // callback goes through a ref so it always sees the current screen state.
+  const googleCallback = useRef(handleGoogleCredential);
+  googleCallback.current = handleGoogleCredential;
+  const googleInitFor = useRef<string | null>(null);
   useEffect(() => {
     const g = (window as any).google;
     if (!googleReady || !g || !GOOGLE_CLIENT_ID || mode !== 'password') return;
-    g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleCredential });
+    if (googleInitFor.current !== GOOGLE_CLIENT_ID) {
+      g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: (r: { credential: string }) => googleCallback.current(r) });
+      googleInitFor.current = GOOGLE_CLIENT_ID;
+    }
     const host = document.getElementById('google-btn');
     if (host) { host.innerHTML = ''; g.accounts.id.renderButton(host, { theme: 'outline', size: 'large', width: 336, text: 'signin_with' }); }
-  }, [googleReady, GOOGLE_CLIENT_ID, mode, handleGoogleCredential]);
+  }, [googleReady, GOOGLE_CLIENT_ID, mode]);
 
   return (
     <>

@@ -530,14 +530,30 @@ function PosTab() {
       const mod = e.metaKey || e.ctrlKey;
       // A dialog (new customer, manager PIN) owns the keyboard while it is open.
       if (document.querySelector('[role="dialog"]')) return;
-      if (mod && e.key.toLowerCase() === 's') {
+      if ((mod && e.key.toLowerCase() === 's') || e.key === 'F9') {
         e.preventDefault();
         if (!busy && !reviewing && cart.length) void openReview();
+        return;
       }
-      // "/" jumps to the item search from anywhere that is not a text field.
-      if (e.key === '/' && !mod) {
-        const el = document.activeElement as HTMLElement | null;
-        if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) { e.preventDefault(); scanRef.current?.focus(); }
+      const el = document.activeElement as HTMLElement | null;
+      const typing = Boolean(el && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
+      // "/" or F3 — the item search; F4 — the customer; F6 — GST / non-GST;
+      // F7 — the payment amount; F10 — moves to "Complete sale" (Enter then
+      // finalises: never a single keystroke).
+      if ((e.key === '/' && !mod && !typing) || e.key === 'F3') { e.preventDefault(); scanRef.current?.focus(); return; }
+      if (reviewing) {
+        if (e.key === 'F10') { e.preventDefault(); document.querySelector<HTMLElement>('[data-hotkey="finalise"]')?.focus(); }
+        if (e.key === 'F7') { e.preventDefault(); document.querySelector<HTMLInputElement>('[data-hotkey="pay-amount"]')?.select(); }
+        return;
+      }
+      if (e.key === 'F4') { e.preventDefault(); customerRef.current?.focus(); return; }
+      if (e.key === 'F6') { e.preventDefault(); changeInvoiceType(invoiceType === 'GST' ? 'NON_GST' : 'GST'); return; }
+      if (e.key === 'F7') { e.preventDefault(); document.querySelector<HTMLInputElement>('[data-hotkey="pay-amount"]')?.select(); return; }
+      if (e.key === 'F10') { e.preventDefault(); document.querySelector<HTMLElement>('[data-hotkey="complete"]')?.focus(); return; }
+      // From an empty item search, ↑ goes up into the cart (the last line's qty).
+      if (e.key === 'ArrowUp' && el === scanRef.current && !scanRef.current?.value && cart.length) {
+        e.preventDefault();
+        document.querySelector<HTMLInputElement>(`[data-cart-row="${cart.length - 1}"][data-cart-field="qty"]`)?.select();
       }
     }
     window.addEventListener('keydown', onKey);
@@ -756,6 +772,27 @@ function PosTab() {
     return () => { window.removeEventListener('online', drain); window.clearInterval(timer); };
   }, [toast, refreshLists]);
 
+  /** ↑ ↓ move between cart lines in the same column; Ctrl+Delete removes the line. */
+  function cartKeys(e: React.KeyboardEvent<HTMLElement>, row: number, field: string, lineKey: string) {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = row + (e.key === 'ArrowUp' ? -1 : 1);
+      if (next >= cart.length) { focusSearch(); return; }
+      const target = document.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-cart-row="${Math.max(next, 0)}"][data-cart-field="${field}"]`);
+      target?.focus();
+      if (target instanceof HTMLInputElement) target.select();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      removeLine(lineKey);
+      setTimeout(() => {
+        const left = document.querySelector<HTMLInputElement>(`[data-cart-row="${Math.max(row - 1, 0)}"][data-cart-field="${field}"]`);
+        if (left) left.focus(); else focusSearch();
+      }, 0);
+    }
+  }
+
   const paymentEditor = (
     <PaymentEditor payments={payments} payable={payable} cashReceived={cashReceived}
       setCashReceived={setCashReceived} change={change}
@@ -800,7 +837,7 @@ function PosTab() {
 
       <div className="grid split-work pos-layout">
         <div className="stack">
-          <Card title="Items" right={<span className="kbd-hints"><span><kbd>↑</kbd><kbd>↓</kbd><kbd>↵</kbd> add</span><span><kbd>/</kbd> search</span><span><kbd>Ctrl</kbd><kbd>S</kbd> review</span></span>}>
+          <Card title="Items" right={<span className="kbd-hints"><span><kbd>↑</kbd><kbd>↓</kbd><kbd>↵</kbd> add</span><span><kbd>F3</kbd> search</span><span><kbd>F4</kbd> customer</span><span><kbd>F7</kbd> pay</span><span><kbd>F9</kbd> review</span><span><kbd>?</kbd> all keys</span></span>}>
             <div className="row" style={{ alignItems: 'stretch' }}>
               <ProductPicker inputRef={scanRef} autoFocus onSelect={(p) => addProduct(p)} onSubmitText={(c) => void onScanText(c)}
                 onTextChange={() => unknownCode && setUnknownCode(null)}
@@ -851,7 +888,7 @@ function PosTab() {
                     </tr>
                   </thead>
                   <tbody>
-                    {cart.map((l) => {
+                    {cart.map((l, rowIndex) => {
                       const c = previewLine(l);
                       const unit = unitOf(l);
                       const short = c.baseQty > l.available + 1e-9;
@@ -879,29 +916,34 @@ function PosTab() {
                           </td>
                           <td data-label="Unit">
                             <select className="pos-unit" aria-label={`Unit for ${l.name}`} value={l.unit_id}
+                              data-cart-row={rowIndex} data-cart-field="unit"
+                              onKeyDown={(e) => { if (e.ctrlKey || e.metaKey) cartKeys(e, rowIndex, 'unit', l.key); }}
                               onChange={(e) => updateLine(l.key, { unit_id: e.target.value })}>
                               {l.units.map((u) => <option key={u.product_unit_id} value={u.product_unit_id}>{u.print_label}</option>)}
                             </select>
                           </td>
                           <td data-label="Qty" className="num">
                             <input className="pos-qty num" inputMode="decimal" aria-label={`Quantity of ${l.name}`} value={l.qty}
+                              data-cart-row={rowIndex} data-cart-field="qty"
                               onChange={(e) => updateLine(l.key, { qty: e.target.value.replace(/[^\d.]/g, '') })}
-                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSearch(); } }}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSearch(); } else cartKeys(e, rowIndex, 'qty', l.key); }}
                               style={{ textAlign: 'right' }} />
                           </td>
                           <td data-label={`Rate / ${unit?.print_label ?? ''}`} className="num">
                             <input className="pos-money num" inputMode="decimal" aria-label={`Rate for ${l.name}`}
                               defaultValue={unitRate.toFixed(2)} key={`${l.key}:${l.unit_id}:${l.rate_base}`}
+                              data-cart-row={rowIndex} data-cart-field="rate"
                               onBlur={(e) => {
                                 const v = toNum(e.target.value);
                                 if (v >= 0) updateLine(l.key, { rate_base: Math.round((v / multiplierOf(l)) * 10000) / 10000 });
                               }}
-                              onKeyDown={(e) => { if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); focusSearch(); } }} />
+                              onKeyDown={(e) => { if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); focusSearch(); } else cartKeys(e, rowIndex, 'rate', l.key); }} />
                           </td>
                           <td data-label="Discount ₹" className="num">
                             <input className="pos-money num" inputMode="decimal" aria-label={`Discount on ${l.name}`} value={l.discount} placeholder="0"
+                              data-cart-row={rowIndex} data-cart-field="discount"
                               onChange={(e) => updateLine(l.key, { discount: e.target.value.replace(/[^\d.]/g, '') })}
-                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSearch(); } }} />
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSearch(); } else cartKeys(e, rowIndex, 'discount', l.key); }} />
                           </td>
                           <td className="num pos-cell-total" data-label="Total" style={{ fontWeight: 650 }}>{inr(c.total, { decimals: true })}</td>
                           <td className="pos-cell-remove">
@@ -994,7 +1036,7 @@ function PosTab() {
             {t('reviewBill')} · {inr(totals.grand, { decimals: true })}
           </Button>
           <Button size="lg" className="block" busy={busy} disabled={!cart.length || Math.abs(balance) > 0.01}
-            onClick={() => void completeSale()} title="Finalise straight away, without the review step">
+            data-hotkey="complete" onClick={() => void completeSale()} title="Finalise straight away, without the review step">
             {t('completeSale')}
           </Button>
         </div>
@@ -1029,6 +1071,7 @@ function PaymentEditor({ payments, payable, onChange, cashReceived, setCashRecei
               {METHODS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
             <input inputMode="decimal" value={p.amount} style={{ flex: 1, textAlign: 'right' }} aria-label={`Payment ${i + 1} amount`}
+              data-hotkey={i === 0 ? 'pay-amount' : undefined}
               onChange={(e) => set(i, { amount: e.target.value.replace(/[^\d.]/g, '') })} className="num" />
             {payments.length > 1 && (
               <button type="button" className="icon-btn" aria-label={`Remove payment ${i + 1}`}
@@ -1167,7 +1210,7 @@ function ReviewScreen({ draft, openTill, busy, paymentEditor, balance, onEdit, o
             <div className="stack" style={{ gap: 8 }}>
               <Button variant="primary" size="lg" busy={busy}
                 disabled={busy || !draft?.lines?.length || Math.abs(balance) > 0.01 || Boolean(draft.pricing_error)}
-                onClick={onFinalize}>
+                data-hotkey="finalise" onClick={onFinalize}>
                 <Icon name="check" size={15} /> {t('finalizeBill')} · {inr(payable, { decimals: true })}
               </Button>
               <Button onClick={onEdit} disabled={busy}>← {t('editBill')}</Button>
@@ -1190,6 +1233,21 @@ function ReviewScreen({ draft, openTill, busy, paymentEditor, balance, onEdit, o
 // ── After the sale ───────────────────────────────────────────────────────────
 function SaleCompleteModal({ invoice, onClose, settings }: { invoice: any | null; onClose: () => void; settings: any }) {
   const toast = useToast();
+  // F8 — thermal receipt; Ctrl/Cmd+P — the A4 bill; Esc or Enter on "New bill" — next customer.
+  useEffect(() => {
+    if (!invoice) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'F8') {
+        e.preventDefault();
+        printFile(`/api/billing/invoices/${invoice.invoice_id}/thermal`).catch((err) => toast.error(err));
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        printFile(`/api/billing/invoices/${invoice.invoice_id}/pdf`).catch((err) => toast.error(err));
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [invoice, toast]);
   if (!invoice) return null;
   const summary = invoice.payment_summary;
   const amount = Number(invoice.amount ?? invoice.grand_total);
@@ -1215,8 +1273,11 @@ function SaleCompleteModal({ invoice, onClose, settings }: { invoice: any | null
   return (
     <Modal open onClose={onClose} title="Sale complete"
       footer={<>
-        <Button onClick={onClose}>New bill</Button>
-        <Button onClick={() => printFile(pdfPath).catch((e) => toast.error(e))}><Icon name="print" size={14} /> Print</Button>
+        <Button onClick={onClose} title="Esc">New bill</Button>
+        <Button onClick={() => printFile(`/api/billing/invoices/${invoice.invoice_id}/thermal`).catch((e) => toast.error(e))} title="Receipt for a 58/80 mm thermal printer (F8)">
+          <Icon name="print" size={14} /> Thermal <kbd>F8</kbd>
+        </Button>
+        <Button onClick={() => printFile(pdfPath).catch((e) => toast.error(e))}><Icon name="print" size={14} /> Print <kbd>Ctrl P</kbd></Button>
         <Button variant="primary" onClick={() => downloadFile(pdfPath, `Invoice-${invoice.invoice_number}.pdf`).catch((e) => toast.error(e))}>
           <Icon name="download" size={14} /> Download PDF
         </Button>
@@ -1431,6 +1492,9 @@ function InvoicesTab() {
           )}
           <div className="spacer" />
           {shareUrl && <Button onClick={() => window.open(shareUrl, '_blank', 'noopener')}><Icon name="whatsapp" size={14} /> WhatsApp</Button>}
+          <Button onClick={() => selected && printFile(`/api/billing/invoices/${selected.invoice_id}/thermal`).catch((e) => toast.error(e))} title="Receipt for a 58/80 mm thermal printer">
+            <Icon name="print" size={14} /> Thermal
+          </Button>
           <Button onClick={() => selected && printFile(`/api/billing/invoices/${selected.invoice_id}/pdf`).catch((e) => toast.error(e))}>
             <Icon name="print" size={14} /> Print
           </Button>

@@ -22,11 +22,13 @@ import {
 } from './renderer.js';
 import { dateOnly, dateTime, qty } from './theme.js';
 import { GST_STATES } from '../units.js';
+import { renderThermal, type ThermalWidth } from './thermal.js';
 
 export { loadBusinessProfile, normaliseProfile, DEFAULT_BUSINESS_PROFILE, BUSINESS_PROFILE_SETTING }
   from './business-profile.js';
 export type { BusinessProfile, DocumentModel } from './renderer.js';
 export { renderDocument } from './renderer.js';
+export { renderThermal, type ThermalWidth } from './thermal.js';
 export { amountInWords } from './theme.js';
 
 const asNum = (v: unknown) => Number(v ?? 0);
@@ -106,12 +108,12 @@ function toLines(rows: Array<Record<string, any>>): DocumentLine[] {
  * a bill, and explicitly carrying no document number, because a draft has not
  * drawn one from the gapless series and must not look as though it has (3.6).
  */
-export async function buildInvoicePdf(
+export async function buildInvoiceModel(
   trx: Tx,
   invoice: Record<string, any>,
   lineRows: Array<Record<string, any>>,
   payments: Array<Record<string, any>> = [],
-): Promise<Buffer> {
+): Promise<DocumentModel> {
   const business = await loadBusinessProfile(trx, invoice.branch_id, {
     name: invoice.branch_name,
     address: invoice.branch_address,
@@ -190,7 +192,27 @@ export async function buildInvoicePdf(
       : [],
   };
 
-  return renderDocument(model);
+  return model;
+}
+
+export async function buildInvoicePdf(
+  trx: Tx,
+  invoice: Record<string, any>,
+  lineRows: Array<Record<string, any>>,
+  payments: Array<Record<string, any>> = [],
+): Promise<Buffer> {
+  return renderDocument(await buildInvoiceModel(trx, invoice, lineRows, payments));
+}
+
+/** The same bill as a 58/80 mm roll receipt. */
+export async function buildInvoiceThermal(
+  trx: Tx,
+  invoice: Record<string, any>,
+  lineRows: Array<Record<string, any>>,
+  payments: Array<Record<string, any>> = [],
+  widthMm: ThermalWidth = 80,
+): Promise<Buffer> {
+  return renderThermal(await buildInvoiceModel(trx, invoice, lineRows, payments), widthMm);
 }
 
 /** Template A — the estimate / quotation (Section 58.1). */

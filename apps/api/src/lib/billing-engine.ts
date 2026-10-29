@@ -144,7 +144,7 @@ export async function priceBasket(trx: Tx, opts: {
     SELECT p.product_id, p.name, p.base_unit, p.hsn_code, p.default_price_type, p.is_active,
            p.batch_tracked, p.serial_tracked,
            pp.selling_price,
-           COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+           COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) AS gst_rate_pct,
            (SELECT jsonb_object_agg(pu.product_unit_id::text, jsonb_build_object(
                      'unit_code', pu.unit_label, 'multiplier', pu.multiplier_to_base,
                      'print_label', u.print_label, 'name', u.name,
