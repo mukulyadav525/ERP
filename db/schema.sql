@@ -369,7 +369,8 @@ CREATE TABLE products (
     category_id         UUID REFERENCES categories(category_id),
     brand_id            UUID REFERENCES brands(brand_id),
     base_unit           TEXT NOT NULL REFERENCES units(unit_code),  -- 2.2.1: stock, cost and price are all per base unit
-    hsn_code            TEXT NOT NULL,
+    hsn_code            TEXT,                              -- optional (007); when absent, gst_rate_pct below applies
+    gst_rate_pct        NUMERIC(5,2),                      -- the product's own GST rate, used when its HSN has no rate on file
     default_price_type  price_type NOT NULL DEFAULT 'TAX_INCLUSIVE',  -- 2.8
     reference_purchase_price NUMERIC(14,4),               -- admin-entered ESTIMATE only, not the real cost (2.6 DATA-FIX)
     -- Default reorder level in base units. A branch may set its own on
@@ -382,7 +383,8 @@ CREATE TABLE products (
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chk_products_reorder CHECK (reorder_level IS NULL OR reorder_level >= 0)
+    CONSTRAINT chk_products_reorder CHECK (reorder_level IS NULL OR reorder_level >= 0),
+    CONSTRAINT chk_products_gst_rate CHECK (gst_rate_pct IS NULL OR (gst_rate_pct >= 0 AND gst_rate_pct <= 100))
 );
 
 -- 2.2: every sale unit is a stated multiple of the base unit. Never an independent price:
@@ -3040,7 +3042,8 @@ INSERT INTO schema_migrations (version) VALUES
     ('003_lock_down_functions'),
     ('004_sign_in_upgrades'),
     ('005_own_profile'),
-    ('006_google_sign_in_fix');
+    ('006_google_sign_in_fix'),
+    ('007_optional_hsn');
 
 -- ============================================================================
 -- APPLICATION ROLE & GRANTS

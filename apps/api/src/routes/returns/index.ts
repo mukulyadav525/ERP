@@ -23,7 +23,7 @@ import {
   resolveBranchScope, limit as clampLimit, arrayOf,
 } from '../../lib/http.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
-import { loadSettings } from '../../lib/settings.js';
+import { loadSettings, loyaltyScale } from '../../lib/settings.js';
 import { computeReturnLine, round2 } from '../../lib/tax.js';
 import { nextNumber } from '../../lib/numbering.js';
 import { audit } from '../../lib/audit.js';
@@ -497,7 +497,7 @@ export default async function returnsRoutes(app: FastifyInstance) {
           INSERT INTO loyalty_transactions (customer_id, invoice_id, sales_return_id, txn_type, points, balance_after)
           VALUES (${invoice.customer_id}, ${invoiceId}, ${ret.return_id}, 'RESTORE', ${pointsRestored}, ${balance})
         `.execute(trx);
-        const pointValue = Number(settings.loyalty_point_value_rupees) || 1;
+        const { pointValue } = loyaltyScale(settings, customer.customer_type);
         cashRefund = round2(Math.max(cashRefund - pointsRestored * pointValue, 0));
       }
 

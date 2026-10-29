@@ -56,7 +56,7 @@ async function quotationLines(trx: Tx, quotationIds: string[]) {
            bu.print_label AS base_unit_label,
            COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
            COALESCE(ql.qty_in_sale_unit, ql.qty_base_unit) AS qty_display,
-           COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct
+           COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) AS gst_rate_pct
       FROM quotation_lines ql
       JOIN products p ON p.product_id = ql.product_id
       JOIN units bu ON bu.unit_code = p.base_unit
@@ -116,7 +116,7 @@ async function prepareLines(trx: Tx, rawLines: unknown, opts: { branchId: string
       SELECT p.product_id, p.name, p.is_active, p.base_unit, p.default_price_type,
              pu.product_unit_id, COALESCE(pu.multiplier_to_base, 1) AS multiplier,
              u.allows_fraction, u.name AS unit_name, u.print_label,
-             pp.selling_price, COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct
+             pp.selling_price, COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) AS gst_rate_pct
         FROM products p
         LEFT JOIN product_units pu ON pu.product_id = p.product_id
              AND (pu.product_unit_id = ${productUnitId} OR (${productUnitId}::uuid IS NULL AND pu.unit_label = p.base_unit))

@@ -64,13 +64,38 @@ async function assertBarcodesFree(trx: Tx, codes: string[], exceptProductId?: st
   }
 }
 
-async function assertHsnHasRate(trx: Tx, hsn: string) {
-  const rate = await sql<{ gst_rate_pct: string }>`
-    SELECT gst_rate_pct FROM hsn_tax_rates WHERE hsn_code = ${hsn} AND effective_to IS NULL LIMIT 1
-  `.execute(trx);
-  if (!rate.rows[0]) {
-    throw badRequest(`No GST rate is on file for HSN ${hsn}. Add the rate under Catalog → GST rates first.`);
+/** HSN as typed: blank → null; otherwise 4–8 digits. */
+function hsnValue(raw: unknown, label = 'HSN code'): string | null {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const hsn = String(raw).trim();
+  if (!/^[0-9]{4,8}$/.test(hsn)) throw badRequest(`${label}: an HSN code is 4 to 8 digits (or leave it blank).`);
+  return hsn;
+}
+
+/** The product's own GST rate, when one was given. */
+function gstRateValue(raw: unknown, label = 'GST rate'): number | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  return num(raw, label, { min: 0, max: 100 });
+}
+
+/**
+ * HSN is optional (007). Every product still needs a GST rate the bill can use:
+ * the HSN's rate when it is on file, the product's own rate otherwise. Returns
+ * the product's own rate to store (null when the HSN's rate applies).
+ */
+async function resolveProductRate(trx: Tx, hsn: string | null, ownRate: number | null): Promise<number | null> {
+  if (hsn) {
+    const onFile = (await sql<{ gst_rate_pct: string }>`
+      SELECT gst_rate_pct FROM hsn_tax_rates WHERE hsn_code = ${hsn} AND effective_to IS NULL LIMIT 1
+    `.execute(trx)).rows[0];
+    if (onFile) return null;
   }
+  if (ownRate === null) {
+    throw badRequest(hsn
+      ? `No GST rate is on file for HSN ${hsn}. Choose the product's GST rate, or add the HSN under Catalog → GST rates.`
+      : 'Choose the GST rate for this product (0% if it is exempt).');
+  }
+  return ownRate;
 }
 
 /** Parses the requested sale units for a product and resolves each conversion. */
@@ -120,7 +145,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
              c.category_id, c.name AS category_name,
              br.brand_id, br.name AS brand_name,
              pp.selling_price, pp.mrp,
-             htr.gst_rate_pct,
+             COALESCE(htr.gst_rate_pct, p.gst_rate_pct) AS gst_rate_pct,
              bs.base_unit_qty, bs.reserved_qty, bs.weighted_avg_cost,
              COALESCE(bs.reorder_min, p.reorder_level) AS reorder_min,
              COALESCE(bs.base_unit_qty, 0) - COALESCE(bs.reserved_qty, 0) AS available_qty,
@@ -188,7 +213,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
              bu.print_label AS base_unit_label,
              pb.product_unit_id, COALESCE(pu.unit_label, p.base_unit) AS unit_label,
              COALESCE(pu.multiplier_to_base, 1) AS multiplier_to_base,
-             pp.selling_price, htr.gst_rate_pct,
+             pp.selling_price, COALESCE(htr.gst_rate_pct, p.gst_rate_pct) AS gst_rate_pct,
              COALESCE(bs.base_unit_qty, 0) - COALESCE(bs.reserved_qty, 0) AS available_qty,
              ${UNITS_JSON} AS units
         FROM product_barcodes pb
@@ -221,7 +246,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
     const showCost = canSeeCost(session.role, settings);
 
     const product = (await sql<any>`
-      SELECT p.*, c.name AS category_name, br.name AS brand_name,
+      SELECT p.*, p.gst_rate_pct AS own_gst_rate_pct, c.name AS category_name, br.name AS brand_name,
              bu.name AS base_unit_name, bu.print_label AS base_unit_label, bu.dimension AS base_dimension,
              ${UNITS_JSON} AS units,
              (SELECT vpm.vendor_id FROM vendor_product_map vpm
@@ -285,7 +310,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
     }
     const name = str(body.name, 'Product name', { max: 200 });
     const base = await requireUnit(trx, str(body.base_unit, 'Base unit', { max: 20 }).toUpperCase(), 'Base unit');
-    const hsn = str(body.hsn_code, 'HSN code', { max: 12 });
+    const hsn = hsnValue(body.hsn_code);
     const sellingPrice = num(body.selling_price, 'Selling price', { min: 0, max: 10_000_000 });
     const mrp = body.mrp === undefined || body.mrp === null || body.mrp === ''
       ? sellingPrice : num(body.mrp, 'MRP', { min: 0, max: 10_000_000 });
@@ -294,7 +319,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
 
     // 2.7 — refuse to create a product whose HSN has no tax rate on file, rather
     // than letting it reach the billing screen and silently bill at 0% GST.
-    await assertHsnHasRate(trx, hsn);
+    const ownRate = await resolveProductRate(trx, hsn, gstRateValue(body.gst_rate_pct));
 
     const dup = await sql<{ name: string }>`SELECT name FROM products WHERE upper(sku) = ${sku}`.execute(trx);
     if (dup.rows[0]) throw conflict(`SKU ${sku} is already used by "${dup.rows[0].name}".`);
@@ -326,10 +351,10 @@ export default async function catalogRoutes(app: FastifyInstance) {
     const preferredVendor = optionalUuid(body.preferred_vendor_id, 'Supplier');
 
     const product = (await sql<any>`
-      INSERT INTO products (sku, name, description, category_id, brand_id, base_unit, hsn_code, default_price_type,
+      INSERT INTO products (sku, name, description, category_id, brand_id, base_unit, hsn_code, gst_rate_pct, default_price_type,
                             reference_purchase_price, reorder_level, image_url, spec, batch_tracked, serial_tracked)
       VALUES (${sku}, ${name}, ${optionalStr(body.description, 'Description', { max: 1000 })},
-              ${categoryId}, ${brandId}, ${base.unit_code}, ${hsn},
+              ${categoryId}, ${brandId}, ${base.unit_code}, ${hsn}, ${ownRate},
               ${oneOf(body.default_price_type ?? 'TAX_INCLUSIVE', 'Price type', PRICE_TYPES)}::price_type,
               ${body.reference_purchase_price === undefined || body.reference_purchase_price === '' || body.reference_purchase_price === null ? null : num(body.reference_purchase_price, 'Expected cost', { min: 0 })},
               ${body.reorder_level === undefined || body.reorder_level === '' || body.reorder_level === null ? null : num(body.reorder_level, 'Reorder level', { min: 0, max: 1e9 })},
@@ -384,8 +409,9 @@ export default async function catalogRoutes(app: FastifyInstance) {
     const before = (await sql<any>`SELECT * FROM products WHERE product_id = ${id} FOR UPDATE`.execute(trx)).rows[0];
     if (!before) throw notFound('Product not found.');
 
-    const hsn = body.hsn_code === undefined ? before.hsn_code : str(body.hsn_code, 'HSN code', { max: 12 });
-    if (hsn !== before.hsn_code) await assertHsnHasRate(trx, hsn);
+    const hsn = body.hsn_code === undefined ? before.hsn_code : hsnValue(body.hsn_code);
+    const ownRate = await resolveProductRate(trx, hsn,
+      body.gst_rate_pct === undefined ? (before.gst_rate_pct === null ? null : Number(before.gst_rate_pct)) : gstRateValue(body.gst_rate_pct));
 
     // The base unit is what every stock figure, cost and price is measured in.
     // Changing it once anything has moved would silently re-denominate history,
@@ -416,6 +442,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
         brand_id = ${body.brand_id === undefined ? before.brand_id : optionalUuid(body.brand_id, 'Brand')},
         base_unit = ${baseUnit},
         hsn_code = ${hsn},
+        gst_rate_pct = ${ownRate},
         default_price_type = ${(body.default_price_type ? oneOf(body.default_price_type, 'Price type', PRICE_TYPES) : before.default_price_type)}::price_type,
         reference_purchase_price = ${body.reference_purchase_price === undefined ? before.reference_purchase_price
           : body.reference_purchase_price === null || body.reference_purchase_price === '' ? null
@@ -873,12 +900,15 @@ export default async function catalogRoutes(app: FastifyInstance) {
         const name = str(r.name, 'name', { max: 200 });
         const baseUnit = str(r.base_unit ?? 'PIECE', 'base_unit', { max: 20 }).toUpperCase();
         if (!unitMaster.has(baseUnit)) throw badRequest(`base_unit "${baseUnit}" is not in the units list`);
-        const hsn = str(r.hsn_code, 'hsn_code', { max: 12 });
+        const hsn = hsnValue(r.hsn_code, 'hsn_code');
+        const ownRate = gstRateValue(r.gst_rate_pct, 'gst_rate_pct');
         const price = num(r.selling_price, 'selling_price', { min: 0.0001 });
         const mrp = r.mrp === undefined || r.mrp === '' ? price : num(r.mrp, 'mrp', { min: 0 });
         // 2.7 — the same gate the single-product form applies. Without it an
         // imported product reached the billing screen and was billed at 0% GST.
-        if (!knownHsn.has(hsn)) throw badRequest(`no GST rate is on file for HSN ${hsn}`);
+        if (!(hsn && knownHsn.has(hsn)) && ownRate === null) {
+          throw badRequest(hsn ? `no GST rate is on file for HSN ${hsn} — add a gst_rate_pct column, or the HSN rate` : 'give hsn_code or gst_rate_pct');
+        }
         if (mrp < price) throw badRequest('mrp is below selling_price');
         if (seenSkus.has(sku)) throw badRequest(`sku ${sku} appears more than once in this file`);
         seenSkus.add(sku);
@@ -898,7 +928,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
           seenBarcodes.add(barcode);
         }
         validated.push({
-          sku, name, baseUnit, hsn, price, mrp, categoryId, brandId, barcode,
+          sku, name, baseUnit, hsn, ownRate: hsn && knownHsn.has(hsn) ? null : ownRate, price, mrp, categoryId, brandId, barcode,
           reorder: r.reorder_level === undefined || r.reorder_level === '' ? null : num(r.reorder_level, 'reorder_level', { min: 0 }),
           cost: r.reference_purchase_price === undefined || r.reference_purchase_price === '' ? null
             : num(r.reference_purchase_price, 'reference_purchase_price', { min: 0 }),
@@ -938,7 +968,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
     for (const v of validated) {
       const existing = (await sql<any>`SELECT product_id FROM products WHERE upper(sku) = ${v.sku}`.execute(trx)).rows[0];
       if (existing) {
-        await sql`UPDATE products SET name = ${v.name}, hsn_code = ${v.hsn},
+        await sql`UPDATE products SET name = ${v.name}, hsn_code = ${v.hsn}, gst_rate_pct = ${v.ownRate},
                          category_id = COALESCE(${v.categoryId}, category_id), brand_id = COALESCE(${v.brandId}, brand_id),
                          reorder_level = COALESCE(${v.reorder}, reorder_level), updated_at = now()
                    WHERE product_id = ${existing.product_id}`.execute(trx);
@@ -953,8 +983,8 @@ export default async function catalogRoutes(app: FastifyInstance) {
         updated++;
       } else {
         const p = (await sql<any>`
-          INSERT INTO products (sku, name, base_unit, hsn_code, category_id, brand_id, reference_purchase_price, reorder_level)
-          VALUES (${v.sku}, ${v.name}, ${v.baseUnit}, ${v.hsn}, ${v.categoryId}, ${v.brandId}, ${v.cost}, ${v.reorder})
+          INSERT INTO products (sku, name, base_unit, hsn_code, gst_rate_pct, category_id, brand_id, reference_purchase_price, reorder_level)
+          VALUES (${v.sku}, ${v.name}, ${v.baseUnit}, ${v.hsn}, ${v.ownRate}, ${v.categoryId}, ${v.brandId}, ${v.cost}, ${v.reorder})
           RETURNING product_id
         `.execute(trx)).rows[0];
         await sql`INSERT INTO product_units (product_id, unit_label, multiplier_to_base, is_default_sale_unit)
@@ -989,7 +1019,7 @@ export default async function catalogRoutes(app: FastifyInstance) {
              -- A tax-inclusive price contains GST; margin is measured on the
              -- price net of tax, the same basis cost is recorded on.
              pp.selling_price / CASE WHEN p.default_price_type = 'TAX_INCLUSIVE'
-                                     THEN 1 + COALESCE(htr.gst_rate_pct, 0) / 100 ELSE 1 END AS net_price,
+                                     THEN 1 + COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) / 100 ELSE 1 END AS net_price,
              NULL::numeric AS margin_amount, NULL::numeric AS margin_pct
         FROM branch_stock bs
         JOIN products p ON p.product_id = bs.product_id

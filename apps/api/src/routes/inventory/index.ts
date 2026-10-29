@@ -98,7 +98,7 @@ export async function applyMovement(trx: Tx, opts: {
 /** Resolves a (product, optional unit, qty in that unit) into base units, validating the unit. */
 async function toBaseQty(trx: Tx, productId: string, productUnitId: string | null, qtyInUnit: number, label: string) {
   const row = (await sql<any>`
-    SELECT p.product_id, p.name, p.base_unit, p.is_active, p.batch_tracked, p.serial_tracked, p.hsn_code,
+    SELECT p.product_id, p.name, p.base_unit, p.is_active, p.batch_tracked, p.serial_tracked, p.hsn_code, p.gst_rate_pct,
            pu.product_unit_id, COALESCE(pu.multiplier_to_base, 1) AS multiplier,
            u.allows_fraction, u.name AS unit_name, u.print_label
       FROM products p
@@ -360,7 +360,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
     // makes a partial delivery visible rather than closing the order on the first box.
     const lines = (await sql<any>`
       SELECT pol.*, p.name AS product_name, p.sku, p.base_unit, u.print_label AS base_unit_label,
-             COALESCE(htr.gst_rate_pct, 0) AS gst_rate_pct,
+             COALESCE(htr.gst_rate_pct, p.gst_rate_pct, 0) AS gst_rate_pct,
              COALESCE((SELECT SUM(gl.qty_base_unit) FROM grn_lines gl WHERE gl.po_line_id = pol.po_line_id), 0) AS received_qty
         FROM purchase_order_lines pol JOIN products p ON p.product_id = pol.product_id
         JOIN units u ON u.unit_code = p.base_unit
@@ -604,7 +604,7 @@ export default async function inventoryRoutes(app: FastifyInstance) {
       const taxable = round2(gross - discount);
       const gstRate = l.gst_rate_pct === undefined || l.gst_rate_pct === null || l.gst_rate_pct === ''
         ? Number((await sql<any>`SELECT gst_rate_pct FROM hsn_tax_rates WHERE hsn_code = ${product.hsn_code}
-                                   AND effective_to IS NULL LIMIT 1`.execute(trx)).rows[0]?.gst_rate_pct ?? 0)
+                                   AND effective_to IS NULL LIMIT 1`.execute(trx)).rows[0]?.gst_rate_pct ?? product.gst_rate_pct ?? 0)
         : num(l.gst_rate_pct, `GST rate for "${product.name}"`, { min: 0, max: 40 });
       let cgst = 0, sgst = 0, igst = 0;
       if (interstate) igst = round2(taxable * gstRate / 100);

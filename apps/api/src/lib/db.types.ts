@@ -453,7 +453,8 @@ export interface Products {
   category_id: string | null;
   created_at: Generated<Timestamp>;
   default_price_type: Generated<PriceType>;
-  hsn_code: string;
+  gst_rate_pct: Numeric | null;
+  hsn_code: string | null;
   image_url: string | null;
   is_active: Generated<boolean>;
   name: string;

@@ -11,8 +11,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import useSWR from 'swr';
 import {
-  apiPost, apiPut, businessToday, downloadCsv, fetcher, formatDate, formatDateTime, idempotencyKey,
-  inr, num, whatsappShareUrl,
+  apiGet, apiPost, apiPut, businessToday, downloadCsv, downloadFile, fetcher, formatDate, formatDateTime, idempotencyKey,
+  inr, num, printFile, whatsappShareUrl,
 } from '../../lib/api';
 import { useAuth } from '../../lib/AuthContext';
 import { useI18n } from '../../lib/i18n';
@@ -192,6 +192,7 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
   const [inner, setInner] = useState<'statement' | 'invoices' | 'receipts' | 'returns' | 'points'>('statement');
   const [payOpen, setPayOpen] = useState(false);
   const [creditOpen, setCreditOpen] = useState(false);
+  const [combinedOpen, setCombinedOpen] = useState(false);
   const { data: c, error, mutate } = useSWR<any>(id ? `/api/customers/${id}` : null, fetcher);
   useEffect(() => { setInner(can('view_customer_outstanding') ? 'statement' : 'invoices'); }, [id, can]);
 
@@ -231,6 +232,7 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
         {can('edit_customer') && <Button variant="ghost" onClick={() => void toggleActive()}>{c.is_active ? 'Mark inactive' : 'Re-activate'}</Button>}
         <span className="spacer" />
         {shareUrl && <Button onClick={() => window.open(shareUrl, '_blank', 'noopener')}><Icon name="whatsapp" size={14} /> WhatsApp</Button>}
+        {can('view_billing') && <Button onClick={() => setCombinedOpen(true)} title="One bill combining this customer's bills for a period"><Icon name="print" size={14} /> Combined bill</Button>}
         {can('set_credit_limit') && <Button onClick={() => setCreditOpen(true)}>Credit limit</Button>}
         {can('edit_customer') && <Button onClick={() => onEdit(c)}><Icon name="edit" size={14} /> Edit</Button>}
         {can('create_invoice') && c.is_active && (
@@ -321,8 +323,93 @@ function CustomerDetail({ id, onClose, onEdit, onChanged }: {
       )}
       {c && <ReceivePaymentModal open={payOpen} customer={c} onClose={() => setPayOpen(false)}
         onDone={() => { setPayOpen(false); void mutate(); onChanged(); }} />}
+      {c && <CombinedBillModal open={combinedOpen} customer={c} onClose={() => setCombinedOpen(false)} />}
       {c && <CreditModal open={creditOpen} customer={c} onClose={() => setCreditOpen(false)}
         onDone={() => { setCreditOpen(false); void mutate(); onChanged(); }} />}
+    </Modal>
+  );
+}
+
+// ── Combined (master) bill ───────────────────────────────────────────────────
+// All of a customer's GST bills (or non-GST bills) for a period on one page —
+// for a contractor who settles monthly. It summarises bills already issued; it
+// is not a new invoice and changes nothing.
+function CombinedBillModal({ open, customer, onClose }: { open: boolean; customer: any; onClose: () => void }) {
+  const toast = useToast();
+  const today = businessToday();
+  const [from, setFrom] = useState(`${today.slice(0, 7)}-01`);
+  const [to, setTo] = useState(today);
+  const [type, setType] = useState<'GST' | 'NON_GST'>('GST');
+  const [group, setGroup] = useState<'bill' | 'item'>('bill');
+  const [preview, setPreview] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const qs = `customer_id=${customer.customer_id}&type=${type}&from=${from}&to=${to}&group=${group}`;
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setPreview(null);
+    if (!from || !to || from > to) return;
+    apiGet<any>(`/api/billing/combined-bill?${qs}&format=json`).then((r) => { if (live) setPreview(r); }).catch((e) => { if (live) setPreview({ error: (e as Error).message }); });
+    return () => { live = false; };
+  }, [open, qs, from, to]);
+
+  async function run(kind: 'print' | 'thermal' | 'download') {
+    setBusy(true);
+    try {
+      if (kind === 'download') await downloadFile(`/api/billing/combined-bill?${qs}&format=pdf`, `Combined-bill-${from}-to-${to}.pdf`);
+      else await printFile(`/api/billing/combined-bill?${qs}&format=${kind === 'thermal' ? 'thermal' : 'pdf'}`);
+    } catch (err) { toast.error(err); } finally { setBusy(false); }
+  }
+
+  const empty = preview && !preview.error && preview.count === 0;
+  const blocked = !preview || preview.error || empty || preview.branches > 1;
+  return (
+    <Modal open={open} onClose={onClose} wide title={`Combined bill — ${customer.name}`}
+      footer={<>
+        <Button onClick={onClose}>Close</Button>
+        <span className="spacer" />
+        <Button busy={busy} disabled={blocked} onClick={() => void run('thermal')} title="58/80 mm roll printer">Thermal</Button>
+        <Button busy={busy} disabled={blocked} onClick={() => void run('download')}><Icon name="download" size={14} /> Download</Button>
+        <Button variant="primary" busy={busy} disabled={blocked} onClick={() => void run('print')}><Icon name="print" size={14} /> Print</Button>
+      </>}>
+      <div className="stack">
+        <div className="form-grid">
+          <Field label="From"><input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} /></Field>
+          <Field label="To"><input type="date" value={to} min={from} max={today} onChange={(e) => setTo(e.target.value)} /></Field>
+          <Field label="Bills to combine">
+            <select value={type} onChange={(e) => setType(e.target.value as any)}>
+              <option value="GST">GST bills</option><option value="NON_GST">Non-GST bills</option>
+            </select>
+          </Field>
+          <Field label="Show items">
+            <select value={group} onChange={(e) => setGroup(e.target.value as any)}>
+              <option value="bill">Bill by bill</option><option value="item">Same items added together</option>
+            </select>
+          </Field>
+        </div>
+        <div className="row tight">
+          {[['This month', `${today.slice(0, 7)}-01`, today],
+            ['Last month', (() => { const d = new Date(`${today.slice(0, 7)}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 10); })(),
+              (() => { const d = new Date(`${today.slice(0, 7)}-01T00:00:00Z`); d.setUTCDate(0); return d.toISOString().slice(0, 10); })()],
+          ].map(([label, f, t]) => <Button key={label} size="sm" variant="ghost" onClick={() => { setFrom(f); setTo(t); }}>{label}</Button>)}
+        </div>
+        {preview?.error && <Alert tone="critical">{preview.error}</Alert>}
+        {empty && <Alert tone="info">No {type === 'GST' ? 'GST' : 'non-GST'} bills for {customer.name} in this period.</Alert>}
+        {preview && preview.branches > 1 && <Alert tone="warning">These bills are from more than one branch. Pick one branch in the top bar to combine them.</Alert>}
+        {preview && !preview.error && preview.count > 0 && (
+          <>
+            <div className="row"><b style={{ flex: 1 }}>{preview.count} bill(s)</b><b className="num">{inr(preview.total, { decimals: true })}</b></div>
+            <DataTable rows={preview.invoices} rowKey={(r: any) => r.invoice_id}
+              columns={[
+                { key: 'n', header: 'Bill', nowrap: true, render: (r: any) => <span className="mono">{r.invoice_number}</span> },
+                { key: 'd', header: 'Date', nowrap: true, render: (r: any) => formatDate(r.date) },
+                { key: 'a', header: 'Amount', align: 'right', render: (r: any) => inr(r.total, { decimals: true }) },
+              ]} />
+            <span className="muted small">A summary of bills already issued: it gets no new number and changes nothing. Each original bill stays the tax document.</span>
+          </>
+        )}
+      </div>
     </Modal>
   );
 }

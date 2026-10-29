@@ -15,6 +15,9 @@ const withPWA = require('next-pwa')({
   // counter that would throw away a bill being typed. Sales queued offline upload
   // in place instead (the billing screen listens for 'online' and drains its queue).
   reloadOnOnline: false,
+  // Next 15 lists manifests that are only ever served on demand (never on disk at
+  // the URL the worker would precache), so precaching them 404s on every load.
+  buildExcludes: [/dynamic-css-manifest\.json$/, /middleware-manifest\.json$/, /app-build-manifest\.json$/],
   disable: process.env.NODE_ENV === 'development',
 });
 
@@ -38,6 +41,8 @@ module.exports = withPWA({
         { key: 'X-Content-Type-Options', value: 'nosniff' },
         { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
         { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+        // Lets the Google sign-in popup talk back to this page.
+        { key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' },
       ],
     }];
   },

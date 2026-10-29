@@ -9,6 +9,7 @@ export default function Document() {
         <link rel="apple-touch-icon" href="/icon-192.png" />
         <meta name="application-name" content="Bhawani One" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
         {/* Reads the saved theme before first paint, so a dark-mode user never sees
             a white flash while React hydrates. Light mode is the hard default: a
             visitor with no saved preference gets 'light' pinned explicitly rather

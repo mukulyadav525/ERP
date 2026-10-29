@@ -17,8 +17,9 @@ For owners, branch managers and the accountant. The counter guide covers billing
 
 ## Catalog
 
-* **Catalog → New product:** name, SKU, category, brand, HSN (its GST rate must be on file
-  under **GST rates**), whether prices include GST, the **base unit** (what stock is
+* **Catalog → New product:** name, SKU (optional — one is made if left blank), category,
+  brand, HSN (optional; when its rate is on file under **GST rates** that rate is used),
+  the **GST rate** (needed when there is no HSN or its rate is not on file), whether prices include GST, the **base unit** (what stock is
   counted and priced in) and the selling price per base unit.
 * **Sale units:** add the units the item is also sold in. Weights, lengths and volumes
   convert automatically — 100 G of a KG product is 0.1 KG. Pack units (BOX, BAG, TIN) need
@@ -55,6 +56,14 @@ For owners, branch managers and the accountant. The counter guide covers billing
 ## Customers and credit
 
 * **Credit limit** (Owner): a sale that would take a customer over it needs a manager PIN.
+* **Combined bill** (on the customer): all of a customer's GST bills — or non-GST bills —
+  for a period on one page, bill by bill or with the same items added together. Print it
+  A4 or thermal, or download it. It summarises bills already issued: it gets no new number
+  and changes nothing, and each original bill remains the tax document. Bills from two
+  branches are combined one branch at a time.
+* **Loyalty:** contractors (customer type *Business / contractor*) have their own earn rate
+  and point value under **Admin → Settings → Loyalty** (default 0.5 points per ₹100);
+  retail customers use the retail ones (default 1 point per ₹100).
 * **Statement:** opening balance, every bill, payment and return with a running balance,
   and the closing balance, for any period — CSV, or share the balance on WhatsApp.
 * **Receive payment** records a numbered receipt; a payment larger than what is owed is
@@ -98,7 +107,8 @@ expected and counted cash) and **Staff**.
 
 * **Settings:** chain-wide defaults, some overridable per branch — discount limit,
   negative stock, return window, refund policy, estimate stock holds, and the business
-  profile printed on every document.
+  profile printed on every document, and the **thermal printer paper width** (58 or 80 mm,
+  per branch) used by the *Thermal* receipt.
 * **Audit trail:** sign-ins, price and stock changes, discounts and overrides, payments,
   voids, refunds, user and settings changes — who, when and what changed.
 * **Compliance:** backup status. "Not configured" means no verified backup exists yet —

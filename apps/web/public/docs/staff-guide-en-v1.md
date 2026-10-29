@@ -60,7 +60,9 @@ Your role and branch are set by the owner.
 * **Finalise bill** gives the invoice number, takes the stock and records the payment.
   After this the bill cannot be edited — a mistake is corrected with a return or a void.
 * **Complete sale** does both in one step for a simple counter sale.
-* After the sale: **Print**, **Download PDF**, or **Share on WhatsApp** (opens WhatsApp
+* After the sale: **Thermal** (F8) for a roll receipt on a 58/80 mm thermal printer — print
+  it at *Actual size*, not *Fit to page* — **Print** (Ctrl + P) for the A4 bill,
+  **Download PDF**, or **Share on WhatsApp** (opens WhatsApp
   with the bill details for you to send; it does not send anything by itself and cannot
   attach the PDF).
 
@@ -109,10 +111,22 @@ difference before you close. **Cash drop** (cash taken to the safe) needs a mana
 
 ## Keyboard
 
+Everything can be done without the mouse. Press **?** (or F1) on any screen for the full list.
+
 | Keys | Does |
 |---|---|
 | Ctrl/Cmd + K | Search anything — bills, customers, products, receipts |
-| Ctrl/Cmd + N | New bill |
-| Ctrl/Cmd + S | Save and review the bill |
-| / | Back to the item search |
+| Alt + 1 … 9 | Open the 1st … 9th page in the menu (hover a menu item to see its number) |
+| F2 | New bill |
+| / | The search box on the page (on Billing: the item search) |
+| Alt + N | The page's main "New …" button |
+| [ ] | Previous / next tab; ← → also move along tabs |
 | ↑ ↓ Enter Esc | Move, choose, close in any list |
+| F3 / F4 | Billing: item search / customer |
+| ↑ ↓ in the cart | Same column, next / previous line; ↑ from an empty search goes into the cart |
+| Ctrl + Delete | Billing: remove the cart line you are on |
+| F6 | Billing: switch GST / non-GST |
+| F7 | Billing: payment amount |
+| F9 or Ctrl/Cmd + S | Save and review the bill |
+| F10 then Enter | Complete sale / Finalise |
+| F8 / Ctrl + P | After the sale: thermal receipt / A4 bill |
